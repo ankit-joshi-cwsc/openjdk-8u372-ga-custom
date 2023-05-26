@@ -262,18 +262,23 @@ AWT_ASSERT_APPKIT_THREAD;
 
 static JNF_CLASS_CACHE(sjc_AppEventHandler, "com/apple/eawt/_AppEventHandler");
 
-- (void)_handleOpenURLEvent:(NSAppleEventDescriptor *)openURLEvent withReplyEvent:(NSAppleEventDescriptor *)replyEvent {
-AWT_ASSERT_APPKIT_THREAD;
-    if (!fHandlesURLTypes) return;
-
-    NSString *url = [[openURLEvent paramDescriptorForKeyword:keyDirectObject] stringValue];
-
+- (void)_openURL:(NSString *)url
+{
     //fprintf(stderr,"jm_handleOpenURL\n");
     JNIEnv *env = [ThreadUtilities getJNIEnv];
     jstring jURL = JNFNSToJavaString(env, url);
     static JNF_STATIC_MEMBER_CACHE(jm_handleOpenURI, sjc_AppEventHandler, "handleOpenURI", "(Ljava/lang/String;)V");
     JNFCallStaticVoidMethod(env, jm_handleOpenURI, jURL); // AWT_THREADING Safe (event)
     (*env)->DeleteLocalRef(env, jURL);
+}
+
+- (void)_handleOpenURLEvent:(NSAppleEventDescriptor *)openURLEvent withReplyEvent:(NSAppleEventDescriptor *)replyEvent {
+AWT_ASSERT_APPKIT_THREAD;
+    if (!fHandlesURLTypes) return;
+
+    NSString *url = [[openURLEvent paramDescriptorForKeyword:keyDirectObject] stringValue];
+
+    [self _openURL:url];
 
     [replyEvent insertDescriptor:[NSAppleEventDescriptor nullDescriptor] atIndex:0];
 }

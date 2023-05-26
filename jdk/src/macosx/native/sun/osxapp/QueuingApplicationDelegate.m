@@ -107,17 +107,18 @@
     [super dealloc];
 }
 
+- (void)_openURL:(NSString *)url
+{
+}
 
 - (void)_handleOpenURLEvent:(NSAppleEventDescriptor *)openURLEvent withReplyEvent:(NSAppleEventDescriptor *)replyEvent
 {
-    // Make an explicit copy of the passed events as they may be invalidated by the time they're processed
-    NSAppleEventDescriptor *openURLEventCopy = [openURLEvent copy];
-    NSAppleEventDescriptor *replyEventCopy = [replyEvent copy];
+    // need to capture the url off the event here
+    // the event doesn't live long enough to queue it and be valid when executed
+    NSString *url = [[openURLEvent paramDescriptorForKeyword:keyDirectObject] stringValue];
 
     [self.queue addObject:[^(){
-        [self.realDelegate _handleOpenURLEvent:openURLEventCopy withReplyEvent:replyEventCopy];
-        [openURLEventCopy release];
-        [replyEventCopy release];
+        [self.realDelegate _openURL:url];
     } copy]];
 }
 
