@@ -135,7 +135,7 @@ public final class CGLGraphicsConfig extends CGraphicsConfig
 
         long cfginfo = 0;
         int textureSize = 0;
-        final String ids[] = new String[1];
+        final String ids[] = new String[] { "" };
         OGLRenderQueue rq = OGLRenderQueue.getInstance();
         rq.lock();
         try {
@@ -159,9 +159,6 @@ public final class CGLGraphicsConfig extends CGraphicsConfig
             }
         } finally {
             rq.unlock();
-        }
-        if (cfginfo == 0) {
-            return null;
         }
 
         int oglCaps = getOGLCapabilities(cfginfo);
