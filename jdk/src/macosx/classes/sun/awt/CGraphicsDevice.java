@@ -128,10 +128,6 @@ public final class CGraphicsDevice extends GraphicsDevice
         return nativeGetScreenInsets(displayID);
     }
 
-    public int getScaleFactor() {
-        return scale;
-    }
-
     public void invalidate(final int defaultDisplayID) {
         displayID = defaultDisplayID;
     }
@@ -247,6 +243,10 @@ public final class CGraphicsDevice extends GraphicsDevice
     @Override
     public DisplayMode[] getDisplayModes() {
         return nativeGetDisplayModes(displayID);
+    }
+
+	public int getScaleFactor() {
+        return (int) nativeGetScaleFactor(displayID);
     }
 
     private static native double nativeGetScaleFactor(int displayID);
