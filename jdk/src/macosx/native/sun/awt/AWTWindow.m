@@ -857,10 +857,7 @@ JNF_COCOA_ENTER(env);
 
     NSWindow *nsWindow = OBJC(windowPtr);
     [ThreadUtilities performOnMainThreadWaiting:NO block:^(){
-
-        AWTWindow *window = (AWTWindow*)[nsWindow delegate];
-
-        [window setIgnoresMouseEvents:ignoreMouseEvents];
+        [nsWindow setIgnoresMouseEvents:ignoreMouseEvents];
     }];
 
 JNF_COCOA_EXIT(env);
