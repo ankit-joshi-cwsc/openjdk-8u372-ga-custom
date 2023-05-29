@@ -36,6 +36,9 @@ import java.awt.image.BufferedImage;
 import java.awt.peer.TrayIconPeer;
 import java.beans.PropertyChangeEvent;
 import java.beans.PropertyChangeListener;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class CTrayIcon extends CFRetainedResource implements TrayIconPeer {
     private TrayIcon target;
@@ -282,6 +285,20 @@ public class CTrayIcon extends CFRetainedResource implements TrayIconPeer {
 
         // finally, show the dialog to user
         showMessageDialog();
+
+        final ScheduledExecutorService scheduledExecutor = Executors.newScheduledThreadPool(1);
+        scheduledExecutor.scheduleWithFixedDelay(new Runnable() {
+            public void run() {
+                SwingUtilities.invokeLater(new Runnable() {
+                    public void run() {
+                        if (messageDialog == null || !messageDialog.isActive()) {
+                            disposeMessageDialog();
+                            scheduledExecutor.shutdown();
+                        }
+                    }
+                });
+            }
+        }, 10, 10, TimeUnit.SECONDS);
     }
 
     /**
@@ -342,7 +359,7 @@ public class CTrayIcon extends CFRetainedResource implements TrayIconPeer {
         dialog.setDefaultCloseOperation(JDialog.DO_NOTHING_ON_CLOSE);
         dialog.setModal(false);
         dialog.setModalExclusionType(Dialog.ModalExclusionType.TOOLKIT_EXCLUDE);
-        dialog.setAlwaysOnTop(true);
+        //dialog.setAlwaysOnTop(true);
         dialog.setAutoRequestFocus(false);
         dialog.setResizable(false);
         dialog.setContentPane(op);
