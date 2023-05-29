@@ -329,13 +329,45 @@ Java_sun_lwawt_macosx_CRobot_keyEvent
 
 /*
  * Class:     sun_lwawt_macosx_CRobot
+ * Method:    shouldUseOptimizedScreenCaptureMethod
+ * Signature: ()Z
+ */
+JNIEXPORT jboolean JNICALL
+Java_sun_lwawt_macosx_CRobot_shouldUseOptimizedScreenCaptureMethod
+(JNIEnv *env, jobject peer)
+{
+    jboolean useOptimizedScreenCaptureMethod = true;
+
+    CFArrayRef dictionariesOfWindowInfo = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+    CFStringRef blankMonitorWindowGenericTitle = CFSTR("BlankMonitorWindow");
+    CFStringRef windowTitleKeyName = CFSTR("kCGWindowName");
+    CFTypeRef currentWindowTitle;
+
+    int counter;
+    for (counter = 0; counter < CFArrayGetCount(dictionariesOfWindowInfo); counter++) {
+        if (CFDictionaryGetValueIfPresent(CFArrayGetValueAtIndex(dictionariesOfWindowInfo, counter), windowTitleKeyName, &currentWindowTitle) &&
+        CFStringFindWithOptions((CFStringRef)currentWindowTitle, blankMonitorWindowGenericTitle, CFRangeMake(0, CFStringGetLength((CFStringRef)currentWindowTitle)), kCFCompareCaseInsensitive, NULL)) {
+            useOptimizedScreenCaptureMethod = false;
+            break;
+        }
+    }
+
+    CFRelease(dictionariesOfWindowInfo);
+    CFRelease(blankMonitorWindowGenericTitle);
+    CFRelease(windowTitleKeyName);
+
+    return useOptimizedScreenCaptureMethod;
+}
+
+/*
+ * Class:     sun_lwawt_macosx_CRobot
  * Method:    nativeGetScreenPixels
- * Signature: (IIIII[I)V
+ * Signature: (IIIII[IZ)V
  */
 JNIEXPORT void JNICALL
 Java_sun_lwawt_macosx_CRobot_nativeGetScreenPixels
 (JNIEnv *env, jobject peer,
- jint x, jint y, jint width, jint height, jintArray pixels)
+ jint x, jint y, jint width, jint height, jintArray pixels, jboolean useOptimizedScreenCaptureMethod)
 {
     JNF_COCOA_ENTER(env);
 
@@ -354,7 +386,7 @@ Java_sun_lwawt_macosx_CRobot_nativeGetScreenPixels
     CGGetDisplaysWithRect(screenRect, activeDisplayCount, matchingDisplayIDs, &matchingDisplayCount);
 
     CGImageRef screenPixelsImage = NULL;
-    if(matchingDisplayCount > 1) {
+    if(matchingDisplayCount > 1 || !useOptimizedScreenCaptureMethod) {
         // use old method; not going to bother trying to combine a bunch of CGImageRefs, and the rect should hardly ever span multiple displays anyway
         screenPixelsImage = CGWindowListCreateImage(screenRect,
                                         kCGWindowListOptionOnScreenOnly,
