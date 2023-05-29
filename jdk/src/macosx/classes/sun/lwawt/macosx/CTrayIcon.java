@@ -342,7 +342,7 @@ public class CTrayIcon extends CFRetainedResource implements TrayIconPeer {
         dialog.setDefaultCloseOperation(JDialog.DO_NOTHING_ON_CLOSE);
         dialog.setModal(false);
         dialog.setModalExclusionType(Dialog.ModalExclusionType.TOOLKIT_EXCLUDE);
-        dialog.setAlwaysOnTop(true);
+        //dialog.setAlwaysOnTop(true);
         dialog.setAutoRequestFocus(false);
         dialog.setResizable(false);
         dialog.setContentPane(op);
