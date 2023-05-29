@@ -218,7 +218,9 @@ Java_sun_lwawt_macosx_CRobot_mouseEvent
     if (buttonsState & java_awt_event_InputEvent_BUTTON1_MASK ||
         buttonsState & java_awt_event_InputEvent_BUTTON1_DOWN_MASK ) {
 
-        leftButtonDown = TRUE;
+        if (isButtonsDownState) {
+            leftButtonDown = TRUE;
+        }
         HandleRobotButton(kCGMouseButtonLeft, kCGEventLeftMouseUp,
                           kCGEventLeftMouseDown, kCGEventLeftMouseDragged);
     }
@@ -227,7 +229,9 @@ Java_sun_lwawt_macosx_CRobot_mouseEvent
     if (buttonsState & java_awt_event_InputEvent_BUTTON2_MASK ||
         buttonsState & java_awt_event_InputEvent_BUTTON2_DOWN_MASK ) {
 
-        centerButtonDown = TRUE;
+        if (isButtonsDownState) {
+            centerButtonDown = TRUE;
+        }
         HandleRobotButton(kCGMouseButtonCenter, kCGEventOtherMouseUp,
                           kCGEventOtherMouseDown, kCGEventOtherMouseDragged);
     }
@@ -236,7 +240,9 @@ Java_sun_lwawt_macosx_CRobot_mouseEvent
     if (buttonsState & java_awt_event_InputEvent_BUTTON3_MASK ||
         buttonsState & java_awt_event_InputEvent_BUTTON3_DOWN_MASK ) {
 
-        rightButtonDown = TRUE;
+        if (isButtonsDownState) {
+            rightButtonDown = TRUE;
+        }
         HandleRobotButton(kCGMouseButtonRight, kCGEventRightMouseUp,
                           kCGEventRightMouseDown, kCGEventRightMouseDragged);
     }
@@ -274,6 +280,7 @@ Java_sun_lwawt_macosx_CRobot_mouseEvent
     else
         PostMouseEvent(point, button, type, clickCount, eventNumber);
 
+    CFRelease(sessionInfoDictionary);
     JNF_COCOA_EXIT(env);
 }
 
