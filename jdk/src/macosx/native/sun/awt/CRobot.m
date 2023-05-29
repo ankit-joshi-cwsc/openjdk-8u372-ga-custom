@@ -345,9 +345,26 @@ Java_sun_lwawt_macosx_CRobot_nativeGetScreenPixels
     jint picHeight = height;
 
     CGRect screenRect = CGRectMake(picX, picY, picWidth, picHeight);
-    CGImageRef screenPixelsImage = CGWindowListCreateImage(screenRect,
+
+    uint32_t activeDisplayCount;
+    CGGetActiveDisplayList(64, NULL, &activeDisplayCount); // 64 to match CGraphicsEnv.m (MAX_DISPLAYS)
+
+    CGDirectDisplayID matchingDisplayIDs[activeDisplayCount];
+    uint32_t matchingDisplayCount;
+    CGGetDisplaysWithRect(screenRect, activeDisplayCount, matchingDisplayIDs, &matchingDisplayCount);
+
+    CGImageRef screenPixelsImage = NULL;
+    if(matchingDisplayCount > 1) {
+        // use old method; not going to bother trying to combine a bunch of CGImageRefs, and the rect should hardly ever span multiple displays anyway
+        screenPixelsImage = CGWindowListCreateImage(screenRect,
                                         kCGWindowListOptionOnScreenOnly,
                                         kCGNullWindowID, kCGWindowImageDefault);
+    } else if(matchingDisplayCount > 0) {
+        // this seems to fix problems with intermittent major lag/freezing
+        CGDirectDisplayID displayID = matchingDisplayIDs[0];
+        CGRect displayBounds = CGDisplayBounds(displayID);
+        screenPixelsImage = CGDisplayCreateImageForRect(displayID, CGRectOffset(screenRect, -CGRectGetMinX(displayBounds), -CGRectGetMinY(displayBounds)));
+    }
 
     if (screenPixelsImage == NULL) {
         return;
