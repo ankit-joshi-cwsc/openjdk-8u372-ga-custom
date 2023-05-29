@@ -245,7 +245,7 @@ public final class CGraphicsDevice extends GraphicsDevice
         return nativeGetDisplayModes(displayID);
     }
 
-	public int getScaleFactor() {
+    public int getScaleFactor() {
         return (int) nativeGetScaleFactor(displayID);
     }
 
