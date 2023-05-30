@@ -42,6 +42,9 @@ class CRobot implements RobotPeer {
     // in order to generate dragged events ourselves.
     private int mouseButtonsState = 0;
 
+    private long lastCheckMadeForUseOfOptimizedScreenCaptureMethod;
+    private boolean useOptimizedScreenCaptureMethod;
+
     /**
      * Uses the given GraphicsDevice as the coordinate system for subsequent
      * coordinate calls.
@@ -198,7 +201,12 @@ class CRobot implements RobotPeer {
                                    boolean isMouseMove);
     private native void keyEvent(int javaKeyCode, boolean keydown);
     private void getScreenPixels(Rectangle r, int[] pixels){
-        nativeGetScreenPixels(r.x, r.y, r.width, r.height, pixels);
+        if (System.currentTimeMillis() - this.lastCheckMadeForUseOfOptimizedScreenCaptureMethod > 1000) {
+            this.useOptimizedScreenCaptureMethod = this.shouldUseOptimizedScreenCaptureMethod();
+            this.lastCheckMadeForUseOfOptimizedScreenCaptureMethod = System.currentTimeMillis();
+        }
+        nativeGetScreenPixels(r.x, r.y, r.width, r.height, pixels, this.useOptimizedScreenCaptureMethod);
     }
-    private native void nativeGetScreenPixels(int x, int y, int width, int height, int[] pixels);
+    private native boolean shouldUseOptimizedScreenCaptureMethod();
+    private native void nativeGetScreenPixels(int x, int y, int width, int height, int[] pixels, boolean useOptimizedScreenCaptureMethod);
 }

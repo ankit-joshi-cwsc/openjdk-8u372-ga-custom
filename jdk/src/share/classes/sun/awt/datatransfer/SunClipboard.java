@@ -137,9 +137,6 @@ public abstract class SunClipboard extends Clipboard
     }
 
     public synchronized Transferable getContents(Object requestor) {
-        if (contents != null) {
-            return contents;
-        }
         return new ClipboardTransferable(this);
     }
 

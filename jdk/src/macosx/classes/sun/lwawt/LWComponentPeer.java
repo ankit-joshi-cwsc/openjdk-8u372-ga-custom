@@ -469,7 +469,7 @@ public abstract class LWComponentPeer<T extends Component, D extends JComponent>
         sg2d.constrain(size.x, size.y, size.width, size.height, getVisibleRegion());
     }
 
-    Region getVisibleRegion() {
+    public Region getVisibleRegion() {
         return computeVisibleRect(this, getRegion());
     }
 

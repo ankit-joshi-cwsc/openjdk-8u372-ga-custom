@@ -181,6 +181,7 @@ static jobjectArray CreateJavaFilenameArray(JNIEnv *env, NSArray *filenameArray)
 
         // Release local String reference:
         (*env)->DeleteLocalRef(env, string);
+        [stringVal release];
     }
 
     return jfilenameArray;

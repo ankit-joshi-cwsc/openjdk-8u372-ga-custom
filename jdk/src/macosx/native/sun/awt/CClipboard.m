@@ -315,7 +315,7 @@ JNF_COCOA_ENTER(env);
         }
     }
 
-    (*env)->ReleaseLongArrayElements(env, returnValue, saveFormats, JNI_COMMIT);
+    (*env)->ReleaseLongArrayElements(env, returnValue, saveFormats, 0);
 JNF_COCOA_EXIT(env);
     return returnValue;
 }

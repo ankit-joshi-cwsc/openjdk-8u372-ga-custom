@@ -1065,6 +1065,24 @@ JNF_COCOA_EXIT(env);
 
 /*
  * Class:     sun_lwawt_macosx_CPlatformWindow
+ * Method:    nativeSetNSWindowIgnoresMouseEvents
+ * Signature: (JZ)V
+*/
+JNIEXPORT void JNICALL Java_sun_lwawt_macosx_CPlatformWindow_nativeSetNSWindowIgnoresMouseEvents
+(JNIEnv *env, jclass clazz, jlong windowPtr, jboolean ignoreMouseEvents)
+{
+JNF_COCOA_ENTER(env);
+
+    NSWindow *nsWindow = OBJC(windowPtr);
+    [ThreadUtilities performOnMainThreadWaiting:NO block:^(){
+        [nsWindow setIgnoresMouseEvents:ignoreMouseEvents];
+    }];
+
+JNF_COCOA_EXIT(env);
+}
+
+/*
+ * Class:     sun_lwawt_macosx_CPlatformWindow
  * Method:    nativeSetNSWindowMenuBar
  * Signature: (JJ)V
  */

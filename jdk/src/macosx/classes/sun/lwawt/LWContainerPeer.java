@@ -133,7 +133,7 @@ abstract class LWContainerPeer<T extends Container, D extends JComponent>
     }
 
     @Override
-    final Region getVisibleRegion() {
+    public final Region getVisibleRegion() {
         return cutChildren(super.getVisibleRegion(), null);
     }
 

@@ -161,6 +161,8 @@ Java_sun_lwawt_macosx_CRobot_mouseEvent
     __block CGMouseButton button = kCGMouseButtonLeft;
     __block CGEventType type = kCGEventMouseMoved;
 
+    boolean_t leftButtonDown = FALSE, rightButtonDown = FALSE, centerButtonDown = FALSE;
+
     void (^HandleRobotButton)(CGMouseButton, CGEventType, CGEventType, CGEventType) =
         ^(CGMouseButton cgButton, CGEventType cgButtonUp, CGEventType cgButtonDown,
           CGEventType cgButtonDragged) {
@@ -181,6 +183,9 @@ Java_sun_lwawt_macosx_CRobot_mouseEvent
     if (buttonsState & java_awt_event_InputEvent_BUTTON1_MASK ||
         buttonsState & java_awt_event_InputEvent_BUTTON1_DOWN_MASK ) {
 
+        if (isButtonsDownState) {
+            leftButtonDown = TRUE;
+        }
         HandleRobotButton(kCGMouseButtonLeft, kCGEventLeftMouseUp,
                           kCGEventLeftMouseDown, kCGEventLeftMouseDragged);
     }
@@ -189,6 +194,9 @@ Java_sun_lwawt_macosx_CRobot_mouseEvent
     if (buttonsState & java_awt_event_InputEvent_BUTTON2_MASK ||
         buttonsState & java_awt_event_InputEvent_BUTTON2_DOWN_MASK ) {
 
+        if (isButtonsDownState) {
+            centerButtonDown = TRUE;
+        }
         HandleRobotButton(kCGMouseButtonCenter, kCGEventOtherMouseUp,
                           kCGEventOtherMouseDown, kCGEventOtherMouseDragged);
     }
@@ -197,6 +205,9 @@ Java_sun_lwawt_macosx_CRobot_mouseEvent
     if (buttonsState & java_awt_event_InputEvent_BUTTON3_MASK ||
         buttonsState & java_awt_event_InputEvent_BUTTON3_DOWN_MASK ) {
 
+        if (isButtonsDownState) {
+            rightButtonDown = TRUE;
+        }
         HandleRobotButton(kCGMouseButtonRight, kCGEventRightMouseUp,
                           kCGEventRightMouseDown, kCGEventRightMouseDragged);
     }
@@ -227,8 +238,14 @@ Java_sun_lwawt_macosx_CRobot_mouseEvent
         eventNumber = gsButtonEventNumber[button];
     }
 
-    PostMouseEvent(point, button, type, clickCount, eventNumber);
+    // HACK use deprecated CGPostMouseEvent at login window because CGEventCreateMouseEvent/CGEventPost doesn't work
+    CFDictionaryRef sessionInfoDictionary = CGSessionCopyCurrentDictionary();
+    if (sessionInfoDictionary != NULL && CFDictionaryGetValue(sessionInfoDictionary, kCGSessionLoginDoneKey) == kCFBooleanFalse)
+        CGPostMouseEvent(point, TRUE, 3, leftButtonDown, rightButtonDown, centerButtonDown); // Ignore extra buttons because can't make array into varargs
+    else
+        PostMouseEvent(point, button, type, clickCount, eventNumber);
 
+    CFRelease(sessionInfoDictionary);
     JNF_COCOA_EXIT(env);
 }
 
@@ -287,13 +304,49 @@ Java_sun_lwawt_macosx_CRobot_keyEvent
 
 /*
  * Class:     sun_lwawt_macosx_CRobot
+ * Method:    shouldUseOptimizedScreenCaptureMethod
+ * Signature: ()Z
+ */
+JNIEXPORT jboolean JNICALL
+Java_sun_lwawt_macosx_CRobot_shouldUseOptimizedScreenCaptureMethod
+(JNIEnv *env, jobject peer)
+{
+    jboolean useOptimizedScreenCaptureMethod = true;
+
+    JNF_COCOA_ENTER(env);
+
+    CFArrayRef dictionariesOfWindowInfo = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+    CFStringRef blankMonitorWindowGenericTitle = CFSTR("BlankMonitorWindow");
+    CFStringRef windowTitleKeyName = CFSTR("kCGWindowName");
+    CFTypeRef currentWindowTitle;
+
+    int counter;
+    for (counter = 0; counter < CFArrayGetCount(dictionariesOfWindowInfo); counter++) {
+        if (CFDictionaryGetValueIfPresent(CFArrayGetValueAtIndex(dictionariesOfWindowInfo, counter), windowTitleKeyName, &currentWindowTitle) &&
+        CFStringFindWithOptions((CFStringRef)currentWindowTitle, blankMonitorWindowGenericTitle, CFRangeMake(0, CFStringGetLength((CFStringRef)currentWindowTitle)), kCFCompareCaseInsensitive, NULL)) {
+            useOptimizedScreenCaptureMethod = false;
+            break;
+        }
+    }
+
+    CFRelease(dictionariesOfWindowInfo);
+    CFRelease(blankMonitorWindowGenericTitle);
+    CFRelease(windowTitleKeyName);
+
+    JNF_COCOA_EXIT(env);
+
+    return useOptimizedScreenCaptureMethod;
+}
+
+/*
+ * Class:     sun_lwawt_macosx_CRobot
  * Method:    nativeGetScreenPixels
- * Signature: (IIIII[I)V
+ * Signature: (IIIII[IZ)V
  */
 JNIEXPORT void JNICALL
 Java_sun_lwawt_macosx_CRobot_nativeGetScreenPixels
 (JNIEnv *env, jobject peer,
- jint x, jint y, jint width, jint height, jintArray pixels)
+ jint x, jint y, jint width, jint height, jintArray pixels, jboolean useOptimizedScreenCaptureMethod)
 {
     JNF_COCOA_ENTER(env);
 
@@ -303,9 +356,26 @@ Java_sun_lwawt_macosx_CRobot_nativeGetScreenPixels
     jint picHeight = height;
 
     CGRect screenRect = CGRectMake(picX, picY, picWidth, picHeight);
-    CGImageRef screenPixelsImage = CGWindowListCreateImage(screenRect,
+
+    uint32_t activeDisplayCount;
+    CGGetActiveDisplayList(64, NULL, &activeDisplayCount); // 64 to match CGraphicsEnv.m (MAX_DISPLAYS)
+
+    CGDirectDisplayID matchingDisplayIDs[activeDisplayCount];
+    uint32_t matchingDisplayCount;
+    CGGetDisplaysWithRect(screenRect, activeDisplayCount, matchingDisplayIDs, &matchingDisplayCount);
+
+    CGImageRef screenPixelsImage = NULL;
+    if(matchingDisplayCount > 1 || !useOptimizedScreenCaptureMethod) {
+        // use old method; not going to bother trying to combine a bunch of CGImageRefs, and the rect should hardly ever span multiple displays anyway
+        screenPixelsImage = CGWindowListCreateImage(screenRect,
                                         kCGWindowListOptionOnScreenOnly,
                                         kCGNullWindowID, kCGWindowImageDefault);
+    } else if(matchingDisplayCount > 0) {
+        // this seems to fix problems with intermittent major lag/freezing
+        CGDirectDisplayID displayID = matchingDisplayIDs[0];
+        CGRect displayBounds = CGDisplayBounds(displayID);
+        screenPixelsImage = CGDisplayCreateImageForRect(displayID, CGRectOffset(screenRect, -CGRectGetMinX(displayBounds), -CGRectGetMinY(displayBounds)));
+    }
 
     if (screenPixelsImage == NULL) {
         return;
@@ -316,8 +386,7 @@ Java_sun_lwawt_macosx_CRobot_nativeGetScreenPixels
     CHECK_NULL(jPixelData);
 
     // create a graphics context around the Java int array
-    CGColorSpaceRef picColorSpace = CGColorSpaceCreateWithName(
-                                            kCGColorSpaceGenericRGB);
+    CGColorSpaceRef picColorSpace = CGImageGetColorSpace(screenPixelsImage);
     CGContextRef jPicContextRef = CGBitmapContextCreate(
                                             jPixelData,
                                             picWidth, picHeight,
@@ -325,8 +394,6 @@ Java_sun_lwawt_macosx_CRobot_nativeGetScreenPixels
                                             picColorSpace,
                                             kCGBitmapByteOrder32Host |
                                             kCGImageAlphaPremultipliedFirst);
-
-    CGColorSpaceRelease(picColorSpace);
 
     // flip, scale, and color correct the screen image into the Java pixels
     CGRect bounds = { { 0, 0 }, { picWidth, picHeight } };
