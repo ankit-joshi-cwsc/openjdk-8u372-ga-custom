@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2007, 2022, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * This library is free software; you can redistribute it and/or
@@ -34,7 +34,7 @@
  *   Dr Vipul Gupta <vipul.gupta@sun.com> and
  *   Douglas Stebila <douglas@stebila.ca>, Sun Microsystems Laboratories
  *
- * Last Modified Date from the Original Code: April 2015
+ * Last Modified Date from the Original Code: May 2017
  *********************************************************************** */
 
 #include "mplogic.h"
@@ -87,7 +87,7 @@ ec_point_at_infinity(SECItem *pointP)
  */
 SECStatus
 ec_points_mul(const ECParams *params, const mp_int *k1, const mp_int *k2,
-             const SECItem *pointP, SECItem *pointQ, int kmflag)
+             const SECItem *pointP, SECItem *pointQ, int kmflag, int timing)
 {
     mp_int Px, Py, Qx, Qy;
     mp_int Gx, Gy, order, irreducible, a, b;
@@ -199,9 +199,9 @@ ec_points_mul(const ECParams *params, const mp_int *k1, const mp_int *k2,
                 goto cleanup;
 
         if ((k2 != NULL) && (pointP != NULL)) {
-                CHECK_MPI_OK( ECPoints_mul(group, k1, k2, &Px, &Py, &Qx, &Qy) );
+                CHECK_MPI_OK( ECPoints_mul(group, k1, k2, &Px, &Py, &Qx, &Qy, timing) );
         } else {
-                CHECK_MPI_OK( ECPoints_mul(group, k1, NULL, NULL, NULL, &Qx, &Qy) );
+                CHECK_MPI_OK( ECPoints_mul(group, k1, NULL, NULL, NULL, &Qx, &Qy, timing) );
     }
 
     /* Construct the SECItem representation of point Q */
@@ -332,7 +332,8 @@ ec_NewKey(ECParams *ecParams, ECPrivateKey **privKey,
     CHECK_MPI_OK( mp_read_unsigned_octets(&k, key->privateValue.data,
         (mp_size) len) );
 
-    rv = ec_points_mul(ecParams, &k, NULL, NULL, &(key->publicValue), kmflag);
+    /* key generation does not support timing mitigation */
+    rv = ec_points_mul(ecParams, &k, NULL, NULL, &(key->publicValue), kmflag, /*timing*/ 0);
     if (rv != SECSuccess) goto cleanup;
     *privKey = key;
 
@@ -609,7 +610,8 @@ ECDH_Derive(SECItem  *publicValue,
     }
 
     /* Multiply our private key and peer's public point */
-    if ((ec_points_mul(ecParams, NULL, &k, publicValue, &pointQ, kmflag) != SECSuccess) ||
+    /* ECDH doesn't support timing mitigation */
+    if ((ec_points_mul(ecParams, NULL, &k, publicValue, &pointQ, kmflag, /*timing*/ 0) != SECSuccess) ||
         ec_point_at_infinity(&pointQ))
         goto cleanup;
 
@@ -644,7 +646,8 @@ cleanup:
  */
 SECStatus
 ECDSA_SignDigestWithSeed(ECPrivateKey *key, SECItem *signature,
-    const SECItem *digest, const unsigned char *kb, const int kblen, int kmflag)
+    const SECItem *digest, const unsigned char *kb, const int kblen, int kmflag,
+    int timing)
 {
     SECStatus rv = SECFailure;
     mp_int x1;
@@ -656,6 +659,7 @@ ECDSA_SignDigestWithSeed(ECPrivateKey *key, SECItem *signature,
     SECItem kGpoint = { siBuffer, NULL, 0};
     int flen = 0;    /* length in bytes of the field size */
     unsigned olen;   /* length in bytes of the base point order */
+    unsigned int orderBitSize;
 
 #if EC_DEBUG
     char mpstr[256];
@@ -721,7 +725,7 @@ ECDSA_SignDigestWithSeed(ECPrivateKey *key, SECItem *signature,
     kGpoint.len = 2*flen + 1;
     kGpoint.data = PORT_Alloc(2*flen + 1, kmflag);
     if ((kGpoint.data == NULL) ||
-        (ec_points_mul(ecParams, &k, NULL, NULL, &kGpoint, kmflag)
+        (ec_points_mul(ecParams, &k, NULL, NULL, &kGpoint, kmflag, timing)
             != SECSuccess))
         goto cleanup;
 
@@ -758,10 +762,11 @@ ECDSA_SignDigestWithSeed(ECPrivateKey *key, SECItem *signature,
     SECITEM_TO_MPINT(*digest, &s);        /* s = HASH(M)     */
 
     /* In the definition of EC signing, digests are truncated
-     * to the length of n in bits.
+     * to the order length
      * (see SEC 1 "Elliptic Curve Digit Signature Algorithm" section 4.1.*/
-    if (digest->len*8 > (unsigned int)ecParams->fieldID.size) {
-        mpl_rsh(&s,&s,digest->len*8 - ecParams->fieldID.size);
+    orderBitSize = mpl_significant_bits(&n);
+    if (digest->len*8 > orderBitSize) {
+        mpl_rsh(&s,&s,digest->len*8 - orderBitSize);
     }
 
 #if EC_DEBUG
@@ -843,7 +848,7 @@ cleanup:
 */
 SECStatus
 ECDSA_SignDigest(ECPrivateKey *key, SECItem *signature, const SECItem *digest,
-    const unsigned char* random, int randomLen, int kmflag)
+    const unsigned char* random, int randomLen, int kmflag, int timing)
 {
     SECStatus rv = SECFailure;
     int len;
@@ -861,7 +866,7 @@ ECDSA_SignDigest(ECPrivateKey *key, SECItem *signature, const SECItem *digest,
     if (kBytes == NULL) goto cleanup;
 
     /* Generate ECDSA signature with the specified k value */
-    rv = ECDSA_SignDigestWithSeed(key, signature, digest, kBytes, len, kmflag);
+    rv = ECDSA_SignDigestWithSeed(key, signature, digest, kBytes, len, kmflag, timing);
 
 cleanup:
     if (kBytes) {
@@ -894,6 +899,7 @@ ECDSA_VerifyDigest(ECPublicKey *key, const SECItem *signature,
     int slen;       /* length in bytes of a half signature (r or s) */
     int flen;       /* length in bytes of the field size */
     unsigned olen;  /* length in bytes of the base point order */
+    unsigned int orderBitSize;
 
 #if EC_DEBUG
     char mpstr[256];
@@ -918,6 +924,12 @@ ECDSA_VerifyDigest(ECPublicKey *key, const SECItem *signature,
     }
 
     ecParams = &(key->ecParams);
+
+    if (EC_ValidatePublicKey(ecParams, &key->publicValue, kmflag) != SECSuccess) {
+        PORT_SetError(SEC_ERROR_BAD_KEY);
+        goto cleanup;
+    }
+
     flen = (ecParams->fieldID.size + 7) >> 3;
     olen = ecParams->order.len;
     if (signature->len == 0 || signature->len%2 != 0 ||
@@ -973,11 +985,12 @@ ECDSA_VerifyDigest(ECPublicKey *key, const SECItem *signature,
     SECITEM_TO_MPINT(*digest, &u1);                  /* u1 = HASH(M)     */
 
     /* In the definition of EC signing, digests are truncated
-     * to the length of n in bits.
+     * to the order length, in bits.
      * (see SEC 1 "Elliptic Curve Digit Signature Algorithm" section 4.1.*/
     /* u1 = HASH(M')     */
-    if (digest->len*8 > (unsigned int)ecParams->fieldID.size) {
-        mpl_rsh(&u1,&u1,digest->len*8- ecParams->fieldID.size);
+    orderBitSize = mpl_significant_bits(&n);
+    if (digest->len*8 > orderBitSize) {
+        mpl_rsh(&u1,&u1,digest->len*8- orderBitSize);
     }
 
 #if EC_DEBUG
@@ -1007,7 +1020,8 @@ ECDSA_VerifyDigest(ECPublicKey *key, const SECItem *signature,
     ** Here, A = u1.G     B = u2.Q    and   C = A + B
     ** If the result, C, is the point at infinity, reject the signature
     */
-    if (ec_points_mul(ecParams, &u1, &u2, &key->publicValue, &pointC, kmflag)
+    /* verification does not support timing mitigation */
+    if (ec_points_mul(ecParams, &u1, &u2, &key->publicValue, &pointC, kmflag, /*timing*/ 0)
         != SECSuccess) {
         rv = SECFailure;
         goto cleanup;

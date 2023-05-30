@@ -406,6 +406,8 @@ void VM_Version::get_processor_features() {
   _stepping = 0;
   _cpuFeatures = 0;
   _logical_processors_per_package = 1;
+  // i486 internal cache is both I&D and has a 16-byte line size
+  _L1_data_cache_line_size = 16;
 
   if (!Use486InstrsOnly) {
     // Get raw processor info
@@ -424,6 +426,7 @@ void VM_Version::get_processor_features() {
       // Logical processors are only available on P4s and above,
       // and only if hyperthreading is available.
       _logical_processors_per_package = logical_processor_count();
+      _L1_data_cache_line_size = L1_line_size();
     }
   }
 
@@ -550,12 +553,36 @@ void VM_Version::get_processor_features() {
   // Use AES instructions if available.
   if (supports_aes()) {
     if (FLAG_IS_DEFAULT(UseAES)) {
-      UseAES = true;
+      FLAG_SET_DEFAULT(UseAES, true);
     }
-  } else if (UseAES) {
-    if (!FLAG_IS_DEFAULT(UseAES))
+    if (!UseAES) {
+      if (UseAESIntrinsics && !FLAG_IS_DEFAULT(UseAESIntrinsics)) {
+        warning("AES intrinsics require UseAES flag to be enabled. Intrinsics will be disabled.");
+      }
+      FLAG_SET_DEFAULT(UseAESIntrinsics, false);
+    } else {
+      if (UseSSE > 2) {
+        if (FLAG_IS_DEFAULT(UseAESIntrinsics)) {
+          FLAG_SET_DEFAULT(UseAESIntrinsics, true);
+        }
+      } else {
+        // The AES intrinsic stubs require AES instruction support (of course)
+        // but also require sse3 mode or higher for instructions it use.
+        if (UseAESIntrinsics && !FLAG_IS_DEFAULT(UseAESIntrinsics)) {
+          warning("X86 AES intrinsics require SSE3 instructions or higher. Intrinsics will be disabled.");
+        }
+        FLAG_SET_DEFAULT(UseAESIntrinsics, false);
+      }
+    }
+  } else if (UseAES || UseAESIntrinsics) {
+    if (UseAES && !FLAG_IS_DEFAULT(UseAES)) {
       warning("AES instructions are not available on this CPU");
-    FLAG_SET_DEFAULT(UseAES, false);
+      FLAG_SET_DEFAULT(UseAES, false);
+    }
+    if (UseAESIntrinsics && !FLAG_IS_DEFAULT(UseAESIntrinsics)) {
+      warning("AES intrinsics are not available on this CPU");
+      FLAG_SET_DEFAULT(UseAESIntrinsics, false);
+    }
   }
 
   // Use CLMUL instructions if available.
@@ -579,16 +606,15 @@ void VM_Version::get_processor_features() {
     FLAG_SET_DEFAULT(UseCRC32Intrinsics, false);
   }
 
-  // The AES intrinsic stubs require AES instruction support (of course)
-  // but also require sse3 mode for instructions it use.
-  if (UseAES && (UseSSE > 2)) {
-    if (FLAG_IS_DEFAULT(UseAESIntrinsics)) {
-      UseAESIntrinsics = true;
+  // GHASH/GCM intrinsics
+  if (UseCLMUL && (UseSSE > 2)) {
+    if (FLAG_IS_DEFAULT(UseGHASHIntrinsics)) {
+      UseGHASHIntrinsics = true;
     }
-  } else if (UseAESIntrinsics) {
-    if (!FLAG_IS_DEFAULT(UseAESIntrinsics))
-      warning("AES intrinsics are not available on this CPU");
-    FLAG_SET_DEFAULT(UseAESIntrinsics, false);
+  } else if (UseGHASHIntrinsics) {
+    if (!FLAG_IS_DEFAULT(UseGHASHIntrinsics))
+      warning("GHASH intrinsic requires CLMUL and SSE2 instructions on this CPU");
+    FLAG_SET_DEFAULT(UseGHASHIntrinsics, false);
   }
 
   if (UseSHA) {
@@ -703,12 +729,48 @@ void VM_Version::get_processor_features() {
   if (FLAG_IS_DEFAULT(UseMultiplyToLenIntrinsic)) {
     UseMultiplyToLenIntrinsic = true;
   }
+  if (FLAG_IS_DEFAULT(UseSquareToLenIntrinsic)) {
+    UseSquareToLenIntrinsic = true;
+  }
+  if (FLAG_IS_DEFAULT(UseMulAddIntrinsic)) {
+    UseMulAddIntrinsic = true;
+  }
+  if (FLAG_IS_DEFAULT(UseMontgomeryMultiplyIntrinsic)) {
+    UseMontgomeryMultiplyIntrinsic = true;
+  }
+  if (FLAG_IS_DEFAULT(UseMontgomerySquareIntrinsic)) {
+    UseMontgomerySquareIntrinsic = true;
+  }
 #else
   if (UseMultiplyToLenIntrinsic) {
     if (!FLAG_IS_DEFAULT(UseMultiplyToLenIntrinsic)) {
       warning("multiplyToLen intrinsic is not available in 32-bit VM");
     }
     FLAG_SET_DEFAULT(UseMultiplyToLenIntrinsic, false);
+  }
+  if (UseSquareToLenIntrinsic) {
+    if (!FLAG_IS_DEFAULT(UseSquareToLenIntrinsic)) {
+      warning("squareToLen intrinsic is not available in 32-bit VM");
+    }
+    FLAG_SET_DEFAULT(UseSquareToLenIntrinsic, false);
+  }
+  if (UseMulAddIntrinsic) {
+    if (!FLAG_IS_DEFAULT(UseMulAddIntrinsic)) {
+      warning("mulAdd intrinsic is not available in 32-bit VM");
+    }
+    FLAG_SET_DEFAULT(UseMulAddIntrinsic, false);
+  }
+  if (UseMontgomeryMultiplyIntrinsic) {
+    if (!FLAG_IS_DEFAULT(UseMontgomeryMultiplyIntrinsic)) {
+      warning("montgomeryMultiply intrinsic is not available in 32-bit VM");
+    }
+    FLAG_SET_DEFAULT(UseMontgomeryMultiplyIntrinsic, false);
+  }
+  if (UseMontgomerySquareIntrinsic) {
+    if (!FLAG_IS_DEFAULT(UseMontgomerySquareIntrinsic)) {
+      warning("montgomerySquare intrinsic is not available in 32-bit VM");
+    }
+    FLAG_SET_DEFAULT(UseMontgomerySquareIntrinsic, false);
   }
 #endif
 #endif // COMPILER2
@@ -998,6 +1060,7 @@ void VM_Version::get_processor_features() {
   if (PrintMiscellaneous && Verbose) {
     tty->print_cr("Logical CPUs per core: %u",
                   logical_processors_per_package());
+    tty->print_cr("L1 data cache line size: %u", L1_data_cache_line_size());
     tty->print("UseSSE=%d", (int) UseSSE);
     if (UseAVX > 0) {
       tty->print("  UseAVX=%d", (int) UseAVX);

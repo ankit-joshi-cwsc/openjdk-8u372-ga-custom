@@ -41,12 +41,16 @@ U_NAMESPACE_BEGIN
 
 le_uint32 CursiveAttachmentSubtable::process(const LEReferenceTo<CursiveAttachmentSubtable> &base, GlyphIterator *glyphIterator, const LEFontInstance *fontInstance, LEErrorCode &success) const
 {
+    if (LE_FAILURE(success)) {
+        return 0;
+    }
+
     LEGlyphID glyphID       = glyphIterator->getCurrGlyphID();
     le_int32  coverageIndex = getGlyphCoverage(base, glyphID, success);
     le_uint16 eeCount       = SWAPW(entryExitCount);
 
     LEReferenceToArrayOf<EntryExitRecord>
-        entryExitRecordsArrayRef(base, success, entryExitRecords, coverageIndex);
+        entryExitRecordsArrayRef(base, success, entryExitRecords, eeCount);
 
     if (coverageIndex < 0 || coverageIndex >= eeCount || LE_FAILURE(success)) {
         glyphIterator->setCursiveGlyph();

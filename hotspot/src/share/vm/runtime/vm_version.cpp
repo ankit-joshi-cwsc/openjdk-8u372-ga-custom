@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,6 +29,9 @@
 #ifdef TARGET_ARCH_x86
 # include "vm_version_x86.hpp"
 #endif
+#ifdef TARGET_ARCH_aarch64
+# include "vm_version_aarch64.hpp"
+#endif
 #ifdef TARGET_ARCH_sparc
 # include "vm_version_sparc.hpp"
 #endif
@@ -50,6 +53,7 @@ bool Abstract_VM_Version::_supports_atomic_getset8 = false;
 bool Abstract_VM_Version::_supports_atomic_getadd4 = false;
 bool Abstract_VM_Version::_supports_atomic_getadd8 = false;
 unsigned int Abstract_VM_Version::_logical_processors_per_package = 1U;
+unsigned int Abstract_VM_Version::_L1_data_cache_line_size = 0;
 int Abstract_VM_Version::_reserve_for_allocation_prefetch = 0;
 
 #ifndef HOTSPOT_RELEASE_VERSION
@@ -139,7 +143,7 @@ const char* Abstract_VM_Version::vm_name() {
 
 const char* Abstract_VM_Version::vm_vendor() {
 #ifdef VENDOR
-  return XSTR(VENDOR);
+  return VENDOR;
 #else
   return JDK_Version::is_gte_jdk17x_version() ?
     "Oracle Corporation" : "Sun Microsystems Inc.";
@@ -183,11 +187,17 @@ const char* Abstract_VM_Version::jre_release_version() {
 #ifndef CPU
 #ifdef ZERO
 #define CPU      ZERO_LIBARCH
+#elif defined(PPC64)
+#if defined(VM_LITTLE_ENDIAN)
+#define CPU      "ppc64le"
+#else
+#define CPU      "ppc64"
+#endif
 #else
 #define CPU      IA32_ONLY("x86")                \
                  IA64_ONLY("ia64")               \
                  AMD64_ONLY("amd64")             \
-                 PPC64_ONLY("ppc64")             \
+                 AARCH64_ONLY("aarch64")         \
                  SPARC_ONLY("sparc")
 #endif // ZERO
 #endif
@@ -217,6 +227,42 @@ const char* Abstract_VM_Version::internal_vm_info_string() {
         #define HOTSPOT_BUILD_COMPILER "MS VC++ 10.0 (VS2010)"
       #elif _MSC_VER == 1700
         #define HOTSPOT_BUILD_COMPILER "MS VC++ 11.0 (VS2012)"
+      #elif _MSC_VER == 1800
+        #define HOTSPOT_BUILD_COMPILER "MS VC++ 12.0 (VS2013)"
+      #elif _MSC_VER == 1900
+        #define HOTSPOT_BUILD_COMPILER "MS VC++ 14.0 (VS2015)"
+      #elif _MSC_VER == 1911
+        #define HOTSPOT_BUILD_COMPILER "MS VC++ 15.3 (VS2017)"
+      #elif _MSC_VER == 1912
+        #define HOTSPOT_BUILD_COMPILER "MS VC++ 15.5 (VS2017)"
+      #elif _MSC_VER == 1913
+        #define HOTSPOT_BUILD_COMPILER "MS VC++ 15.6 (VS2017)"
+      #elif _MSC_VER == 1914
+        #define HOTSPOT_BUILD_COMPILER "MS VC++ 15.7 (VS2017)"
+      #elif _MSC_VER == 1915
+        #define HOTSPOT_BUILD_COMPILER "MS VC++ 15.8 (VS2017)"
+      #elif _MSC_VER == 1916
+        #define HOTSPOT_BUILD_COMPILER "MS VC++ 15.9 (VS2017)"
+      #elif _MSC_VER == 1920
+        #define HOTSPOT_BUILD_COMPILER "MS VC++ 16.0 (VS2019)"
+      #elif _MSC_VER == 1921
+        #define HOTSPOT_BUILD_COMPILER "MS VC++ 16.1 (VS2019)"
+      #elif _MSC_VER == 1922
+        #define HOTSPOT_BUILD_COMPILER "MS VC++ 16.2 (VS2019)"
+      #elif _MSC_VER == 1923
+        #define HOTSPOT_BUILD_COMPILER "MS VC++ 16.3 (VS2019)"
+      #elif _MSC_VER == 1924
+        #define HOTSPOT_BUILD_COMPILER "MS VC++ 16.4 (VS2019)"
+      #elif _MSC_VER == 1925
+        #define HOTSPOT_BUILD_COMPILER "MS VC++ 16.5 (VS2019)"
+      #elif _MSC_VER == 1926
+        #define HOTSPOT_BUILD_COMPILER "MS VC++ 16.6 (VS2019)"
+      #elif _MSC_VER == 1927
+        #define HOTSPOT_BUILD_COMPILER "MS VC++ 16.7 (VS2019)"
+      #elif _MSC_VER == 1928
+        #define HOTSPOT_BUILD_COMPILER "MS VC++ 16.8 / 16.9 (VS2019)"
+      #elif _MSC_VER == 1929
+        #define HOTSPOT_BUILD_COMPILER "MS VC++ 16.10 / 16.11 (VS2019)"
       #else
         #define HOTSPOT_BUILD_COMPILER "unknown MS VC++:" XSTR(_MSC_VER)
       #endif
@@ -269,7 +315,7 @@ const char *Abstract_VM_Version::vm_build_user() {
 
 unsigned int Abstract_VM_Version::jvm_version() {
   return ((Abstract_VM_Version::vm_major_version() & 0xFF) << 24) |
-         ((Abstract_VM_Version::vm_minor_version() & 0xFF) << 16) |
+         ((Abstract_VM_Version::vm_minor_version() & 0xFFFF) << 8) |
          (Abstract_VM_Version::vm_build_number() & 0xFF);
 }
 
@@ -296,7 +342,7 @@ unsigned int Abstract_VM_Version::nof_parallel_worker_threads(
     // processor after the first 8.  For example, on a 72 cpu machine
     // and a chosen fraction of 5/8
     // use 8 + (72 - 8) * (5/8) == 48 worker threads.
-    unsigned int ncpus = (unsigned int) os::active_processor_count();
+    unsigned int ncpus = (unsigned int) os::initial_active_processor_count();
     return (ncpus <= switch_pt) ?
            ncpus :
           (switch_pt + ((ncpus - switch_pt) * num) / den);

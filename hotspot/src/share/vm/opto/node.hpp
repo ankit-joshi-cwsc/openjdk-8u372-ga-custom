@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -54,6 +54,7 @@ class CallStaticJavaNode;
 class CatchNode;
 class CatchProjNode;
 class CheckCastPPNode;
+class CastIINode;
 class ClearArrayNode;
 class CmpNode;
 class CodeBuffer;
@@ -294,10 +295,16 @@ protected:
 
  public:
   // Each Node is assigned a unique small/dense number.  This number is used
-  // to index into auxiliary arrays of data and bitvectors.
-  // It is declared const to defend against inadvertant assignment,
-  // since it is used by clients as a naked field.
+  // to index into auxiliary arrays of data and bit vectors.
+  // The field _idx is declared constant to defend against inadvertent assignments,
+  // since it is used by clients as a naked field. However, the field's value can be
+  // changed using the set_idx() method.
+  //
+  // The PhaseRenumberLive phase renumbers nodes based on liveness information.
+  // Therefore, it updates the value of the _idx field. The parse-time _idx is
+  // preserved in _parse_idx.
   const node_idx_t _idx;
+  DEBUG_ONLY(const node_idx_t _parse_idx;)
 
   // Get the (read-only) number of input edges
   uint req() const { return _cnt; }
@@ -416,6 +423,16 @@ protected:
   }
   // Find first occurrence of n among my edges:
   int find_edge(Node* n);
+  int find_prec_edge(Node* n) {
+    for (uint i = req(); i < len(); i++) {
+      if (_in[i] == n) return i;
+      if (_in[i] == NULL) {
+        DEBUG_ONLY( while ((++i) < len()) assert(_in[i] == NULL, "Gap in prec edges!"); )
+        break;
+      }
+    }
+    return -1;
+  }
   int replace_edge(Node* old, Node* neww);
   int replace_edges_in_range(Node* old, Node* neww, int start, int end);
   // NULL out all inputs to eliminate incoming Def-Use edges.
@@ -436,6 +453,9 @@ protected:
   bool eqv_uncast(const Node* n) const {
     return (this->uncast() == n->uncast());
   }
+
+  // Find out of current node that matches opcode.
+  Node* find_out_with(int opcode);
 
 private:
   static Node* uncast_helper(const Node* n);
@@ -462,6 +482,19 @@ private:
     debug_only(_last_del = n; ++_del_tick);
     #endif
   }
+  // Close gap after removing edge.
+  void close_prec_gap_at(uint gap) {
+    assert(_cnt <= gap && gap < _max, "no valid prec edge");
+    uint i = gap;
+    Node *last = NULL;
+    for (; i < _max-1; ++i) {
+      Node *next = _in[i+1];
+      if (next == NULL) break;
+      last = next;
+    }
+    _in[gap] = last; // Move last slot to empty one.
+    _in[i] = NULL;   // NULL out last slot.
+  }
 
 public:
   // Globally replace this node by a given new node, updating all uses.
@@ -478,13 +511,23 @@ public:
   // Add or remove precedence edges
   void add_prec( Node *n );
   void rm_prec( uint i );
+
+  // Note: prec(i) will not necessarily point to n if edge already exists.
   void set_prec( uint i, Node *n ) {
-    assert( is_not_dead(n), "can not use dead node");
-    assert( i >= _cnt, "not a precedence edge");
+    assert(i < _max, err_msg("oob: i=%d, _max=%d", i, _max));
+    assert(is_not_dead(n), "can not use dead node");
+    assert(i >= _cnt, "not a precedence edge");
+    // Avoid spec violation: duplicated prec edge.
+    if (_in[i] == n) return;
+    if (n == NULL || find_prec_edge(n) != -1) {
+      rm_prec(i);
+      return;
+    }
     if (_in[i] != NULL) _in[i]->del_out((Node *)this);
     _in[i] = n;
     if (n != NULL) n->add_out((Node *)this);
   }
+
   // Set this node's index, used by cisc_version to replace current node
   void set_idx(uint new_idx) {
     const node_idx_t* ref = &_idx;
@@ -597,6 +640,7 @@ public:
     DEFINE_CLASS_ID(Type,  Node, 2)
       DEFINE_CLASS_ID(Phi,   Type, 0)
       DEFINE_CLASS_ID(ConstraintCast, Type, 1)
+        DEFINE_CLASS_ID(CastII, ConstraintCast, 0)
       DEFINE_CLASS_ID(CheckCastPP, Type, 2)
       DEFINE_CLASS_ID(CMove, Type, 3)
       DEFINE_CLASS_ID(SafePointScalarObject, Type, 4)
@@ -721,6 +765,7 @@ public:
   DEFINE_CLASS_QUERY(Catch)
   DEFINE_CLASS_QUERY(CatchProj)
   DEFINE_CLASS_QUERY(CheckCastPP)
+  DEFINE_CLASS_QUERY(CastII)
   DEFINE_CLASS_QUERY(ConstraintCast)
   DEFINE_CLASS_QUERY(ClearArray)
   DEFINE_CLASS_QUERY(CMove)
@@ -1368,6 +1413,7 @@ public:
   void clear() { _cnt = 0; Node_Array::clear(); } // retain storage
   uint size() const { return _cnt; }
   void dump() const;
+  void dump_simple() const;
 };
 
 //------------------------------Unique_Node_List-------------------------------

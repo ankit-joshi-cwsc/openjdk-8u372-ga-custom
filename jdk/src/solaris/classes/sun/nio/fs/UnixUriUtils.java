@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2008, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -74,6 +74,10 @@ class UnixUriUtils {
         int pos = 0;
         while (pos < len) {
             char c = p.charAt(pos++);
+            if ((c == '/') && (pos < len) && (p.charAt(pos) == '/')) {
+                // skip redundant slashes
+                continue;
+            }
             byte b;
             if (c == '%') {
                 assert (pos+2) <= len;
@@ -83,7 +87,8 @@ class UnixUriUtils {
                 if (b == 0)
                     throw new IllegalArgumentException("Nul character not allowed");
             } else {
-                assert c < 0x80;
+                if (c == 0 || c >= 0x80)
+                    throw new IllegalArgumentException("Bad escape");
                 b = (byte)c;
             }
             result[rlen++] = b;
@@ -115,9 +120,10 @@ class UnixUriUtils {
         // trailing slash if directory
         if (sb.charAt(sb.length()-1) != '/') {
             try {
+                 up.checkRead();
                  if (UnixFileAttributes.get(up, true).isDirectory())
                      sb.append('/');
-            } catch (UnixException x) {
+            } catch (SecurityException | UnixException x) {
                 // ignore
             }
         }

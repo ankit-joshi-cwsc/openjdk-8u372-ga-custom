@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -270,6 +270,7 @@ class java_lang_Class : AllStatic {
   }
   static Symbol* as_signature(oop java_class, bool intern_if_not_found, TRAPS);
   static void print_signature(oop java_class, outputStream *st);
+  static const char* as_external_name(oop java_class);
   // Testing
   static bool is_instance(oop obj) {
     return obj != NULL && obj->klass() == SystemDictionary::Class_klass();
@@ -342,8 +343,8 @@ class java_lang_Thread : AllStatic {
   // Set JavaThread for instance
   static void set_thread(oop java_thread, JavaThread* thread);
   // Name
-  static typeArrayOop name(oop java_thread);
-  static void set_name(oop java_thread, typeArrayOop name);
+  static oop name(oop java_thread);
+  static void set_name(oop java_thread, oop name);
   // Priority
   static ThreadPriority priority(oop java_thread);
   static void set_priority(oop java_thread, ThreadPriority priority);
@@ -517,6 +518,7 @@ class java_lang_Throwable: AllStatic {
   static oop message(oop throwable);
   static oop message(Handle throwable);
   static void set_message(oop throwable, oop value);
+  static Symbol* detail_message(oop throwable);
   static void print_stack_element(outputStream *st, Handle mirror, int method,
                                   int version, int bci, int cpref);
   static void print_stack_element(outputStream *st, methodHandle method, int bci);
@@ -928,6 +930,12 @@ class java_lang_ref_Reference: AllStatic {
   static HeapWord* discovered_addr(oop ref) {
     return ref->obj_field_addr<HeapWord>(discovered_offset);
   }
+  static inline oop queue(oop ref) {
+    return ref->obj_field(queue_offset);
+  }
+  static inline void set_queue(oop ref, oop value) {
+    return ref->obj_field_put(queue_offset, value);
+  }
   // Accessors for statics
   static oop  pending_list_lock();
   static oop  pending_list();
@@ -960,6 +968,20 @@ class java_lang_ref_SoftReference: public java_lang_ref_Reference {
   static void set_clock(jlong value);
 };
 
+
+// Interface to java.lang.ref.ReferenceQueue objects
+
+class java_lang_ref_ReferenceQueue: public AllStatic {
+public:
+  static int static_NULL_queue_offset;
+  static int static_ENQUEUED_queue_offset;
+
+  // Accessors
+  static oop NULL_queue();
+  static oop ENQUEUED_queue();
+
+  static void compute_offsets();
+};
 
 // Interface to java.lang.invoke.MethodHandle objects
 
@@ -1131,6 +1153,8 @@ class java_lang_invoke_MemberName: AllStatic {
   static int flags_offset_in_bytes()            { return _flags_offset; }
   static int vmtarget_offset_in_bytes()         { return _vmtarget_offset; }
   static int vmindex_offset_in_bytes()          { return _vmindex_offset; }
+
+  static bool equals(oop mt1, oop mt2);
 };
 
 
@@ -1186,7 +1210,7 @@ public:
   static oop              target(         oop site)             { return site->obj_field(             _target_offset);         }
   static void         set_target(         oop site, oop target) {        site->obj_field_put(         _target_offset, target); }
 
-  static volatile oop     target_volatile(oop site)             { return site->obj_field_volatile(    _target_offset);         }
+  static volatile oop     target_volatile(oop site)             { return oop((oopDesc *)(site->obj_field_volatile(_target_offset))); }
   static void         set_target_volatile(oop site, oop target) {        site->obj_field_put_volatile(_target_offset, target); }
 
   // Testers

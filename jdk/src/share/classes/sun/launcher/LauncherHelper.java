@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2007, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -51,9 +51,9 @@ import java.nio.charset.Charset;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.text.Normalizer;
 import java.util.ResourceBundle;
 import java.text.MessageFormat;
+import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
@@ -66,6 +66,8 @@ import java.util.TreeSet;
 import java.util.jar.Attributes;
 import java.util.jar.JarFile;
 import java.util.jar.Manifest;
+import jdk.internal.platform.Container;
+import jdk.internal.platform.Metrics;
 
 public enum LauncherHelper {
     INSTANCE;
@@ -84,6 +86,7 @@ public enum LauncherHelper {
 
     private static final String defaultBundleName =
             "sun.launcher.resources.launcher";
+
     private static class ResourceBundleHolder {
         private static final ResourceBundle RB =
                 ResourceBundle.getBundle(defaultBundleName);
@@ -114,6 +117,7 @@ public enum LauncherHelper {
      *    this code determine this value, using a suitable method or omit the
      *    line entirely.
      */
+    @SuppressWarnings("fallthrough")
     static void showSettings(boolean printToStderr, String optionFlag,
             long initialHeapSize, long maxHeapSize, long stackSize,
             boolean isServer) {
@@ -134,11 +138,19 @@ public enum LauncherHelper {
             case "locale":
                 printLocale();
                 break;
+            case "system":
+                if (System.getProperty("os.name").contains("Linux")) {
+                    printSystemMetrics();
+                    break;
+                }
             default:
                 printVmSettings(initialHeapSize, maxHeapSize, stackSize,
                                 isServer);
                 printProperties();
                 printLocale();
+                if (System.getProperty("os.name").contains("Linux")) {
+                    printSystemMetrics();
+                }
                 break;
         }
     }
@@ -272,6 +284,120 @@ public enum LauncherHelper {
                 ostream.println();
                 ostream.print(INDENT + INDENT);
             }
+        }
+    }
+
+    public static void printSystemMetrics() {
+        Metrics c = Container.metrics();
+
+        ostream.println("Operating System Metrics:");
+
+        if (c == null) {
+            ostream.println(INDENT + "No metrics available for this platform");
+            return;
+        }
+
+        final long longRetvalNotSupported = -2;
+
+        ostream.println(INDENT + "Provider: " + c.getProvider());
+        ostream.println(INDENT + "Effective CPU Count: " + c.getEffectiveCpuCount());
+        ostream.println(formatCpuVal(c.getCpuPeriod(), INDENT + "CPU Period: ", longRetvalNotSupported));
+        ostream.println(formatCpuVal(c.getCpuQuota(), INDENT + "CPU Quota: ", longRetvalNotSupported));
+        ostream.println(formatCpuVal(c.getCpuShares(), INDENT + "CPU Shares: ", longRetvalNotSupported));
+
+        int cpus[] = c.getCpuSetCpus();
+        if (cpus != null) {
+            ostream.println(INDENT + "List of Processors, "
+                    + cpus.length + " total: ");
+
+            ostream.print(INDENT);
+            for (int i = 0; i < cpus.length; i++) {
+                ostream.print(cpus[i] + " ");
+            }
+            if (cpus.length > 0) {
+                ostream.println("");
+            }
+        } else {
+            ostream.println(INDENT + "List of Processors: N/A");
+        }
+
+        cpus = c.getEffectiveCpuSetCpus();
+        if (cpus != null) {
+            ostream.println(INDENT + "List of Effective Processors, "
+                    + cpus.length + " total: ");
+
+            ostream.print(INDENT);
+            for (int i = 0; i < cpus.length; i++) {
+                ostream.print(cpus[i] + " ");
+            }
+            if (cpus.length > 0) {
+                ostream.println("");
+            }
+        } else {
+            ostream.println(INDENT + "List of Effective Processors: N/A");
+        }
+
+        int mems[] = c.getCpuSetMems();
+        if (mems != null) {
+            ostream.println(INDENT + "List of Memory Nodes, "
+                    + mems.length + " total: ");
+
+            ostream.print(INDENT);
+            for (int i = 0; i < mems.length; i++) {
+                ostream.print(mems[i] + " ");
+            }
+            if (mems.length > 0) {
+                ostream.println("");
+            }
+        } else {
+            ostream.println(INDENT + "List of Memory Nodes: N/A");
+        }
+
+        mems = c.getEffectiveCpuSetMems();
+        if (mems != null) {
+            ostream.println(INDENT + "List of Available Memory Nodes, "
+                    + mems.length + " total: ");
+
+            ostream.print(INDENT);
+            for (int i = 0; i < mems.length; i++) {
+                ostream.print(mems[i] + " ");
+            }
+            if (mems.length > 0) {
+                ostream.println("");
+            }
+        } else {
+            ostream.println(INDENT + "List of Available Memory Nodes: N/A");
+        }
+
+        long limit = c.getMemoryLimit();
+        ostream.println(formatLimitString(limit, INDENT + "Memory Limit: ", longRetvalNotSupported));
+
+        limit = c.getMemorySoftLimit();
+        ostream.println(formatLimitString(limit, INDENT + "Memory Soft Limit: ", longRetvalNotSupported));
+
+        limit = c.getMemoryAndSwapLimit();
+        ostream.println(formatLimitString(limit, INDENT + "Memory & Swap Limit: ", longRetvalNotSupported));
+
+        ostream.println("");
+    }
+
+    private static String formatLimitString(long limit, String prefix, long unavailable) {
+        if (limit >= 0) {
+            return prefix + SizePrefix.scaleValue(limit);
+        } else if (limit == unavailable) {
+            return prefix + "N/A";
+        } else {
+            return prefix + "Unlimited";
+        }
+    }
+
+    private static String formatCpuVal(long cpuVal, String prefix, long unavailable) {
+        if (cpuVal >= 0) {
+            return prefix + cpuVal + "us";
+        } else if (cpuVal == unavailable) {
+            return prefix + "N/A";
+        } else {
+            return prefix + cpuVal;
         }
     }
 

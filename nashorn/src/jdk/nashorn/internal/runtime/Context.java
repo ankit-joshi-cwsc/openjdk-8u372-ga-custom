@@ -153,7 +153,7 @@ public final class Context {
      * Currently we are conservative and associate the name of a builtin class with all
      * its properties, so it's enough to invalidate a property to break all assumptions
      * about a prototype. This can be changed to a more fine grained approach, but no one
-     * ever needs this, given the very rare occurance of swapping out only parts of
+     * ever needs this, given the very rare occurrence of swapping out only parts of
      * a builtin v.s. the entire builtin object
      */
     private final Map<String, SwitchPoint> builtinSwitchPoints = new HashMap<>();
@@ -167,7 +167,7 @@ public final class Context {
      * ContextCodeInstaller that has the privilege of installing classes in the Context.
      * Can only be instantiated from inside the context and is opaque to other classes
      */
-    public static class ContextCodeInstaller implements CodeInstaller<ScriptEnvironment> {
+    public static class ContextCodeInstaller implements CodeInstaller {
         private final Context      context;
         private final ScriptLoader loader;
         private final CodeSource   codeSource;
@@ -185,13 +185,9 @@ public final class Context {
             this.codeSource = codeSource;
         }
 
-        /**
-         * Return the script environment for this installer
-         * @return ScriptEnvironment
-         */
         @Override
-        public ScriptEnvironment getOwner() {
-            return context.env;
+        public Context getContext() {
+            return context;
         }
 
         @Override
@@ -254,7 +250,7 @@ public final class Context {
         }
 
         @Override
-        public CodeInstaller<ScriptEnvironment> withNewLoader() {
+        public CodeInstaller withNewLoader() {
             // Reuse this installer if we're within our limits.
             if (usageCount < MAX_USAGES && bytesDefined < MAX_BYTES_DEFINED) {
                 return this;
@@ -263,7 +259,7 @@ public final class Context {
         }
 
         @Override
-        public boolean isCompatibleWith(final CodeInstaller<ScriptEnvironment> other) {
+        public boolean isCompatibleWith(final CodeInstaller other) {
             if (other instanceof ContextCodeInstaller) {
                 final ContextCodeInstaller cci = (ContextCodeInstaller)other;
                 return cci.context == context && cci.codeSource == codeSource;
@@ -381,10 +377,12 @@ public final class Context {
     final boolean _strict;
 
     /** class loader to resolve classes from script. */
-    private final ClassLoader  appLoader;
+    private final ClassLoader appLoader;
 
-    /** Class loader to load classes from -classpath option, if set. */
-    private final ClassLoader  classPathLoader;
+    /*package-private*/
+    ClassLoader getAppLoader() {
+        return appLoader;
+    }
 
     /** Class loader to load classes compiled from scripts. */
     private final ScriptLoader scriptLoader;
@@ -399,11 +397,12 @@ public final class Context {
     private final ClassFilter classFilter;
 
     private static final ClassLoader myLoader = Context.class.getClassLoader();
-    private static final StructureLoader sharedLoader;
+    /** Process-wide singleton structure loader */
+    private static final StructureLoader theStructLoader;
 
     /*package-private*/ @SuppressWarnings("static-method")
-    ClassLoader getSharedLoader() {
-        return sharedLoader;
+    ClassLoader getStructLoader() {
+        return theStructLoader;
     }
 
     private static AccessControlContext createNoPermAccCtxt() {
@@ -421,7 +420,7 @@ public final class Context {
     private static final AccessControlContext CREATE_GLOBAL_ACC_CTXT  = createPermAccCtxt(NASHORN_CREATE_GLOBAL);
 
     static {
-        sharedLoader = AccessController.doPrivileged(new PrivilegedAction<StructureLoader>() {
+        theStructLoader = AccessController.doPrivileged(new PrivilegedAction<StructureLoader>() {
             @Override
             public StructureLoader run() {
                 return new StructureLoader(myLoader);
@@ -499,7 +498,6 @@ public final class Context {
         this.classFilter = classFilter;
         this.env       = new ScriptEnvironment(options, out, err);
         this._strict   = env._strict;
-        this.appLoader = appLoader;
         if (env._loader_per_compile) {
             this.scriptLoader = null;
             this.uniqueScriptId = null;
@@ -509,17 +507,17 @@ public final class Context {
         }
         this.errors    = errors;
 
-        // if user passed -classpath option, make a class loader with that and set it as
-        // thread context class loader so that script can access classes from that path.
+        // if user passed -classpath option, make a URLClassLoader with that and
+        // the app loader as the parent.
         final String classPath = options.getString("classpath");
         if (!env._compile_only && classPath != null && !classPath.isEmpty()) {
             // make sure that caller can create a class loader.
             if (sm != null) {
-                sm.checkPermission(new RuntimePermission("createClassLoader"));
+                sm.checkCreateClassLoader();
             }
-            this.classPathLoader = NashornLoader.createClassLoader(classPath);
+            this.appLoader = NashornLoader.createClassLoader(classPath, appLoader);
         } else {
-            this.classPathLoader = null;
+            this.appLoader = appLoader;
         }
 
         final int cacheSize = env._class_cache_size;
@@ -931,7 +929,7 @@ public final class Context {
         if (System.getSecurityManager() != null && !StructureLoader.isStructureClass(fullName)) {
             throw new ClassNotFoundException(fullName);
         }
-        return (Class<? extends ScriptObject>)Class.forName(fullName, true, sharedLoader);
+        return (Class<? extends ScriptObject>)Class.forName(fullName, true, theStructLoader);
     }
 
     /**
@@ -987,6 +985,16 @@ public final class Context {
     }
 
     /**
+     * Is {@code className} the name of a structure class?
+     *
+     * @param className a class name
+     * @return true if className is a structure class name
+     */
+    public static boolean isStructureClass(final String className) {
+        return StructureLoader.isStructureClass(className);
+    }
+
+    /**
      * Checks that the given Class can be accessed from no permissions context.
      *
      * @param clazz Class object
@@ -1038,17 +1046,18 @@ public final class Context {
             checkPackageAccess(sm, fullName);
         }
 
-        // try the script -classpath loader, if that is set
-        if (classPathLoader != null) {
-            try {
-                return Class.forName(fullName, true, classPathLoader);
-            } catch (final ClassNotFoundException ignored) {
-                // ignore, continue search
+        // Try finding using the "app" loader.
+        if (appLoader != null) {
+            return Class.forName(fullName, true, appLoader);
+        } else {
+            final Class<?> cl = Class.forName(fullName);
+            // return the Class only if it was loaded by boot loader
+            if (cl.getClassLoader() == null) {
+                return cl;
+            } else {
+                throw new ClassNotFoundException(fullName);
             }
         }
-
-        // Try finding using the "app" loader.
-        return Class.forName(fullName, true, appLoader);
     }
 
     /**
@@ -1079,7 +1088,7 @@ public final class Context {
             // No verification when security manager is around as verifier
             // may load further classes - which should be avoided.
             if (System.getSecurityManager() == null) {
-                CheckClassAdapter.verify(new ClassReader(bytecode), sharedLoader, false, new PrintWriter(System.err, true));
+                CheckClassAdapter.verify(new ClassReader(bytecode), theStructLoader, false, new PrintWriter(System.err, true));
             }
         }
     }
@@ -1129,17 +1138,16 @@ public final class Context {
      *
      * @param global the global
      * @param engine the associated ScriptEngine instance, can be null
-     * @param ctxt the initial ScriptContext, can be null
      * @return the initialized global scope object.
      */
-    public Global initGlobal(final Global global, final ScriptEngine engine, final ScriptContext ctxt) {
+    public Global initGlobal(final Global global, final ScriptEngine engine) {
         // Need only minimal global object, if we are just compiling.
         if (!env._compile_only) {
             final Global oldGlobal = Context.getGlobal();
             try {
                 Context.setGlobal(global);
                 // initialize global scope with builtin global objects
-                global.initBuiltinObjects(engine, ctxt);
+                global.initBuiltinObjects(engine);
             } finally {
                 Context.setGlobal(oldGlobal);
             }
@@ -1155,7 +1163,7 @@ public final class Context {
      * @return the initialized global scope object.
      */
     public Global initGlobal(final Global global) {
-        return initGlobal(global, null, null);
+        return initGlobal(global, null);
     }
 
     /**
@@ -1196,15 +1204,10 @@ public final class Context {
     }
 
     private URL getResourceURL(final String resName) {
-        // try the classPathLoader if we have and then
-        // try the appLoader if non-null.
-        if (classPathLoader != null) {
-            return classPathLoader.getResource(resName);
-        } else if (appLoader != null) {
+        if (appLoader != null) {
             return appLoader.getResource(resName);
         }
-
-        return null;
+        return ClassLoader.getSystemResource(resName);
     }
 
     private Object evaluateSource(final Source source, final ScriptObject scope, final ScriptObject thiz) {
@@ -1300,14 +1303,12 @@ public final class Context {
         final URL          url    = source.getURL();
         final ScriptLoader loader = env._loader_per_compile ? createNewLoader() : scriptLoader;
         final CodeSource   cs     = new CodeSource(url, (CodeSigner[])null);
-        final CodeInstaller<ScriptEnvironment> installer = new ContextCodeInstaller(this, loader, cs);
+        final CodeInstaller installer = new ContextCodeInstaller(this, loader, cs);
 
         if (storedScript == null) {
             final CompilationPhases phases = Compiler.CompilationPhases.COMPILE_ALL;
 
-            final Compiler compiler = new Compiler(
-                    this,
-                    env,
+            final Compiler compiler = Compiler.forInitialCompilation(
                     installer,
                     source,
                     errMan,
@@ -1333,7 +1334,7 @@ public final class Context {
              new PrivilegedAction<ScriptLoader>() {
                 @Override
                 public ScriptLoader run() {
-                    return new ScriptLoader(appLoader, Context.this);
+                    return new ScriptLoader(Context.this);
                 }
              }, CREATE_LOADER_ACC_CTXT);
     }
@@ -1456,7 +1457,7 @@ public final class Context {
      * @param level            log level
      * @param mh               method handle
      * @param paramStart       first parameter to print
-     * @param printReturnValue should we print the return vaulue?
+     * @param printReturnValue should we print the return value?
      * @param text             debug printout to add
      *
      * @return instrumented method handle, or null if logger not enabled

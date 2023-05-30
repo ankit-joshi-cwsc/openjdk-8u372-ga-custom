@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2001, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -21,10 +21,6 @@
  * questions.
  *
  */
-
-#ifndef __clang_major__
-#define ATTRIBUTE_PRINTF(x,y) // FIXME, formats are a mess.
-#endif
 
 #include "precompiled.hpp"
 #include "gc_implementation/g1/concurrentG1Refine.hpp"
@@ -199,7 +195,7 @@ G1CollectorPolicy::G1CollectorPolicy() :
   const size_t region_size = HeapRegion::GrainWords;
   if (YoungPLABSize > region_size || OldPLABSize > region_size) {
     char buffer[128];
-    jio_snprintf(buffer, sizeof(buffer), "%sPLABSize should be at most "SIZE_FORMAT,
+    jio_snprintf(buffer, sizeof(buffer), "%sPLABSize should be at most " SIZE_FORMAT,
                  OldPLABSize > region_size ? "Old" : "Young", region_size);
     vm_exit_during_initialization(buffer);
   }
@@ -288,7 +284,7 @@ G1CollectorPolicy::G1CollectorPolicy() :
   if (confidence_perc > 100) {
     confidence_perc = 100;
     warning("G1ConfidencePercent is set to a value that is too large, "
-            "it's been updated to %u", confidence_perc);
+            "it's been updated to " UINTX_FORMAT, confidence_perc);
   }
   _sigma = (double) confidence_perc / 100.0;
 
@@ -310,7 +306,7 @@ G1CollectorPolicy::G1CollectorPolicy() :
   if (reserve_perc > 50) {
     reserve_perc = 50;
     warning("G1ReservePercent is set to a value that is too large, "
-            "it's been updated to %u", reserve_perc);
+            "it's been updated to " UINTX_FORMAT, reserve_perc);
   }
   _reserve_factor = (double) reserve_perc / 100.0;
   // This will be set when the heap is expanded
@@ -376,7 +372,7 @@ G1YoungGenSizer::G1YoungGenSizer() : _sizer_kind(SizerDefaults), _adaptive_size(
                              MAX2((uint) (MaxNewSize / HeapRegion::GrainBytes),
                                   1U);
       _sizer_kind = SizerMaxAndNewSize;
-      _adaptive_size = _min_desired_young_length == _max_desired_young_length;
+      _adaptive_size = _min_desired_young_length != _max_desired_young_length;
     } else {
       _sizer_kind = SizerNewSizeOnly;
     }
@@ -839,14 +835,14 @@ void G1CollectorPolicy::record_stop_world_start() {
   _stop_world_start = os::elapsedTime();
 }
 
-void G1CollectorPolicy::record_collection_pause_start(double start_time_sec) {
+void G1CollectorPolicy::record_collection_pause_start(double start_time_sec, GCTracer &tracer) {
   // We only need to do this here as the policy will only be applied
   // to the GC we're about to start. so, no point is calculating this
   // every time we calculate / recalculate the target young length.
-  update_survivors_policy();
+  update_survivors_policy(tracer);
 
   assert(_g1->used() == _g1->recalculate_used(),
-         err_msg("sanity, used: "SIZE_FORMAT" recalculate_used: "SIZE_FORMAT,
+         err_msg("sanity, used: " SIZE_FORMAT " recalculate_used: " SIZE_FORMAT,
                  _g1->used(), _g1->recalculate_used()));
 
   double s_w_t_ms = (start_time_sec - _stop_world_start) * 1000.0;
@@ -1130,11 +1126,11 @@ void G1CollectorPolicy::record_collection_pause_end(double pause_time_ms, Evacua
     _rs_length_diff_seq->add((double) rs_length_diff);
 
     size_t freed_bytes = _heap_used_bytes_before_gc - cur_used_bytes;
-    size_t copied_bytes = _collection_set_bytes_used_before - freed_bytes;
-    double cost_per_byte_ms = 0.0;
 
-    if (copied_bytes > 0) {
-      cost_per_byte_ms = phase_times()->average_time_ms(G1GCPhaseTimes::ObjCopy) / (double) copied_bytes;
+    if (_collection_set_bytes_used_before > freed_bytes) {
+      size_t copied_bytes = _collection_set_bytes_used_before - freed_bytes;
+      double average_copy_time = phase_times()->average_time_ms(G1GCPhaseTimes::ObjCopy);
+      double cost_per_byte_ms = average_copy_time / (double) copied_bytes;
       if (_in_marking_window) {
         _cost_per_byte_ms_during_cm_seq->add(cost_per_byte_ms);
       } else {
@@ -1231,10 +1227,10 @@ void G1CollectorPolicy::print_detailed_heap_transition(bool full) {
     (_young_list_target_length * HeapRegion::GrainBytes) - survivor_used_bytes_after_gc;
 
   gclog_or_tty->print(
-    "   [Eden: "EXT_SIZE_FORMAT"("EXT_SIZE_FORMAT")->"EXT_SIZE_FORMAT"("EXT_SIZE_FORMAT") "
-    "Survivors: "EXT_SIZE_FORMAT"->"EXT_SIZE_FORMAT" "
-    "Heap: "EXT_SIZE_FORMAT"("EXT_SIZE_FORMAT")->"
-    EXT_SIZE_FORMAT"("EXT_SIZE_FORMAT")]",
+    "   [Eden: " EXT_SIZE_FORMAT "(" EXT_SIZE_FORMAT ")->" EXT_SIZE_FORMAT "(" EXT_SIZE_FORMAT ") "
+    "Survivors: " EXT_SIZE_FORMAT "->" EXT_SIZE_FORMAT " "
+    "Heap: " EXT_SIZE_FORMAT "(" EXT_SIZE_FORMAT ")->"
+    EXT_SIZE_FORMAT "(" EXT_SIZE_FORMAT ")]",
     EXT_SIZE_PARAMS(_eden_used_bytes_before_gc),
     EXT_SIZE_PARAMS(_eden_capacity_bytes_before_gc),
     EXT_SIZE_PARAMS(eden_used_bytes_after_gc),
@@ -1453,7 +1449,7 @@ void G1CollectorPolicy::update_max_gc_locker_expansion() {
 }
 
 // Calculates survivor space parameters.
-void G1CollectorPolicy::update_survivors_policy() {
+void G1CollectorPolicy::update_survivors_policy(GCTracer &tracer) {
   double max_survivor_regions_d =
                  (double) _young_list_target_length / (double) SurvivorRatio;
   // We use ceiling so that if max_survivor_regions_d is > 0.0 (but
@@ -1461,7 +1457,7 @@ void G1CollectorPolicy::update_survivors_policy() {
   _max_survivor_regions = (uint) ceil(max_survivor_regions_d);
 
   _tenuring_threshold = _survivors_age_table.compute_tenuring_threshold(
-        HeapRegion::GrainWords * _max_survivor_regions);
+        HeapRegion::GrainWords * _max_survivor_regions, tracer);
 }
 
 bool G1CollectorPolicy::force_initial_mark_if_outside_cycle(
@@ -1851,9 +1847,9 @@ void G1CollectorPolicy::print_collection_set(HeapRegion* list_head, outputStream
   while (csr != NULL) {
     HeapRegion* next = csr->next_in_collection_set();
     assert(csr->in_collection_set(), "bad CS");
-    st->print_cr("  "HR_FORMAT", P: "PTR_FORMAT "N: "PTR_FORMAT", age: %4d",
+    st->print_cr("  " HR_FORMAT ", P: " PTR_FORMAT "N: " PTR_FORMAT ", age: %4d",
                  HR_FORMAT_PARAMS(csr),
-                 csr->prev_top_at_mark_start(), csr->next_top_at_mark_start(),
+                 p2i(csr->prev_top_at_mark_start()), p2i(csr->next_top_at_mark_start()),
                  csr->age_in_surv_rate_group_cond());
     csr = next;
   }
@@ -2219,7 +2215,7 @@ void TraceGen0TimeData::print_summary(const char* str,
 void TraceGen0TimeData::print_summary_sd(const char* str,
                                          const NumberSeq* seq) const {
   print_summary(str, seq);
-  gclog_or_tty->print_cr("%+45s = %5d, std dev = %8.2lf ms, max = %8.2lf ms)",
+  gclog_or_tty->print_cr("%45s = %5d, std dev = %8.2lf ms, max = %8.2lf ms)",
                 "(num", seq->num(), seq->sd(), seq->maximum());
 }
 

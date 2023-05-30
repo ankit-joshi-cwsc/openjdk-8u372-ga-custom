@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -33,6 +33,10 @@
 #ifdef TARGET_ARCH_x86
 # include "nativeInst_x86.hpp"
 # include "vmreg_x86.inline.hpp"
+#endif
+#ifdef TARGET_ARCH_aarch64
+# include "nativeInst_aarch64.hpp"
+# include "vmreg_aarch64.inline.hpp"
 #endif
 #ifdef TARGET_ARCH_sparc
 # include "nativeInst_sparc.hpp"
@@ -124,10 +128,16 @@ LIR_Assembler::LIR_Assembler(Compilation* c):
  , _pending_non_safepoint_offset(0)
 {
   _slow_case_stubs = new CodeStubList();
+#ifdef TARGET_ARCH_aarch64
+  init(); // Target-dependent initialization
+#endif
 }
 
 
 LIR_Assembler::~LIR_Assembler() {
+  // The unwind handler label may be unbound if this destructor is invoked because of a bail-out.
+  // Reset it here to avoid an assertion.
+  _unwind_handler_entry.reset();
 }
 
 
@@ -160,7 +170,9 @@ void LIR_Assembler::emit_stubs(CodeStubList* stub_list) {
 #endif
     s->emit_code(this);
 #ifdef ASSERT
+#ifndef AARCH64
     s->assert_no_unbound_labels();
+#endif
 #endif
   }
 }
@@ -464,6 +476,7 @@ void LIR_Assembler::emit_call(LIR_OpJavaCall* op) {
 
   // emit the static call stub stuff out of line
   emit_static_call_stub();
+  CHECK_BAILOUT();
 
   switch (op->code()) {
   case lir_static_call:

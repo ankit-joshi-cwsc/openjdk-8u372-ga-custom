@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -42,6 +42,9 @@
 #ifdef TARGET_ARCH_x86
 # include "nativeInst_x86.hpp"
 #endif
+#ifdef TARGET_ARCH_aarch64
+# include "nativeInst_aarch64.hpp"
+#endif
 #ifdef TARGET_ARCH_sparc
 # include "nativeInst_sparc.hpp"
 #endif
@@ -58,7 +61,7 @@
 #include "c1/c1_Runtime1.hpp"
 #endif
 
-unsigned int align_code_offset(int offset) {
+unsigned int CodeBlob::align_code_offset(int offset) {
   // align the size to CodeEntryAlignment
   return
     ((offset + (int)CodeHeap::header_size() + (CodeEntryAlignment-1)) & ~(CodeEntryAlignment-1))
@@ -195,6 +198,11 @@ OopMap* CodeBlob::oop_map_for_return_address(address return_address) {
   return oop_maps()->find_map_at_offset((intptr_t) return_address - (intptr_t) code_begin());
 }
 
+void CodeBlob::print_code() {
+  HandleMark hm;
+  ResourceMark m;
+  Disassembler::decode(this, tty);
+}
 
 //----------------------------------------------------------------------------------------------------
 // Implementation of BufferBlob
@@ -289,6 +297,28 @@ AdapterBlob* AdapterBlob::create(CodeBuffer* cb) {
   return blob;
 }
 
+VtableBlob::VtableBlob(const char* name, int size) :
+  BufferBlob(name, size) {
+}
+
+VtableBlob* VtableBlob::create(const char* name, int buffer_size) {
+  ThreadInVMfromUnknown __tiv;  // get to VM state in case we block on CodeCache_lock
+
+  VtableBlob* blob = NULL;
+  unsigned int size = sizeof(VtableBlob);
+  // align the size to CodeEntryAlignment
+  size = align_code_offset(size);
+  size += round_to(buffer_size, oopSize);
+  assert(name != NULL, "must provide a name");
+  {
+    MutexLockerEx mu(CodeCache_lock, Mutex::_no_safepoint_check_flag);
+    blob = new (size) VtableBlob(name, size);
+  }
+  // Track memory usage statistic after releasing CodeCache_lock
+  MemoryService::track_code_cache_memory_usage();
+
+  return blob;
+}
 
 //----------------------------------------------------------------------------------------------------
 // Implementation of MethodHandlesAdapterBlob

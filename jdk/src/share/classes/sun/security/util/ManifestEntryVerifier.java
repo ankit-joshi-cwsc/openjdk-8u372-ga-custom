@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -27,13 +27,12 @@ package sun.security.util;
 
 import java.security.*;
 import java.io.*;
-import java.security.CodeSigner;
 import java.util.*;
 import java.util.jar.*;
 
-import java.util.Base64;
-
 import sun.security.jca.Providers;
+import sun.security.util.DisabledAlgorithmConstraints;
+import sun.security.util.JarConstraintsParameters;
 
 /**
  * This class is used to verify each entry in a jar file with its
@@ -64,7 +63,9 @@ public class ManifestEntryVerifier {
     ArrayList<byte[]> manifestHashes;
 
     private String name = null;
-    private Manifest man;
+
+    private final String manifestFileName; // never null
+    private final Manifest man;
 
     private boolean skip = true;
 
@@ -75,11 +76,12 @@ public class ManifestEntryVerifier {
     /**
      * Create a new ManifestEntryVerifier object.
      */
-    public ManifestEntryVerifier(Manifest man)
+    public ManifestEntryVerifier(Manifest man, String manifestFileName)
     {
         createdDigests = new HashMap<String, MessageDigest>(11);
         digests = new ArrayList<MessageDigest>();
         manifestHashes = new ArrayList<byte[]>();
+        this.manifestFileName = manifestFileName;
         this.man = man;
     }
 
@@ -106,6 +108,8 @@ public class ManifestEntryVerifier {
 
         /* get the headers from the manifest for this entry */
         /* if there aren't any, we can't verify any digests for this entry */
+
+        skip = false;
 
         Attributes attr = man.getAttributes(name);
         if (attr == null) {
@@ -141,7 +145,6 @@ public class ManifestEntryVerifier {
                 }
 
                 if (digest != null) {
-                    skip = false;
                     digest.reset();
                     digests.add(digest);
                     manifestHashes.add(
@@ -187,7 +190,6 @@ public class ManifestEntryVerifier {
      * the first time we have verified this object, remove its
      * code signers from sigFileSigners and place in verifiedSigners.
      *
-     *
      */
     public CodeSigner[] verify(Hashtable<String, CodeSigner[]> verifiedSigners,
                 Hashtable<String, CodeSigner[]> sigFileSigners)
@@ -197,12 +199,32 @@ public class ManifestEntryVerifier {
             return null;
         }
 
-        if (signers != null)
+        if (digests.isEmpty()) {
+            throw new SecurityException("digest missing for " + name);
+        }
+
+        if (signers != null) {
             return signers;
+        }
+
+        JarConstraintsParameters params =
+            getParams(verifiedSigners, sigFileSigners);
 
         for (int i=0; i < digests.size(); i++) {
-
-            MessageDigest digest  = digests.get(i);
+            MessageDigest digest = digests.get(i);
+            if (params != null) {
+                try {
+                    params.setExtendedExceptionMsg(JarFile.MANIFEST_NAME,
+                        name + " entry");
+                    DisabledAlgorithmConstraints.jarConstraints()
+                           .permits(digest.getAlgorithm(), params, false);
+                } catch (GeneralSecurityException e) {
+                    if (debug != null) {
+                        debug.println("Digest algorithm is restricted: " + e);
+                    }
+                    return null;
+                }
+            }
             byte [] manHash = manifestHashes.get(i);
             byte [] theHash = digest.digest();
 
@@ -225,6 +247,42 @@ public class ManifestEntryVerifier {
             verifiedSigners.put(name, signers);
         }
         return signers;
+    }
+
+    /**
+     * Get constraints parameters for JAR. The constraints should be
+     * checked against all code signers. Returns the parameters,
+     * or null if the signers for this entry have already been checked
+     * or there are no signers for this entry.
+     */
+    private JarConstraintsParameters getParams(
+            Map<String, CodeSigner[]> verifiedSigners,
+            Map<String, CodeSigner[]> sigFileSigners) {
+
+        // verifiedSigners is usually preloaded with the Manifest's signers.
+        // If verifiedSigners contains the Manifest, then it will have all of
+        // the signers of the JAR. But if it doesn't then we need to fallback
+        // and check verifiedSigners to see if the signers of this entry have
+        // been checked already.
+        if (verifiedSigners.containsKey(manifestFileName)) {
+            if (verifiedSigners.size() > 1) {
+                // this means we already checked it previously
+                return null;
+            } else {
+                return new JarConstraintsParameters(
+                    verifiedSigners.get(manifestFileName));
+            }
+        } else {
+            if (debug != null) {
+                debug.println(manifestFileName + " not present in verifiedSigners");
+            }
+            CodeSigner[] signers = sigFileSigners.get(name);
+            if (signers == null || verifiedSigners.containsValue(signers)) {
+                return null;
+            } else {
+                return new JarConstraintsParameters(signers);
+            }
+        }
     }
 
     // for the toHex function

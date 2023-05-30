@@ -119,11 +119,11 @@ TEST_ROOT := $(shell pwd)
 
 # Root of all test results
 ifdef ALT_OUTPUTDIR
-  ABS_BUILD_ROOT = $(ALT_OUTPUTDIR)/$(PLATFORM)-$(ARCH)
+  ABS_BUILD_ROOT = $(ALT_OUTPUTDIR)
 else
   ABS_BUILD_ROOT = $(TEST_ROOT)/../build/$(PLATFORM)-$(ARCH)
 endif
-ABS_TEST_OUTPUT_DIR = $(ABS_BUILD_ROOT)/testoutput
+ABS_TEST_OUTPUT_DIR = $(ABS_BUILD_ROOT)/testoutput/$(UNIQUE_DIR)
 
 # Expect JPRT to set PRODUCT_HOME (the product or jdk in this case to test)
 ifndef PRODUCT_HOME
@@ -250,6 +250,21 @@ ifndef JT_HOME
   endif
 endif
 
+# Problematic tests to be excluded
+PROBLEM_LISTS=$(call MixedDirs,$(wildcard ProblemList.txt closed/ProblemList.txt))
+
+# Create exclude list for this platform and arch
+ifdef NO_EXCLUDES
+  JTREG_EXCLUSIONS =
+else
+  JTREG_EXCLUSIONS = $(PROBLEM_LISTS:%=-exclude:%)
+endif
+
+# convert list of directories to dos paths
+define MixedDirs
+$(foreach i,$1,$(shell $(GETMIXEDPATH) "${i}"))
+endef
+
 # When called from JPRT the TESTDIRS variable is set to the jtreg tests to run
 ifdef TESTDIRS
   TEST_SELECTION = $(TESTDIRS)
@@ -262,28 +277,25 @@ endif
 # Default JTREG to run
 JTREG = $(JT_HOME)/bin/jtreg
 
+# Use agent mode
+JTREG_BASIC_OPTIONS += -agentvm
 # Only run automatic tests
 JTREG_BASIC_OPTIONS += -a
 # Report details on all failed or error tests, times too
-JTREG_BASIC_OPTIONS += -v:fail,error,time
+JTREG_BASIC_OPTIONS += -v:fail,error,summary
 # Retain all files for failing tests
 JTREG_BASIC_OPTIONS += -retain:fail,error
 # Ignore tests are not run and completely silent about it
 JTREG_IGNORE_OPTION = -ignore:quiet
 JTREG_BASIC_OPTIONS += $(JTREG_IGNORE_OPTION)
+# Multiply by 4 the timeout factor
+JTREG_TIMEOUT_OPTION =  -timeoutFactor:4
+JTREG_BASIC_OPTIONS += $(JTREG_TIMEOUT_OPTION)
 # Add any extra options
 JTREG_BASIC_OPTIONS += $(EXTRA_JTREG_OPTIONS)
 # Set other vm and test options
 JTREG_TEST_OPTIONS = $(JAVA_ARGS:%=-javaoptions:%) $(JAVA_OPTIONS:%=-vmoption:%) $(JAVA_VM_ARGS:%=-vmoption:%)
 
-# Option to tell jtreg to not run tests marked with "ignore"
-ifeq ($(PLATFORM), windows)
-  JTREG_KEY_OPTION = -k:!ignore
-else
-  JTREG_KEY_OPTION = -k:\!ignore
-endif
-JTREG_BASIC_OPTIONS += $(JTREG_KEY_OPTION)
- 
 # Make sure jtreg exists
 $(JTREG): $(JT_HOME)
 

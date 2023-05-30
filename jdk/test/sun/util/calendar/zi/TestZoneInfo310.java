@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -22,10 +22,14 @@
  */
 
 /*
- *@test
- *@bug 8007572 8008161
- *@summary Test whether the TimeZone generated from JSR310 tzdb is the same
- *as the one from the tz data from javazic
+ * @test
+ * @bug 8007572 8008161 8157792 8224560
+ * @summary Test whether the TimeZone generated from JSR310 tzdb is the same
+ * as the one from the tz data from javazic
+ * @build BackEnd Checksum DayOfWeek Gen GenDoc Main Mappings Month
+ *        Rule RuleDay RuleRec Simple TestZoneInfo310 Time Timezone
+ *        TzIDOldMapping Zone ZoneInfoFile ZoneInfoOld ZoneRec Zoneinfo
+ * @run main TestZoneInfo310
  */
 
 import java.io.File;
@@ -43,7 +47,7 @@ public class TestZoneInfo310 {
         String TESTDIR = System.getProperty("test.dir", ".");
         String SRCDIR = System.getProperty("test.src", ".");
         String tzdir = SRCDIR + File.separator + "tzdata";
-        String tzfiles = "africa antarctica asia australasia europe northamerica pacificnew southamerica backward etcetera systemv";
+        String tzfiles = "africa antarctica asia australasia europe northamerica southamerica backward etcetera";
         String jdk_tzdir = SRCDIR + File.separator + "tzdata_jdk";
         String jdk_tzfiles = "gmt jdk11_backward";
         String zidir = TESTDIR + File.separator + "zi";
@@ -165,6 +169,24 @@ public class TestZoneInfo310 {
         for (String zid : zids_new) {
             ZoneInfoOld zi = toZoneInfoOld(TimeZone.getTimeZone(zid));
             ZoneInfoOld ziOLD = (ZoneInfoOld)ZoneInfoOld.getTimeZone(zid);
+            /*
+             * Temporary ignoring the failing TimeZones which are having zone
+             * rules defined till year 2037 and/or above and have negative DST
+             * save time in IANA tzdata. This bug is tracked via JDK-8223388.
+             *
+             * Tehran/Iran rule has rules beyond 2037, in which javazic assumes
+             * to be the last year. Thus javazic's rule is based on year 2037
+             * (Mar 20th/Sep 20th are the cutover dates), while the real rule
+             * has year 2087 where Mar 21st/Sep 21st are the cutover dates.
+             */
+            if (zid.equals("Africa/Casablanca") || // uses "Morocco" rule
+                zid.equals("Africa/El_Aaiun") || // uses "Morocco" rule
+                zid.equals("Asia/Tehran") || // last rule mismatch
+                zid.equals("Asia/Gaza") || // uses "Palestine" rule
+                zid.equals("Asia/Hebron") || // uses "Palestine" rule
+                zid.equals("Iran")) { // last rule mismatch
+                    continue;
+            }
             if (! zi.equalsTo(ziOLD)) {
                 System.out.println(zi.diffsTo(ziOLD));
                 throw new RuntimeException("  FAILED:  " + zid);
@@ -181,8 +203,9 @@ public class TestZoneInfo310 {
 
         // test getAvailableIDs(raw);
         zids_new = TimeZone.getAvailableIDs(-8 * 60 * 60 * 1000);
-        //Arrays.sort(zids_new);
+        Arrays.sort(zids_new);
         zids_old = ZoneInfoOld.getAvailableIDs(-8 * 60 * 60 * 1000);
+        Arrays.sort(zids_old);
         if (!Arrays.equals(zids_new, zids_old)) {
             System.out.println("------------------------");
             System.out.println("NEW.getAvailableIDs(-8:00)");

@@ -509,8 +509,13 @@ void LIR_Assembler::jobject2reg(jobject o, Register reg) {
   if (o == NULL) {
     __ set(NULL_WORD, reg);
   } else {
+#ifdef ASSERT
+    {
+      ThreadInVMfromNative tiv(JavaThread::current());
+      assert(Universe::heap()->is_in_reserved(JNIHandles::resolve(o)), "should be real oop");
+    }
+#endif
     int oop_index = __ oop_recorder()->find_index(o);
-    assert(Universe::heap()->is_in_reserved(JNIHandles::resolve(o)), "should be real oop");
     RelocationHolder rspec = oop_Relocation::spec(oop_index);
     __ set(NULL_WORD, reg, rspec); // Will be set when the nmethod is created
   }
@@ -579,7 +584,7 @@ void LIR_Assembler::emit_op3(LIR_Op3* op) {
         __ and3(Rscratch, divisor - 1, Rscratch);
       }
       __ add(Rdividend, Rscratch, Rscratch);
-      __ sra(Rscratch, log2_intptr(divisor), Rresult);
+      __ sra(Rscratch, log2_int(divisor), Rresult);
       return;
     } else {
       if (divisor == 2) {
@@ -1676,6 +1681,18 @@ void LIR_Assembler::comp_op(LIR_Condition condition, LIR_Opr opr1, LIR_Opr opr2,
           }
           break;
 
+        case T_METADATA:
+          // We only need, for now, comparison with NULL for metadata.
+          { assert(condition == lir_cond_equal || condition == lir_cond_notEqual, "oops");
+            Metadata* m = opr2->as_constant_ptr()->as_metadata();
+            if (m == NULL) {
+              __ cmp(opr1->as_register(), 0);
+            } else {
+              ShouldNotReachHere();
+            }
+          }
+          break;
+
         default:
           ShouldNotReachHere();
           break;
@@ -2166,6 +2183,27 @@ void LIR_Assembler::emit_arraycopy(LIR_OpArrayCopy* op) {
     __ tst(dst);
     __ brx(Assembler::equal, false, Assembler::pn, *stub->entry());
     __ delayed()->nop();
+  }
+
+  // If the compiler was not able to prove that exact type of the source or the destination
+  // of the arraycopy is an array type, check at runtime if the source or the destination is
+  // an instance type.
+  if (flags & LIR_OpArrayCopy::type_check) {
+    if (!(flags & LIR_OpArrayCopy::LIR_OpArrayCopy::dst_objarray)) {
+      __ load_klass(dst, tmp);
+      __ lduw(tmp, in_bytes(Klass::layout_helper_offset()), tmp2);
+      __ cmp(tmp2, Klass::_lh_neutral_value);
+      __ br(Assembler::greaterEqual, false, Assembler::pn, *stub->entry());
+      __ delayed()->nop();
+    }
+
+    if (!(flags & LIR_OpArrayCopy::LIR_OpArrayCopy::src_objarray)) {
+      __ load_klass(src, tmp);
+      __ lduw(tmp, in_bytes(Klass::layout_helper_offset()), tmp2);
+      __ cmp(tmp2, Klass::_lh_neutral_value);
+      __ br(Assembler::greaterEqual, false, Assembler::pn, *stub->entry());
+      __ delayed()->nop();
+    }
   }
 
   if (flags & LIR_OpArrayCopy::src_pos_positive_check) {

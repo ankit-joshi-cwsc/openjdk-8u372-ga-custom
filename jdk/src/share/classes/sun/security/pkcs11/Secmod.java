@@ -73,6 +73,15 @@ public final class Secmod {
 
     private final static String TRUST_LIB_NAME = "nssckbi";
 
+    // Slot IDs - defined in j2secmod.h on the native side
+    // Values obtained from NSS's pkcs11i.h header
+
+    private final static int NETSCAPE_SLOT_ID = 0x1;
+
+    private final static int PRIVATE_KEY_SLOT_ID = 0x2;
+
+    private final static int FIPS_SLOT_ID = 0x3;
+
     // handle to be passed to the native code, 0 means not initialized
     private long nssHandle;
 
@@ -196,13 +205,23 @@ public final class Secmod {
         }
 
         if (configDir != null) {
-            File configBase = new File(configDir);
-            if (configBase.isDirectory() == false ) {
-                throw new IOException("configDir must be a directory: " + configDir);
+            String configDirPath = null;
+            String sqlPrefix = "sql:";
+            if (!configDir.startsWith(sqlPrefix)) {
+                configDirPath = configDir;
+            } else {
+                StringBuilder configDirPathSB = new StringBuilder(configDir);
+                configDirPath = configDirPathSB.substring(sqlPrefix.length());
             }
-            File secmodFile = new File(configBase, "secmod.db");
-            if (secmodFile.isFile() == false) {
-                throw new FileNotFoundException(secmodFile.getPath());
+            File configBase = new File(configDirPath);
+            if (configBase.isDirectory() == false ) {
+                throw new IOException("configDir must be a directory: " + configDirPath);
+            }
+            if (!configDir.startsWith(sqlPrefix)) {
+                File secmodFile = new File(configBase, "secmod.db");
+                if (secmodFile.isFile() == false) {
+                    throw new FileNotFoundException(secmodFile.getPath());
+                }
             }
         }
 
@@ -382,20 +401,21 @@ public final class Secmod {
         private Map<Bytes,TrustAttributes> trust;
 
         Module(String libraryDir, String libraryName, String commonName,
-                boolean fips, int slot) {
+                int slotIndex, int slotId) {
             ModuleType type;
 
             if ((libraryName == null) || (libraryName.length() == 0)) {
                 // must be softtoken
                 libraryName = System.mapLibraryName(SOFTTOKEN_LIB_NAME);
-                if (fips == false) {
-                    type = (slot == 0) ? ModuleType.CRYPTO : ModuleType.KEYSTORE;
-                } else {
+                if (slotId == NETSCAPE_SLOT_ID) {
+                    type = ModuleType.CRYPTO;
+                } else if (slotId == PRIVATE_KEY_SLOT_ID) {
+                    type = ModuleType.KEYSTORE;
+                } else if (slotId == FIPS_SLOT_ID) {
                     type = ModuleType.FIPS;
-                    if (slot != 0) {
-                        throw new RuntimeException
-                            ("Slot index should be 0 for FIPS slot");
-                    }
+                } else {
+                    throw new RuntimeException("Unexpected slot ID " + slotId +
+                            " in the NSS Internal Module");
                 }
             } else {
                 if (libraryName.endsWith(System.mapLibraryName(TRUST_LIB_NAME))
@@ -403,10 +423,6 @@ public final class Secmod {
                     type = ModuleType.TRUSTANCHOR;
                 } else {
                     type = ModuleType.EXTERNAL;
-                }
-                if (fips) {
-                    throw new RuntimeException("FIPS flag set for non-internal "
-                        + "module: " + libraryName + ", " + commonName);
                 }
             }
             // On Ubuntu the libsoftokn3 library is located in a subdirectory
@@ -420,7 +436,7 @@ public final class Secmod {
             }
             this.libraryName = libraryFile.getPath();
             this.commonName = commonName;
-            this.slot = slot;
+            this.slot = slotIndex;
             this.type = type;
             initConfiguration();
         }

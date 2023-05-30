@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2001, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -27,8 +27,10 @@
 
 #include "memory/allocation.hpp"
 #include "memory/allocation.inline.hpp"
+#include "memory/padded.hpp"
 #include "runtime/mutex.hpp"
 #include "runtime/orderAccess.inline.hpp"
+#include "utilities/globalDefinitions.hpp"
 #include "utilities/stack.hpp"
 
 // Simple TaskQueue stats that are collected by default in debug builds.
@@ -111,9 +113,6 @@ protected:
   // Internal type for indexing the queue; also used for the tag.
   typedef NOT_LP64(uint16_t) LP64_ONLY(uint32_t) idx_t;
 
-  // The first free element after the last one pushed (mod N).
-  volatile uint _bottom;
-
   enum { MOD_N_MASK = N - 1 };
 
   class Age {
@@ -153,6 +152,10 @@ protected:
     };
   };
 
+  // The first free element after the last one pushed (mod N).
+  volatile uint _bottom;
+  // Add paddings to reduce false-sharing cache contention between _bottom and _age
+  DEFINE_PAD_MINUS_SIZE(0, DEFAULT_CACHE_LINE_SIZE, sizeof(uint));
   volatile Age _age;
 
   // These both operate mod N.
@@ -331,7 +334,8 @@ void GenericTaskQueue<E, F, N>::oops_do(OopClosure* f) {
     //            index, &_elems[index], _elems[index]);
     E* t = (E*)&_elems[index];      // cast away volatility
     oop* p = (oop*)t;
-    assert((*t)->is_oop_or_null(), "Not an oop or null");
+    // G1 does its own checking
+    assert(UseG1GC || (*t)->is_oop_or_null(), "Not an oop or null");
     f->do_oop(p);
   }
   // tty->print_cr("END OopTaskQueue::oops_do");
@@ -426,9 +430,7 @@ bool GenericTaskQueue<E, F, N>::pop_global(volatile E& t) {
 }
 
 template<class E, MEMFLAGS F, unsigned int N>
-GenericTaskQueue<E, F, N>::~GenericTaskQueue() {
-  FREE_C_HEAP_ARRAY(E, _elems, F);
-}
+GenericTaskQueue<E, F, N>::~GenericTaskQueue() {}
 
 // OverflowTaskQueue is a TaskQueue that also includes an overflow stack for
 // elements that do not fit in the TaskQueue.
@@ -452,6 +454,9 @@ public:
 
   // Push task t onto the queue or onto the overflow stack.  Return true.
   inline bool push(E t);
+
+  // Try to push task t onto the queue only. Returns true if successful, false otherwise.
+  inline bool try_push_to_taskqueue(E t);
 
   // Attempt to pop from the overflow stack; return true if anything was popped.
   inline bool pop_overflow(E& t);
@@ -486,6 +491,10 @@ bool OverflowTaskQueue<E, F, N>::pop_overflow(E& t)
   return true;
 }
 
+template <class E, MEMFLAGS F, unsigned int N>
+bool OverflowTaskQueue<E, F, N>::try_push_to_taskqueue(E t) {
+  return taskqueue_t::push(t);
+}
 class TaskQueueSetSuper {
 protected:
   static int randomParkAndMiller(int* seed0);
@@ -600,7 +609,9 @@ class ParallelTaskTerminator: public StackObj {
 private:
   int _n_threads;
   TaskQueueSetSuper* _queue_set;
+  char _pad_before[DEFAULT_CACHE_LINE_SIZE];
   int _offered_termination;
+  char _pad_after[DEFAULT_CACHE_LINE_SIZE];
 
 #ifdef TRACESPINNING
   static uint _total_yields;
@@ -704,6 +715,11 @@ GenericTaskQueue<E, F, N>::pop_local(volatile E& t) {
   } else {
     // Otherwise, the queue contained exactly one element; we take the slow
     // path.
+
+    // The barrier is required to prevent reordering the two reads of _age:
+    // one is the _age.get() below, and the other is _age.top() above the if-stmt.
+    // The algorithm may fail if _age.get() reads an older value than _age.top().
+    OrderAccess::loadload();
     return pop_local_slow(localBot, _age.get());
   }
 }

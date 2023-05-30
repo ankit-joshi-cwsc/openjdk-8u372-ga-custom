@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,10 +32,15 @@
 
 #ifdef __solaris__
 #include <fcntl.h>
+#include <unistd.h>
+#include <stropts.h>
+
+#ifndef BSD_COMP
+#define BSD_COMP
+#endif
 #endif
 #ifdef __linux__
 #include <unistd.h>
-#include <sys/sysctl.h>
 #include <sys/utsname.h>
 #include <netinet/ip.h>
 
@@ -51,6 +56,8 @@
 #define IP_MULTICAST_ALL      49
 #endif
 #endif  //  __linux__
+
+#include <sys/ioctl.h>
 
 #ifndef IPTOS_TOS_MASK
 #define IPTOS_TOS_MASK 0x1e
@@ -166,9 +173,8 @@ Java_java_net_PlainDatagramSocketImpl_init(JNIEnv *env, jclass cls) {
     IO_fd_fdID = NET_GetFileDescriptorID(env);
     CHECK_NULL(IO_fd_fdID);
 
-    Java_java_net_InetAddress_init(env, 0);
-    Java_java_net_Inet4Address_init(env, 0);
-    Java_java_net_Inet6Address_init(env, 0);
+    initInetAddressIDs(env);
+    JNU_CHECK_EXCEPTION(env);
     Java_java_net_NetworkInterface_init(env, 0);
 
 }
@@ -562,12 +568,15 @@ Java_java_net_PlainDatagramSocketImpl_peek(JNIEnv *env, jobject this,
     iaObj = NET_SockaddrToInetAddress(env, (struct sockaddr *)&remote_addr, &port);
 #ifdef AF_INET6
     family = getInetAddress_family(env, iaObj) == IPv4? AF_INET : AF_INET6;
+    JNU_CHECK_EXCEPTION_RETURN(env, -1);
 #else
     family = AF_INET;
 #endif
     if (family == AF_INET) { /* this API can't handle IPV6 addresses */
         int address = getInetAddress_addr(env, iaObj);
+        JNU_CHECK_EXCEPTION_RETURN(env, -1);
         setInetAddress_addr(env, addressObj, address);
+        JNU_CHECK_EXCEPTION_RETURN(env, -1);
     }
     return port;
 }
@@ -946,6 +955,7 @@ Java_java_net_PlainDatagramSocketImpl_datagramSocketCreate(JNIEnv *env,
                                                            jobject this) {
     jobject fdObj = (*env)->GetObjectField(env, this, pdsi_fdID);
     int arg, fd, t = 1;
+    char tmpbuf[1024];
 #ifdef AF_INET6
     int domain = ipv6_available() ? AF_INET6 : AF_INET;
 #else
@@ -981,30 +991,38 @@ Java_java_net_PlainDatagramSocketImpl_datagramSocketCreate(JNIEnv *env,
     arg = 65507;
     if (JVM_SetSockOpt(fd, SOL_SOCKET, SO_SNDBUF,
                        (char *)&arg, sizeof(arg)) < 0) {
-        JNU_ThrowByName(env, JNU_JAVANETPKG "SocketException",
-                        strerror(errno));
+        getErrorString(errno, tmpbuf, sizeof(tmpbuf));
+        JNU_ThrowByName(env, JNU_JAVANETPKG "SocketException", tmpbuf);
+        close(fd);
         return;
     }
     if (JVM_SetSockOpt(fd, SOL_SOCKET, SO_RCVBUF,
                        (char *)&arg, sizeof(arg)) < 0) {
-        JNU_ThrowByName(env, JNU_JAVANETPKG "SocketException",
-                        strerror(errno));
+        getErrorString(errno, tmpbuf, sizeof(tmpbuf));
+        JNU_ThrowByName(env, JNU_JAVANETPKG "SocketException", tmpbuf);
+        close(fd);
         return;
     }
 #endif /* __APPLE__ */
 
-     setsockopt(fd, SOL_SOCKET, SO_BROADCAST, (char*) &t, sizeof(int));
+    if (setsockopt(fd, SOL_SOCKET, SO_BROADCAST, (char*) &t, sizeof (int)) < 0) {
+        getErrorString(errno, tmpbuf, sizeof(tmpbuf));
+        JNU_ThrowByName(env, JNU_JAVANETPKG "SocketException", tmpbuf);
+        close(fd);
+        return;
+    }
 
 #if defined(__linux__)
-     arg = 0;
-     int level = (domain == AF_INET6) ? IPPROTO_IPV6 : IPPROTO_IP;
-     if ((setsockopt(fd, level, IP_MULTICAST_ALL, (char*)&arg, sizeof(arg)) < 0) &&
-         (errno != ENOPROTOOPT)) {
-         JNU_ThrowByName(env, JNU_JAVANETPKG "SocketException",
-                         strerror(errno));
-         close(fd);
-         return;
-     }
+    arg = 0;
+    int level = (domain == AF_INET6) ? IPPROTO_IPV6 : IPPROTO_IP;
+    if ((setsockopt(fd, level, IP_MULTICAST_ALL, (char*)&arg, sizeof(arg)) < 0) &&
+          (errno != ENOPROTOOPT))
+    {
+        getErrorString(errno, tmpbuf, sizeof(tmpbuf));
+        JNU_ThrowByName(env, JNU_JAVANETPKG "SocketException", tmpbuf);
+        close(fd);
+        return;
+    }
 #endif
 
 #if defined (__linux__) && defined (AF_INET6)
@@ -1014,8 +1032,13 @@ Java_java_net_PlainDatagramSocketImpl_datagramSocketCreate(JNIEnv *env,
      */
     if (domain == AF_INET6) {
         int ttl = 1;
-        setsockopt(fd, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, (char *)&ttl,
-                   sizeof(ttl));
+        if (setsockopt(fd, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, (char *) &ttl,
+                sizeof (ttl)) < 0) {
+            getErrorString(errno, tmpbuf, sizeof(tmpbuf));
+            JNU_ThrowByName(env, JNU_JAVANETPKG "SocketException", tmpbuf);
+            close(fd);
+            return;
+        }
     }
 #endif /* __linux__ */
 
@@ -1057,6 +1080,7 @@ static void mcast_set_if_by_if_v4(JNIEnv *env, jobject this, int fd, jobject val
     struct in_addr in;
     jobjectArray addrArray;
     jsize len;
+    jint family;
     jobject addr;
     int i;
 
@@ -1086,8 +1110,12 @@ static void mcast_set_if_by_if_v4(JNIEnv *env, jobject this, int fd, jobject val
      */
     for (i = 0; i < len; i++) {
         addr = (*env)->GetObjectArrayElement(env, addrArray, i);
-        if (getInetAddress_family(env, addr) == IPv4) {
+        family = getInetAddress_family(env, addr);
+        JNU_CHECK_EXCEPTION(env);
+        if (family == IPv4) {
+            JNU_CHECK_EXCEPTION(env);
             in.s_addr = htonl(getInetAddress_addr(env, addr));
+            JNU_CHECK_EXCEPTION(env);
             break;
         }
     }
@@ -1141,6 +1169,7 @@ static void mcast_set_if_by_addr_v4(JNIEnv *env, jobject this, int fd, jobject v
 
     in.s_addr = htonl( getInetAddress_addr(env, value) );
 
+    JNU_CHECK_EXCEPTION(env);
     if (JVM_SetSockOpt(fd, IPPROTO_IP, IP_MULTICAST_IF,
                        (const char*)&in, sizeof(in)) < 0) {
         NET_ThrowByNameWithLastError(env, JNU_JAVANETPKG "SocketException",
@@ -1507,6 +1536,7 @@ jobject getMulticastInterface(JNIEnv *env, jobject this, int fd, jint opt) {
         CHECK_NULL_RETURN(addr, NULL);
 
         setInetAddress_addr(env, addr, ntohl(in.s_addr));
+        JNU_CHECK_EXCEPTION_RETURN(env, NULL);
 
         /*
          * For IP_MULTICAST_IF return InetAddress
@@ -1535,6 +1565,7 @@ jobject getMulticastInterface(JNIEnv *env, jobject this, int fd, jint opt) {
             CHECK_NULL_RETURN(ni_class, NULL);
         }
         ni = Java_java_net_NetworkInterface_getByInetAddress0(env, ni_class, addr);
+        JNU_CHECK_EXCEPTION_RETURN(env, NULL);
         if (ni) {
             return ni;
         }
@@ -1947,6 +1978,7 @@ static void mcast_join_leave(JNIEnv *env, jobject this,
 
     jobject fdObj = (*env)->GetObjectField(env, this, pdsi_fdID);
     jint fd;
+    jint family;
     jint ipv6_join_leave;
 
     if (IS_NULL(fdObj)) {
@@ -1968,7 +2000,10 @@ static void mcast_join_leave(JNIEnv *env, jobject this,
     ipv6_join_leave = ipv6_available();
 
 #ifdef __linux__
-    if (getInetAddress_family(env, iaObj) == IPv4) {
+    family = getInetAddress_family(env, iaObj);
+    JNU_CHECK_EXCEPTION(env);
+    if (family == IPv4) {
+        JNU_CHECK_EXCEPTION(env);
         ipv6_join_leave = JNI_FALSE;
     }
 #endif
@@ -2016,6 +2051,7 @@ static void mcast_join_leave(JNIEnv *env, jobject this,
                 }
 
                 mname.imr_multiaddr.s_addr = htonl(getInetAddress_addr(env, iaObj));
+                JNU_CHECK_EXCEPTION(env);
                 mname.imr_address.s_addr = 0;
                 mname.imr_ifindex =  (*env)->GetIntField(env, niObj, ni_indexID);
                 mname_len = sizeof(struct ip_mreqn);
@@ -2034,10 +2070,13 @@ static void mcast_join_leave(JNIEnv *env, jobject this,
                 addr = (*env)->GetObjectArrayElement(env, addrArray, 0);
 
                 mname.imr_multiaddr.s_addr = htonl(getInetAddress_addr(env, iaObj));
+                JNU_CHECK_EXCEPTION(env);
 #ifdef __linux__
                 mname.imr_address.s_addr = htonl(getInetAddress_addr(env, addr));
+                JNU_CHECK_EXCEPTION(env);
 #else
                 mname.imr_interface.s_addr = htonl(getInetAddress_addr(env, addr));
+                JNU_CHECK_EXCEPTION(env);
 #endif
                 mname_len = sizeof(struct ip_mreq);
             }
@@ -2073,6 +2112,7 @@ static void mcast_join_leave(JNIEnv *env, jobject this,
                 }
 
                 mname.imr_multiaddr.s_addr = htonl(getInetAddress_addr(env, iaObj));
+                JNU_CHECK_EXCEPTION(env);
                 mname.imr_address.s_addr = 0 ;
                 mname.imr_ifindex = index;
                 mname_len = sizeof(struct ip_mreqn);
@@ -2095,6 +2135,7 @@ static void mcast_join_leave(JNIEnv *env, jobject this,
                 mname.imr_interface.s_addr = in.s_addr;
 #endif
                 mname.imr_multiaddr.s_addr = htonl(getInetAddress_addr(env, iaObj));
+                JNU_CHECK_EXCEPTION(env);
                 mname_len = sizeof(struct ip_mreq);
             }
         }
@@ -2160,10 +2201,12 @@ static void mcast_join_leave(JNIEnv *env, jobject this,
         jint family;
         jint address;
         family = getInetAddress_family(env, iaObj) == IPv4? AF_INET : AF_INET6;
+        JNU_CHECK_EXCEPTION(env);
         if (family == AF_INET) { /* will convert to IPv4-mapped address */
             memset((char *) caddr, 0, 16);
             address = getInetAddress_addr(env, iaObj);
 
+            JNU_CHECK_EXCEPTION(env);
             caddr[10] = 0xff;
             caddr[11] = 0xff;
 
@@ -2172,7 +2215,7 @@ static void mcast_join_leave(JNIEnv *env, jobject this,
             caddr[14] = ((address >> 8) & 0xff);
             caddr[15] = (address & 0xff);
         } else {
-            getInet6Address_ipaddress(env, iaObj, caddr);
+            getInet6Address_ipaddress(env, iaObj, (char *) caddr);
         }
 
         memcpy((void *)&(mname6.ipv6mr_multiaddr), caddr, sizeof(struct in6_addr));
@@ -2264,4 +2307,29 @@ Java_java_net_PlainDatagramSocketImpl_leave(JNIEnv *env, jobject this,
                                             jobject iaObj, jobject niObj)
 {
     mcast_join_leave(env, this, iaObj, niObj, JNI_FALSE);
+}
+
+/*
+ * Class:     java_net_PlainDatagramSocketImpl
+ * Method:    dataAvailable
+ * Signature: ()I
+ */
+JNIEXPORT jint JNICALL
+Java_java_net_PlainDatagramSocketImpl_dataAvailable(JNIEnv *env, jobject this)
+{
+    int fd, retval;
+
+    jobject fdObj = (*env)->GetObjectField(env, this, pdsi_fdID);
+
+    if (IS_NULL(fdObj)) {
+        JNU_ThrowByName(env, JNU_JAVANETPKG "SocketException",
+                        "Socket closed");
+        return -1;
+    }
+    fd = (*env)->GetIntField(env, fdObj, IO_fd_fdID);
+
+    if (ioctl(fd, FIONREAD, &retval) < 0) {
+        return -1;
+    }
+    return retval;
 }

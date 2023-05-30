@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -44,6 +44,9 @@
 #include "utilities/macros.hpp"
 #include "utilities/stringUtils.hpp"
 #include "utilities/taskqueue.hpp"
+#if INCLUDE_JFR
+#include "jfr/jfr.hpp"
+#endif
 #ifdef TARGET_OS_FAMILY_linux
 # include "os_linux.inline.hpp"
 #endif
@@ -66,7 +69,11 @@
 #endif // INCLUDE_ALL_GCS
 
 // Note: This is a special bug reporting site for the JVM
-#define DEFAULT_VENDOR_URL_BUG "http://bugreport.java.com/bugreport/crash.jsp"
+#ifdef VENDOR_URL_VM_BUG
+# define DEFAULT_VENDOR_URL_BUG VENDOR_URL_VM_BUG
+#else
+# define DEFAULT_VENDOR_URL_BUG "http://bugreport.java.com/bugreport/crash.jsp"
+#endif
 #define DEFAULT_JAVA_LAUNCHER  "generic"
 
 // Disable options not supported in this release, with a warning if they
@@ -150,6 +157,20 @@ static bool match_option(const JavaVMOption *option, const char* name,
     return false;
   }
 }
+
+#if INCLUDE_JFR
+// return true on failure
+static bool match_jfr_option(const JavaVMOption** option) {
+  assert((*option)->optionString != NULL, "invariant");
+  char* tail = NULL;
+  if (match_option(*option, "-XX:StartFlightRecording", (const char**)&tail)) {
+    return Jfr::on_start_flight_recording_option(option, tail);
+  } else if (match_option(*option, "-XX:FlightRecorderOptions", (const char**)&tail)) {
+    return Jfr::on_flight_recorder_option(option, tail);
+  }
+  return false;
+}
+#endif
 
 static void logOption(const char* opt) {
   if (PrintVMOptions) {
@@ -298,9 +319,10 @@ static ObsoleteFlag obsolete_jvm_flags[] = {
   { "UsePermISM",                    JDK_Version::jdk(8), JDK_Version::jdk(9) },
   { "UseMPSS",                       JDK_Version::jdk(8), JDK_Version::jdk(9) },
   { "UseStringCache",                JDK_Version::jdk(8), JDK_Version::jdk(9) },
-  { "UseOldInlining",                JDK_Version::jdk(9), JDK_Version::jdk(10) },
-  { "AutoShutdownNMT",               JDK_Version::jdk(9), JDK_Version::jdk(10) },
+  { "UseOldInlining",                JDK_Version::jdk_update(8, 20), JDK_Version::jdk(10) },
+  { "AutoShutdownNMT",               JDK_Version::jdk_update(8, 40), JDK_Version::jdk(10) },
   { "CompilationRepeat",             JDK_Version::jdk(8), JDK_Version::jdk(9) },
+  { "SegmentedHeapDumpThreshold",    JDK_Version::jdk_update(8, 252), JDK_Version::jdk(10) },
 #ifdef PRODUCT
   { "DesiredMethodLimit",
                            JDK_Version::jdk_update(7, 2), JDK_Version::jdk(8) },
@@ -552,21 +574,20 @@ char* SysClassPath::add_jars_to_path(char* path, const char* directory) {
 
   /* Scan the directory for jars/zips, appending them to path. */
   struct dirent *entry;
-  char *dbuf = NEW_C_HEAP_ARRAY(char, os::readdir_buf_size(directory), mtInternal);
-  while ((entry = os::readdir(dir, (dirent *) dbuf)) != NULL) {
+  while ((entry = os::readdir(dir)) != NULL) {
     const char* name = entry->d_name;
     const char* ext = name + strlen(name) - 4;
     bool isJarOrZip = ext > name &&
       (os::file_name_strcmp(ext, ".jar") == 0 ||
        os::file_name_strcmp(ext, ".zip") == 0);
     if (isJarOrZip) {
-      char* jarpath = NEW_C_HEAP_ARRAY(char, directory_len + 2 + strlen(name), mtInternal);
-      sprintf(jarpath, "%s%s%s", directory, dir_sep, name);
+      size_t length = directory_len + 2 + strlen(name);
+      char* jarpath = NEW_C_HEAP_ARRAY(char, length, mtInternal);
+      jio_snprintf(jarpath, length, "%s%s%s", directory, dir_sep, name);
       path = add_to_path(path, jarpath, false);
       FREE_C_HEAP_ARRAY(char, jarpath, mtInternal);
     }
   }
-  FREE_C_HEAP_ARRAY(char, dbuf, mtInternal);
   os::closedir(dir);
   return path;
 }
@@ -704,9 +725,10 @@ static bool append_to_string_flag(char* name, const char* new_value, Flag::Flags
   } else if (new_len == 0) {
     value = old_value;
   } else {
-    char* buf = NEW_C_HEAP_ARRAY(char, old_len + 1 + new_len + 1, mtInternal);
+    size_t length = old_len + 1 + new_len + 1;
+    char* buf = NEW_C_HEAP_ARRAY(char, length, mtInternal);
     // each new setting adds another LINE to the switch:
-    sprintf(buf, "%s\n%s", old_value, new_value);
+    jio_snprintf(buf, length, "%s\n%s", old_value, new_value);
     value = buf;
     free_this_too = buf;
   }
@@ -813,15 +835,17 @@ const char* Arguments::build_resource_string(char** args, int count) {
   if (args == NULL || count == 0) {
     return NULL;
   }
-  size_t length = strlen(args[0]) + 1; // add 1 for the null terminator
-  for (int i = 1; i < count; i++) {
-    length += strlen(args[i]) + 1; // add 1 for a space
+  size_t length = 0;
+  for (int i = 0; i < count; i++) {
+    length += strlen(args[i]) + 1; // add 1 for a space or NULL terminating character
   }
   char* s = NEW_RESOURCE_ARRAY(char, length);
-  strcpy(s, args[0]);
-  for (int j = 1; j < count; j++) {
-    strcat(s, " ");
-    strcat(s, args[j]);
+  char* dst = s;
+  for (int j = 0; j < count; j++) {
+    size_t offset = strlen(args[j]) + 1; // add 1 for a space or NULL terminating character
+    jio_snprintf(dst, length, "%s ", args[j]); // jio_snprintf will replace the last space character with NULL character
+    dst += offset;
+    length -= offset;
   }
   return (const char*) s;
 }
@@ -1137,7 +1161,12 @@ void Arguments::set_tiered_flags() {
   }
   // Increase the code cache size - tiered compiles a lot more.
   if (FLAG_IS_DEFAULT(ReservedCodeCacheSize)) {
+#ifndef AARCH64
     FLAG_SET_DEFAULT(ReservedCodeCacheSize, ReservedCodeCacheSize * 5);
+#else
+    FLAG_SET_DEFAULT(ReservedCodeCacheSize,
+                     MIN2(CODE_CACHE_DEFAULT_LIMIT, ReservedCodeCacheSize * 5));
+#endif
   }
   if (!UseInterpreter) { // -Xcomp
     Tier3InvokeNotifyFreqLog = 0;
@@ -1371,11 +1400,6 @@ void Arguments::set_cms_and_parnew_gc_flags() {
   // modification.
   if (!FLAG_IS_DEFAULT(CMSParPromoteBlocksToClaim) || !FLAG_IS_DEFAULT(OldPLABWeight)) {
     CFLS_LAB::modify_initialization(OldPLABSize, OldPLABWeight);
-  }
-
-  if (!ClassUnloading) {
-    FLAG_SET_CMDLINE(bool, CMSClassUnloadingEnabled, false);
-    FLAG_SET_CMDLINE(bool, ExplicitGCInvokesConcurrentAndUnloadsClasses, false);
   }
 
   if (PrintGCDetails && Verbose) {
@@ -1675,9 +1699,8 @@ void Arguments::set_g1_gc_flags() {
   FLAG_SET_DEFAULT(ParallelGCThreads,
                      Abstract_VM_Version::parallel_worker_threads());
   if (ParallelGCThreads == 0) {
-    FLAG_SET_DEFAULT(ParallelGCThreads,
-                     Abstract_VM_Version::parallel_worker_threads());
-  }
+    vm_exit_during_initialization("The flag -XX:+UseG1GC can not be combined with -XX:ParallelGCThreads=0", NULL);
+    }
 
 #if INCLUDE_ALL_GCS
   if (G1ConcRefinementThreads == 0) {
@@ -1745,6 +1768,13 @@ void Arguments::set_gc_specific_flags() {
     // Keeping the heap 100% free is hard ;-) so limit it to 99%.
     FLAG_SET_ERGO(uintx, MinHeapFreeRatio, 99);
   }
+
+  // If class unloading is disabled, also disable concurrent class unloading.
+  if (!ClassUnloading) {
+    FLAG_SET_CMDLINE(bool, CMSClassUnloadingEnabled, false);
+    FLAG_SET_CMDLINE(bool, ClassUnloadingWithConcurrentMark, false);
+    FLAG_SET_CMDLINE(bool, ExplicitGCInvokesConcurrentAndUnloadsClasses, false);
+  }
 #else // INCLUDE_ALL_GCS
   assert(verify_serial_gc_flags(), "SerialGC unset");
 #endif // INCLUDE_ALL_GCS
@@ -1765,24 +1795,67 @@ void Arguments::set_heap_size() {
     FLAG_SET_CMDLINE(uintx, MaxRAMFraction, DefaultMaxRAMFraction);
   }
 
-  const julong phys_mem =
+  julong phys_mem =
     FLAG_IS_DEFAULT(MaxRAM) ? MIN2(os::physical_memory(), (julong)MaxRAM)
                             : (julong)MaxRAM;
+
+  // Experimental support for CGroup memory limits
+  if (UseCGroupMemoryLimitForHeap) {
+    // This is a rough indicator that a CGroup limit may be in force
+    // for this process
+    const char* lim_file = "/sys/fs/cgroup/memory/memory.limit_in_bytes";
+    FILE *fp = fopen(lim_file, "r");
+    if (fp != NULL) {
+      julong cgroup_max = 0;
+      int ret = fscanf(fp, JULONG_FORMAT, &cgroup_max);
+      if (ret == 1 && cgroup_max > 0) {
+        // If unlimited, cgroup_max will be a very large, but unspecified
+        // value, so use initial phys_mem as a limit
+        if (PrintGCDetails && Verbose) {
+          // Cannot use gclog_or_tty yet.
+          tty->print_cr("Setting phys_mem to the min of cgroup limit ("
+                        JULONG_FORMAT "MB) and initial phys_mem ("
+                        JULONG_FORMAT "MB)", cgroup_max/M, phys_mem/M);
+        }
+        phys_mem = MIN2(cgroup_max, phys_mem);
+      } else {
+        warning("Unable to read/parse cgroup memory limit from %s: %s",
+                lim_file, errno != 0 ? strerror(errno) : "unknown error");
+      }
+      fclose(fp);
+    } else {
+      warning("Unable to open cgroup memory limit file %s (%s)", lim_file, strerror(errno));
+    }
+  }
+
+  // Convert Fraction to Precentage values
+  if (FLAG_IS_DEFAULT(MaxRAMPercentage) &&
+      !FLAG_IS_DEFAULT(MaxRAMFraction))
+    MaxRAMPercentage = 100.0 / MaxRAMFraction;
+
+   if (FLAG_IS_DEFAULT(MinRAMPercentage) &&
+       !FLAG_IS_DEFAULT(MinRAMFraction))
+     MinRAMPercentage = 100.0 / MinRAMFraction;
+
+   if (FLAG_IS_DEFAULT(InitialRAMPercentage) &&
+       !FLAG_IS_DEFAULT(InitialRAMFraction))
+     InitialRAMPercentage = 100.0 / InitialRAMFraction;
 
   // If the maximum heap size has not been set with -Xmx,
   // then set it as fraction of the size of physical memory,
   // respecting the maximum and minimum sizes of the heap.
   if (FLAG_IS_DEFAULT(MaxHeapSize)) {
-    julong reasonable_max = phys_mem / MaxRAMFraction;
-
-    if (phys_mem <= MaxHeapSize * MinRAMFraction) {
+    julong reasonable_max = (julong)((phys_mem * MaxRAMPercentage) / 100);
+    const julong reasonable_min = (julong)((phys_mem * MinRAMPercentage) / 100);
+    if (reasonable_min < MaxHeapSize) {
       // Small physical memory, so use a minimum fraction of it for the heap
-      reasonable_max = phys_mem / MinRAMFraction;
+      reasonable_max = reasonable_min;
     } else {
       // Not-small physical memory, so require a heap at least
       // as large as MaxHeapSize
       reasonable_max = MAX2(reasonable_max, (julong)MaxHeapSize);
     }
+
     if (!FLAG_IS_DEFAULT(ErgoHeapSizeLimit) && ErgoHeapSizeLimit != 0) {
       // Limit the heap size to ErgoHeapSizeLimit
       reasonable_max = MIN2(reasonable_max, (julong)ErgoHeapSizeLimit);
@@ -1824,7 +1897,7 @@ void Arguments::set_heap_size() {
     reasonable_minimum = limit_by_allocatable_memory(reasonable_minimum);
 
     if (InitialHeapSize == 0) {
-      julong reasonable_initial = phys_mem / InitialRAMFraction;
+      julong reasonable_initial = (julong)((phys_mem * InitialRAMPercentage) / 100);
 
       reasonable_initial = MAX3(reasonable_initial, reasonable_minimum, (julong)min_heap_size());
       reasonable_initial = MIN2(reasonable_initial, (julong)MaxHeapSize);
@@ -1847,6 +1920,94 @@ void Arguments::set_heap_size() {
       }
     }
   }
+}
+
+// This option inspects the machine and attempts to set various
+// parameters to be optimal for long-running, memory allocation
+// intensive jobs.  It is intended for machines with large
+// amounts of cpu and memory.
+jint Arguments::set_aggressive_heap_flags() {
+  // initHeapSize is needed since _initial_heap_size is 4 bytes on a 32 bit
+  // VM, but we may not be able to represent the total physical memory
+  // available (like having 8gb of memory on a box but using a 32bit VM).
+  // Thus, we need to make sure we're using a julong for intermediate
+  // calculations.
+  julong initHeapSize;
+  julong total_memory = os::physical_memory();
+
+  if (total_memory < (julong) 256 * M) {
+    jio_fprintf(defaultStream::error_stream(),
+            "You need at least 256mb of memory to use -XX:+AggressiveHeap\n");
+    vm_exit(1);
+  }
+
+  // The heap size is half of available memory, or (at most)
+  // all of possible memory less 160mb (leaving room for the OS
+  // when using ISM).  This is the maximum; because adaptive sizing
+  // is turned on below, the actual space used may be smaller.
+
+  initHeapSize = MIN2(total_memory / (julong) 2,
+                      total_memory - (julong) 160 * M);
+
+  initHeapSize = limit_by_allocatable_memory(initHeapSize);
+
+  if (FLAG_IS_DEFAULT(MaxHeapSize)) {
+    FLAG_SET_CMDLINE(uintx, MaxHeapSize, initHeapSize);
+    FLAG_SET_CMDLINE(uintx, InitialHeapSize, initHeapSize);
+    // Currently the minimum size and the initial heap sizes are the same.
+    set_min_heap_size(initHeapSize);
+  }
+  if (FLAG_IS_DEFAULT(NewSize)) {
+    // Make the young generation 3/8ths of the total heap.
+    FLAG_SET_CMDLINE(uintx, NewSize,
+            ((julong) MaxHeapSize / (julong) 8) * (julong) 3);
+    FLAG_SET_CMDLINE(uintx, MaxNewSize, NewSize);
+  }
+
+#ifndef _ALLBSD_SOURCE  // UseLargePages is not yet supported on BSD.
+  FLAG_SET_DEFAULT(UseLargePages, true);
+#endif
+
+  // Increase some data structure sizes for efficiency
+  FLAG_SET_CMDLINE(uintx, BaseFootPrintEstimate, MaxHeapSize);
+  FLAG_SET_CMDLINE(bool, ResizeTLAB, false);
+  FLAG_SET_CMDLINE(uintx, TLABSize, 256 * K);
+
+  // See the OldPLABSize comment below, but replace 'after promotion'
+  // with 'after copying'.  YoungPLABSize is the size of the survivor
+  // space per-gc-thread buffers.  The default is 4kw.
+  FLAG_SET_CMDLINE(uintx, YoungPLABSize, 256 * K);     // Note: this is in words
+
+  // OldPLABSize is the size of the buffers in the old gen that
+  // UseParallelGC uses to promote live data that doesn't fit in the
+  // survivor spaces.  At any given time, there's one for each gc thread.
+  // The default size is 1kw. These buffers are rarely used, since the
+  // survivor spaces are usually big enough.  For specjbb, however, there
+  // are occasions when there's lots of live data in the young gen
+  // and we end up promoting some of it.  We don't have a definite
+  // explanation for why bumping OldPLABSize helps, but the theory
+  // is that a bigger PLAB results in retaining something like the
+  // original allocation order after promotion, which improves mutator
+  // locality.  A minor effect may be that larger PLABs reduce the
+  // number of PLAB allocation events during gc.  The value of 8kw
+  // was arrived at by experimenting with specjbb.
+  FLAG_SET_CMDLINE(uintx, OldPLABSize, 8 * K);      // Note: this is in words
+
+  // Enable parallel GC and adaptive generation sizing
+  FLAG_SET_CMDLINE(bool, UseParallelGC, true);
+
+  // Encourage steady state memory management
+  FLAG_SET_CMDLINE(uintx, ThresholdTolerance, 100);
+
+  // This appears to improve mutator locality
+  FLAG_SET_CMDLINE(bool, ScavengeBeforeFullGC, false);
+
+  // Get around early Solaris scheduling bug
+  // (affinity vs other jobs on system)
+  // but disallow DR and offlining (5008695).
+  FLAG_SET_CMDLINE(bool, BindGCTaskThreadsToCPUs, true);
+
+  return JNI_OK;
 }
 
 // This must be called after ergonomics because we want bytecode rewriting
@@ -1890,7 +2051,7 @@ void Arguments::set_aggressive_opts_flags() {
 
     // Feed the cache size setting into the JDK
     char buffer[1024];
-    sprintf(buffer, "java.lang.Integer.IntegerCache.high=" INTX_FORMAT, AutoBoxCacheMax);
+    jio_snprintf(buffer, 1024, "java.lang.Integer.IntegerCache.high=" INTX_FORMAT, AutoBoxCacheMax);
     add_property(buffer);
   }
   if (AggressiveOpts && FLAG_IS_DEFAULT(BiasedLockingStartupDelay)) {
@@ -2612,6 +2773,14 @@ jint Arguments::parse_vm_init_args(const JavaVMInitArgs* args) {
     return result;
   }
 
+  // We need to ensure processor and memory resources have been properly
+  // configured - which may rely on arguments we just processed - before
+  // doing the final argument processing. Any argument processing that
+  // needs to know about processor and memory resources must occur after
+  // this point.
+
+  os::init_container_support();
+
   // Do final processing now that all arguments have been parsed
   result = finalize_vm_init_args(&scp, scp_assembly_required);
   if (result != JNI_OK) {
@@ -2765,7 +2934,9 @@ jint Arguments::parse_each_vm_init_arg(const JavaVMInitArgs* args,
 
         char *options = NULL;
         if(pos != NULL) {
-          options = strcpy(NEW_C_HEAP_ARRAY(char, strlen(pos + 1) + 1, mtInternal), pos + 1);
+          size_t length = strlen(pos + 1) + 1;
+          options = NEW_C_HEAP_ARRAY(char, length, mtInternal);
+          jio_snprintf(options, length, "%s", pos + 1);
         }
 #if !INCLUDE_JVMTI
         if (valid_hprof_or_jdwp_agent(name, is_absolute_path)) {
@@ -2784,7 +2955,9 @@ jint Arguments::parse_each_vm_init_arg(const JavaVMInitArgs* args,
       return JNI_ERR;
 #else
       if(tail != NULL) {
-        char *options = strcpy(NEW_C_HEAP_ARRAY(char, strlen(tail) + 1, mtInternal), tail);
+        size_t length = strlen(tail) + 1;
+        char *options = NEW_C_HEAP_ARRAY(char, length, mtInternal);
+        jio_snprintf(options, length, "%s", tail);
         add_init_agent("instrument", options, false);
       }
 #endif // !INCLUDE_JVMTI
@@ -3081,96 +3254,6 @@ jint Arguments::parse_each_vm_init_arg(const JavaVMInitArgs* args,
       _exit_hook = CAST_TO_FN_PTR(exit_hook_t, option->extraInfo);
     } else if (match_option(option, "abort", &tail)) {
       _abort_hook = CAST_TO_FN_PTR(abort_hook_t, option->extraInfo);
-    // -XX:+AggressiveHeap
-    } else if (match_option(option, "-XX:+AggressiveHeap", &tail)) {
-
-      // This option inspects the machine and attempts to set various
-      // parameters to be optimal for long-running, memory allocation
-      // intensive jobs.  It is intended for machines with large
-      // amounts of cpu and memory.
-
-      // initHeapSize is needed since _initial_heap_size is 4 bytes on a 32 bit
-      // VM, but we may not be able to represent the total physical memory
-      // available (like having 8gb of memory on a box but using a 32bit VM).
-      // Thus, we need to make sure we're using a julong for intermediate
-      // calculations.
-      julong initHeapSize;
-      julong total_memory = os::physical_memory();
-
-      if (total_memory < (julong)256*M) {
-        jio_fprintf(defaultStream::error_stream(),
-                    "You need at least 256mb of memory to use -XX:+AggressiveHeap\n");
-        vm_exit(1);
-      }
-
-      // The heap size is half of available memory, or (at most)
-      // all of possible memory less 160mb (leaving room for the OS
-      // when using ISM).  This is the maximum; because adaptive sizing
-      // is turned on below, the actual space used may be smaller.
-
-      initHeapSize = MIN2(total_memory / (julong)2,
-                          total_memory - (julong)160*M);
-
-      initHeapSize = limit_by_allocatable_memory(initHeapSize);
-
-      if (FLAG_IS_DEFAULT(MaxHeapSize)) {
-         FLAG_SET_CMDLINE(uintx, MaxHeapSize, initHeapSize);
-         FLAG_SET_CMDLINE(uintx, InitialHeapSize, initHeapSize);
-         // Currently the minimum size and the initial heap sizes are the same.
-         set_min_heap_size(initHeapSize);
-      }
-      if (FLAG_IS_DEFAULT(NewSize)) {
-         // Make the young generation 3/8ths of the total heap.
-         FLAG_SET_CMDLINE(uintx, NewSize,
-                                ((julong)MaxHeapSize / (julong)8) * (julong)3);
-         FLAG_SET_CMDLINE(uintx, MaxNewSize, NewSize);
-      }
-
-#ifndef _ALLBSD_SOURCE  // UseLargePages is not yet supported on BSD.
-      FLAG_SET_DEFAULT(UseLargePages, true);
-#endif
-
-      // Increase some data structure sizes for efficiency
-      FLAG_SET_CMDLINE(uintx, BaseFootPrintEstimate, MaxHeapSize);
-      FLAG_SET_CMDLINE(bool, ResizeTLAB, false);
-      FLAG_SET_CMDLINE(uintx, TLABSize, 256*K);
-
-      // See the OldPLABSize comment below, but replace 'after promotion'
-      // with 'after copying'.  YoungPLABSize is the size of the survivor
-      // space per-gc-thread buffers.  The default is 4kw.
-      FLAG_SET_CMDLINE(uintx, YoungPLABSize, 256*K);      // Note: this is in words
-
-      // OldPLABSize is the size of the buffers in the old gen that
-      // UseParallelGC uses to promote live data that doesn't fit in the
-      // survivor spaces.  At any given time, there's one for each gc thread.
-      // The default size is 1kw. These buffers are rarely used, since the
-      // survivor spaces are usually big enough.  For specjbb, however, there
-      // are occasions when there's lots of live data in the young gen
-      // and we end up promoting some of it.  We don't have a definite
-      // explanation for why bumping OldPLABSize helps, but the theory
-      // is that a bigger PLAB results in retaining something like the
-      // original allocation order after promotion, which improves mutator
-      // locality.  A minor effect may be that larger PLABs reduce the
-      // number of PLAB allocation events during gc.  The value of 8kw
-      // was arrived at by experimenting with specjbb.
-      FLAG_SET_CMDLINE(uintx, OldPLABSize, 8*K);  // Note: this is in words
-
-      // Enable parallel GC and adaptive generation sizing
-      FLAG_SET_CMDLINE(bool, UseParallelGC, true);
-      FLAG_SET_DEFAULT(ParallelGCThreads,
-                       Abstract_VM_Version::parallel_worker_threads());
-
-      // Encourage steady state memory management
-      FLAG_SET_CMDLINE(uintx, ThresholdTolerance, 100);
-
-      // This appears to improve mutator locality
-      FLAG_SET_CMDLINE(bool, ScavengeBeforeFullGC, false);
-
-      // Get around early Solaris scheduling bug
-      // (affinity vs other jobs on system)
-      // but disallow DR and offlining (5008695).
-      FLAG_SET_CMDLINE(bool, BindGCTaskThreadsToCPUs, true);
-
     } else if (match_option(option, "-XX:+NeverTenure", &tail)) {
       // The last option must always win.
       FLAG_SET_CMDLINE(bool, AlwaysTenure, false);
@@ -3231,6 +3314,12 @@ jint Arguments::parse_each_vm_init_arg(const JavaVMInitArgs* args,
     } else if (match_option(option, "-XX:+DisplayVMOutputToStdout", &tail)) {
       FLAG_SET_CMDLINE(bool, DisplayVMOutputToStderr, false);
       FLAG_SET_CMDLINE(bool, DisplayVMOutputToStdout, true);
+    } else if (match_option(option, "-XX:+ErrorFileToStderr", &tail)) {
+      FLAG_SET_CMDLINE(bool, ErrorFileToStdout, false);
+      FLAG_SET_CMDLINE(bool, ErrorFileToStderr, true);
+    } else if (match_option(option, "-XX:+ErrorFileToStdout", &tail)) {
+      FLAG_SET_CMDLINE(bool, ErrorFileToStderr, false);
+      FLAG_SET_CMDLINE(bool, ErrorFileToStdout, true);
     } else if (match_option(option, "-XX:+ExtendedDTraceProbes", &tail)) {
 #if defined(DTRACE_ENABLED)
       FLAG_SET_CMDLINE(bool, ExtendedDTraceProbes, true);
@@ -3339,6 +3428,10 @@ jint Arguments::parse_each_vm_init_arg(const JavaVMInitArgs* args,
           "ManagementServer is not supported in this VM.\n");
         return JNI_ERR;
 #endif // INCLUDE_MANAGEMENT
+#if INCLUDE_JFR
+    } else if (match_jfr_option(&option)) {
+      return JNI_EINVAL;
+#endif
     } else if (match_option(option, "-XX:", &tail)) { // -XX:xxxx
       // Skip -XX:Flags= since that case has already been handled
       if (strncmp(tail, "Flags=", strlen("Flags=")) != 0) {
@@ -3394,8 +3487,7 @@ void Arguments::fix_appclasspath() {
       src ++;
     }
 
-    char* copy = AllocateHeap(strlen(src) + 1, mtInternal);
-    strncpy(copy, src, strlen(src) + 1);
+    char* copy = os::strdup(src, mtInternal);
 
     // trim all trailing empty paths
     for (char* tail = copy + strlen(copy) - 1; tail >= copy && *tail == separator; tail--) {
@@ -3414,7 +3506,7 @@ void Arguments::fix_appclasspath() {
   }
 
   if (!PrintSharedArchiveAndExit) {
-    ClassLoader::trace_class_path("[classpath: ", _java_class_path->value());
+    ClassLoader::trace_class_path(tty, "[classpath: ", _java_class_path->value());
   }
 }
 
@@ -3423,14 +3515,12 @@ static bool has_jar_files(const char* directory) {
   if (dir == NULL) return false;
 
   struct dirent *entry;
-  char *dbuf = NEW_C_HEAP_ARRAY(char, os::readdir_buf_size(directory), mtInternal);
   bool hasJarFile = false;
-  while (!hasJarFile && (entry = os::readdir(dir, (dirent *) dbuf)) != NULL) {
+  while (!hasJarFile && (entry = os::readdir(dir)) != NULL) {
     const char* name = entry->d_name;
     const char* ext = name + strlen(name) - 4;
     hasJarFile = ext > name && (os::file_name_strcmp(ext, ".jar") == 0);
   }
-  FREE_C_HEAP_ARRAY(char, dbuf, mtInternal);
   os::closedir(dir);
   return hasJarFile ;
 }
@@ -3512,8 +3602,7 @@ static bool check_endorsed_and_ext_dirs() {
   if (dir != NULL) {
     int num_ext_jars = 0;
     struct dirent *entry;
-    char *dbuf = NEW_C_HEAP_ARRAY(char, os::readdir_buf_size(extDir), mtInternal);
-    while ((entry = os::readdir(dir, (dirent *) dbuf)) != NULL) {
+    while ((entry = os::readdir(dir)) != NULL) {
       const char* name = entry->d_name;
       const char* ext = name + strlen(name) - 4;
       if (ext > name && (os::file_name_strcmp(ext, ".jar") == 0)) {
@@ -3532,7 +3621,6 @@ static bool check_endorsed_and_ext_dirs() {
         }
       }
     }
-    FREE_C_HEAP_ARRAY(char, dbuf, mtInternal);
     os::closedir(dir);
     if (num_ext_jars > 0) {
       nonEmptyDirs += 1;
@@ -3571,6 +3659,15 @@ jint Arguments::finalize_vm_init_args(SysClassPath* scp_p, bool scp_assembly_req
     return JNI_ERR;
   }
 
+  // This must be done after all arguments have been processed
+  // and the container support has been initialized since AggressiveHeap
+  // relies on the amount of total memory available.
+  if (AggressiveHeap) {
+    jint result = set_aggressive_heap_flags();
+    if (result != JNI_OK) {
+      return result;
+    }
+  }
   // This must be done after all arguments have been processed.
   // java_compiler() true means set to "NONE" or empty.
   if (java_compiler() && !xdebug_mode()) {
@@ -3622,8 +3719,7 @@ jint Arguments::finalize_vm_init_args(SysClassPath* scp_p, bool scp_assembly_req
         }
       } else {
         char buffer[256];
-        strcpy(buffer, "java.awt.headless=");
-        strcat(buffer, envbuffer);
+        jio_snprintf(buffer, 256, "java.awt.headless=%s", envbuffer);
         if (!add_property(buffer)) {
           return JNI_ENOMEM;
         }
@@ -3722,6 +3818,14 @@ jint Arguments::parse_options_environment_variable(const char* name, SysClassPat
 
 void Arguments::set_shared_spaces_flags() {
   if (DumpSharedSpaces) {
+    if (FailOverToOldVerifier) {
+      // Don't fall back to the old verifier on verification failure. If a
+      // class fails verification with the split verifier, it might fail the
+      // CDS runtime verifier constraint check. In that case, we don't want
+      // to share the class. We only archive classes that pass the split verifier.
+      FLAG_SET_DEFAULT(FailOverToOldVerifier, false);
+    }
+
     if (RequireSharedSpaces) {
       warning("cannot dump shared archive while using shared archive");
     }
@@ -3762,18 +3866,14 @@ static char* get_shared_archive_path() {
     if (end != NULL) *end = '\0';
     size_t jvm_path_len = strlen(jvm_path);
     size_t file_sep_len = strlen(os::file_separator());
-    shared_archive_path = NEW_C_HEAP_ARRAY(char, jvm_path_len +
-        file_sep_len + 20, mtInternal);
+    const size_t len = jvm_path_len + file_sep_len + 20;
+    shared_archive_path = NEW_C_HEAP_ARRAY(char, len, mtInternal);
     if (shared_archive_path != NULL) {
-      strncpy(shared_archive_path, jvm_path, jvm_path_len + 1);
-      strncat(shared_archive_path, os::file_separator(), file_sep_len);
-      strncat(shared_archive_path, "classes.jsa", 11);
+      jio_snprintf(shared_archive_path, len, "%s%sclasses.jsa",
+        jvm_path, os::file_separator());
     }
   } else {
-    shared_archive_path = NEW_C_HEAP_ARRAY(char, strlen(SharedArchiveFile) + 1, mtInternal);
-    if (shared_archive_path != NULL) {
-      strncpy(shared_archive_path, SharedArchiveFile, strlen(SharedArchiveFile) + 1);
-    }
+    shared_archive_path = os::strdup(SharedArchiveFile, mtInternal);
   }
   return shared_archive_path;
 }
@@ -4015,6 +4115,16 @@ jint Arguments::apply_ergo() {
 
   set_shared_spaces_flags();
 
+#if defined(SPARC)
+  // BIS instructions require 'membar' instruction regardless of the number
+  // of CPUs because in virtualized/container environments which might use only 1
+  // CPU, BIS instructions may produce incorrect results.
+
+  if (FLAG_IS_DEFAULT(AssumeMP)) {
+    FLAG_SET_DEFAULT(AssumeMP, true);
+  }
+#endif
+
   // Check the GC selections again.
   if (!check_gc_consistency()) {
     return JNI_EINVAL;
@@ -4103,6 +4213,11 @@ jint Arguments::apply_ergo() {
 
   if (FLAG_IS_CMDLINE(CompressedClassSpaceSize) && !UseCompressedClassPointers) {
     warning("Setting CompressedClassSpaceSize has no effect when compressed class pointers are not used");
+  }
+
+  if (UseOnStackReplacement && !UseLoopCounter) {
+    warning("On-stack-replacement requires loop counters; enabling loop counters");
+    FLAG_SET_DEFAULT(UseLoopCounter, true);
   }
 
 #ifndef PRODUCT

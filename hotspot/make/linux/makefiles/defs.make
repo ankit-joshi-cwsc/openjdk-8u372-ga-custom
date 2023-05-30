@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2006, 2015, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2006, 2021, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -69,7 +69,7 @@ ifeq ($(ARCH), ia64)
 endif
 
 # sparc
-ifeq ($(ARCH), sparc64)
+ifneq (,$(findstring $(ARCH), sparc))
   ifeq ($(ARCH_DATA_MODEL), 64)
     ARCH_DATA_MODEL  = 64
     MAKE_ARGS        += LP64=1
@@ -83,39 +83,44 @@ ifeq ($(ARCH), sparc64)
   HS_ARCH            = sparc
 endif
 
-# amd64/x86_64
-ifneq (,$(findstring $(ARCH), amd64 x86_64))
+# i686/i586 and amd64/x86_64
+ifneq (,$(findstring $(ARCH), amd64 x86_64 i686 i586))
   ifeq ($(ARCH_DATA_MODEL), 64)
     ARCH_DATA_MODEL = 64
     MAKE_ARGS       += LP64=1
     PLATFORM        = linux-amd64
     VM_PLATFORM     = linux_amd64
-    HS_ARCH         = x86
   else
     ARCH_DATA_MODEL = 32
     PLATFORM        = linux-i586
     VM_PLATFORM     = linux_i486
-    HS_ARCH         = x86
-    # We have to reset ARCH to i686 since SRCARCH relies on it
-    ARCH            = i686
   endif
+  HS_ARCH           = x86
 endif
 
-# i686/i586 ie 32-bit x86
-ifneq (,$(findstring $(ARCH), i686 i586))
-  ARCH_DATA_MODEL  = 32
-  PLATFORM         = linux-i586
-  VM_PLATFORM      = linux_i486
-  HS_ARCH          = x86
+# PPC
+# Notice: after 8046471 ARCH will be 'ppc' for top-level ppc64 builds but
+# 'ppc64' for HotSpot-only ppc64 builds. Need to detect both variants here!
+ifneq (,$(findstring $(ARCH), ppc ppc64))
+  ifeq ($(ARCH_DATA_MODEL), 64)
+    MAKE_ARGS        += LP64=1
+    PLATFORM         = linux-ppc64
+    VM_PLATFORM      = linux_ppc64
+  else
+    ARCH_DATA_MODEL  = 32
+    PLATFORM         = linux-ppc
+    VM_PLATFORM      = linux_ppc
+  endif
+  HS_ARCH = ppc
 endif
 
-# PPC64
-ifeq ($(ARCH), ppc64)
+# AARCH64
+ifeq ($(ARCH), aarch64)
   ARCH_DATA_MODEL  = 64
   MAKE_ARGS        += LP64=1
-  PLATFORM         = linux-ppc64
-  VM_PLATFORM      = linux_ppc64
-  HS_ARCH          = ppc
+  PLATFORM         = linux-aarch64
+  VM_PLATFORM      = linux_aarch64
+  HS_ARCH          = aarch64
 endif
 
 # On 32 bit linux we build server and client, on 64 bit just server.
@@ -243,10 +248,12 @@ EXPORT_LIST += $(EXPORT_DOCS_DIR)/platform/jvmti/jvmti.html
 # client and server subdirectories have symbolic links to ../libjsig.so
 EXPORT_LIST += $(EXPORT_JRE_LIB_ARCH_DIR)/libjsig.$(LIBRARY_SUFFIX)
 ifeq ($(ENABLE_FULL_DEBUG_SYMBOLS),1)
-  ifeq ($(ZIP_DEBUGINFO_FILES),1)
-    EXPORT_LIST += $(EXPORT_JRE_LIB_ARCH_DIR)/libjsig.diz
-  else
-    EXPORT_LIST += $(EXPORT_JRE_LIB_ARCH_DIR)/libjsig.debuginfo
+  ifneq ($(STRIP_POLICY),no_strip)
+    ifeq ($(ZIP_DEBUGINFO_FILES),1)
+      EXPORT_LIST += $(EXPORT_JRE_LIB_ARCH_DIR)/libjsig.diz
+    else
+      EXPORT_LIST += $(EXPORT_JRE_LIB_ARCH_DIR)/libjsig.debuginfo
+    endif
   endif
 endif
 EXPORT_SERVER_DIR = $(EXPORT_JRE_LIB_ARCH_DIR)/server
@@ -257,10 +264,12 @@ ifeq ($(findstring true, $(JVM_VARIANT_SERVER) $(JVM_VARIANT_ZERO) $(JVM_VARIANT
   EXPORT_LIST += $(EXPORT_SERVER_DIR)/Xusage.txt
   EXPORT_LIST += $(EXPORT_SERVER_DIR)/libjvm.$(LIBRARY_SUFFIX)
   ifeq ($(ENABLE_FULL_DEBUG_SYMBOLS),1)
-    ifeq ($(ZIP_DEBUGINFO_FILES),1)
-      EXPORT_LIST += $(EXPORT_SERVER_DIR)/libjvm.diz
-    else
-      EXPORT_LIST += $(EXPORT_SERVER_DIR)/libjvm.debuginfo
+    ifneq ($(STRIP_POLICY),no_strip)
+      ifeq ($(ZIP_DEBUGINFO_FILES),1)
+        EXPORT_LIST += $(EXPORT_SERVER_DIR)/libjvm.diz
+      else
+        EXPORT_LIST += $(EXPORT_SERVER_DIR)/libjvm.debuginfo
+      endif
     endif
   endif
 endif
@@ -269,10 +278,12 @@ ifeq ($(JVM_VARIANT_CLIENT),true)
   EXPORT_LIST += $(EXPORT_CLIENT_DIR)/Xusage.txt
   EXPORT_LIST += $(EXPORT_CLIENT_DIR)/libjvm.$(LIBRARY_SUFFIX)
   ifeq ($(ENABLE_FULL_DEBUG_SYMBOLS),1)
-    ifeq ($(ZIP_DEBUGINFO_FILES),1)
-      EXPORT_LIST += $(EXPORT_CLIENT_DIR)/libjvm.diz
-    else
-      EXPORT_LIST += $(EXPORT_CLIENT_DIR)/libjvm.debuginfo
+    ifneq ($(STRIP_POLICY),no_strip)
+      ifeq ($(ZIP_DEBUGINFO_FILES),1)
+        EXPORT_LIST += $(EXPORT_CLIENT_DIR)/libjvm.diz
+      else
+        EXPORT_LIST += $(EXPORT_CLIENT_DIR)/libjvm.debuginfo
+      endif
     endif
   endif
 endif
@@ -282,10 +293,12 @@ ifeq ($(JVM_VARIANT_MINIMAL1),true)
   EXPORT_LIST += $(EXPORT_MINIMAL_DIR)/libjvm.$(LIBRARY_SUFFIX)
 
   ifeq ($(ENABLE_FULL_DEBUG_SYMBOLS),1)
-    ifeq ($(ZIP_DEBUGINFO_FILES),1)
-	EXPORT_LIST += $(EXPORT_MINIMAL_DIR)/libjvm.diz
-    else
-	EXPORT_LIST += $(EXPORT_MINIMAL_DIR)/libjvm.debuginfo
+    ifneq ($(STRIP_POLICY),no_strip)
+      ifeq ($(ZIP_DEBUGINFO_FILES),1)
+          EXPORT_LIST += $(EXPORT_MINIMAL_DIR)/libjvm.diz
+      else
+          EXPORT_LIST += $(EXPORT_MINIMAL_DIR)/libjvm.debuginfo
+      endif
     endif
   endif
 endif
@@ -296,13 +309,19 @@ ADD_SA_BINARIES/x86   = $(EXPORT_JRE_LIB_ARCH_DIR)/libsaproc.$(LIBRARY_SUFFIX) \
                         $(EXPORT_LIB_DIR)/sa-jdi.jar
 ADD_SA_BINARIES/sparc = $(EXPORT_JRE_LIB_ARCH_DIR)/libsaproc.$(LIBRARY_SUFFIX) \
                         $(EXPORT_LIB_DIR)/sa-jdi.jar
+ADD_SA_BINARIES/aarch64 = $(EXPORT_JRE_LIB_ARCH_DIR)/libsaproc.$(LIBRARY_SUFFIX) \
+                        $(EXPORT_LIB_DIR)/sa-jdi.jar
 ifeq ($(ENABLE_FULL_DEBUG_SYMBOLS),1)
-  ifeq ($(ZIP_DEBUGINFO_FILES),1)
-    ADD_SA_BINARIES/x86   += $(EXPORT_JRE_LIB_ARCH_DIR)/libsaproc.diz
-    ADD_SA_BINARIES/sparc += $(EXPORT_JRE_LIB_ARCH_DIR)/libsaproc.diz
-  else
-    ADD_SA_BINARIES/x86   += $(EXPORT_JRE_LIB_ARCH_DIR)/libsaproc.debuginfo
-    ADD_SA_BINARIES/sparc += $(EXPORT_JRE_LIB_ARCH_DIR)/libsaproc.debuginfo
+  ifneq ($(STRIP_POLICY),no_strip)
+    ifeq ($(ZIP_DEBUGINFO_FILES),1)
+      ADD_SA_BINARIES/x86     += $(EXPORT_JRE_LIB_ARCH_DIR)/libsaproc.diz
+      ADD_SA_BINARIES/sparc   += $(EXPORT_JRE_LIB_ARCH_DIR)/libsaproc.diz
+      ADD_SA_BINARIES/aarch64 += $(EXPORT_JRE_LIB_ARCH_DIR)/libsaproc.diz
+    else
+      ADD_SA_BINARIES/x86     += $(EXPORT_JRE_LIB_ARCH_DIR)/libsaproc.debuginfo
+      ADD_SA_BINARIES/sparc   += $(EXPORT_JRE_LIB_ARCH_DIR)/libsaproc.debuginfo
+      ADD_SA_BINARIES/aarch64 += $(EXPORT_JRE_LIB_ARCH_DIR)/libsaproc.debuginfo
+    endif
   endif
 endif
 ADD_SA_BINARIES/ppc   =

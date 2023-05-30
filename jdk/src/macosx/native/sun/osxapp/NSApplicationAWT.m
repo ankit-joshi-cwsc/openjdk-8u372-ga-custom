@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -71,14 +71,32 @@ AWT_ASSERT_APPKIT_THREAD;
 
     [super dealloc];
 }
-//- (void)finalize { [super finalize]; }
 
 - (void)finishLaunching
 {
 AWT_ASSERT_APPKIT_THREAD;
 
     JNIEnv *env = [ThreadUtilities getJNIEnv];
-
+#ifdef __MAC_10_14 // code for SDK 10.14 or newer
+    SEL appearanceSel = @selector(setAppearance:); // macOS 10.14+
+    if ([self respondsToSelector:appearanceSel]) {
+        NSString *appearanceProp = [PropertiesUtilities
+                javaSystemPropertyForKey:@"apple.awt.application.appearance"
+                                 withEnv:env];
+        if (![@"system" isEqual:appearanceProp]) {
+            // by default use light mode, because dark mode is not supported yet
+            NSAppearance *appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+            if (appearanceProp != nil) {
+                NSAppearance *requested = [NSAppearance appearanceNamed:appearanceProp];
+                if (requested != nil) {
+                    appearance = requested;
+                }
+            }
+            // [self setAppearance:appearance];
+            [self performSelector:appearanceSel withObject:appearance];
+        }
+    }
+#endif
     // Get default nib file location
     // NOTE: This should learn about the current java.version. Probably best thru
     //  the Makefile system's -DFRAMEWORK_VERSION define. Need to be able to pass this
@@ -363,7 +381,6 @@ AWT_ASSERT_APPKIT_THREAD;
 {
     void (^copy)() = [block copy];
     NSInteger encode = (NSInteger) copy;
-    [copy retain];
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];    
     NSEvent* event = [NSEvent otherEventWithType: NSApplicationDefined
                                         location: NSMakePoint(0,0)
@@ -379,9 +396,7 @@ AWT_ASSERT_APPKIT_THREAD;
     [pool drain];
 }
 
-
-
-- (void)postDummyEvent {
+- (void)postDummyEvent:(bool)useCocoa {
     seenDummyEventLock = [[NSConditionLock alloc] initWithCondition:NO];
     dummyEventTimestamp = [NSProcessInfo processInfo].systemUptime;
     
@@ -395,13 +410,28 @@ AWT_ASSERT_APPKIT_THREAD;
                                          subtype: 0
                                            data1: 0
                                            data2: 0];
-    [NSApp postEvent: event atStart: NO];
+    if (useCocoa) {
+        [NSApp postEvent:event atStart:NO];
+    } else {
+        ProcessSerialNumber psn;
+        GetCurrentProcess(&psn);
+        CGEventPostToPSN(&psn, [event CGEvent]);
+    }
     [pool drain];
 }
 
-- (void)waitForDummyEvent {
-    [seenDummyEventLock lockWhenCondition:YES];
-    [seenDummyEventLock unlock];
+- (void)waitForDummyEvent:(double)timeout {
+    bool unlock = true;
+    if (timeout >= 0) {
+        double sec = timeout / 1000;
+        unlock = [seenDummyEventLock lockWhenCondition:YES
+                               beforeDate:[NSDate dateWithTimeIntervalSinceNow:sec]];
+    } else {
+        [seenDummyEventLock lockWhenCondition:YES];
+    }
+    if (unlock) {
+        [seenDummyEventLock unlock];
+    }
     [seenDummyEventLock release];
 
     seenDummyEventLock = nil;

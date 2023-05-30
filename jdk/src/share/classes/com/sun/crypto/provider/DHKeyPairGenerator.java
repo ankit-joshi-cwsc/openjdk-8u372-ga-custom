@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -33,6 +33,8 @@ import javax.crypto.spec.DHParameterSpec;
 import javax.crypto.spec.DHGenParameterSpec;
 
 import sun.security.provider.ParameterCache;
+import static sun.security.util.SecurityProviderConstants.DEF_DH_KEY_SIZE;
+import static sun.security.util.SecurityProviderConstants.getDefDHPrivateExpSize;
 
 /**
  * This class represents the key pair generator for Diffie-Hellman key pairs.
@@ -42,8 +44,7 @@ import sun.security.provider.ParameterCache;
  * <ul>
  * <li>By providing the size in bits of the prime modulus -
  * This will be used to create a prime modulus and base generator, which will
- * then be used to create the Diffie-Hellman key pair. The default size of the
- * prime modulus is 1024 bits.
+ * then be used to create the Diffie-Hellman key pair.
  * <li>By providing a prime modulus and base generator
  * </ul>
  *
@@ -60,15 +61,31 @@ public final class DHKeyPairGenerator extends KeyPairGeneratorSpi {
     // The size in bits of the prime modulus
     private int pSize;
 
-    // The size in bits of the random exponent (private value)
-    private int lSize;
-
     // The source of randomness
     private SecureRandom random;
 
     public DHKeyPairGenerator() {
         super();
-        initialize(1024, null);
+        initialize(DEF_DH_KEY_SIZE, null);
+    }
+
+    // pkg private; used by DHParameterGenerator class as well
+    static void checkKeySize(int keysize, int expSize)
+            throws InvalidParameterException {
+
+        if ((keysize < 512) || (keysize > 8192) || ((keysize & 0x3F) != 0)) {
+            throw new InvalidParameterException(
+                    "DH key size must be multiple of 64, and can only range " +
+                    "from 512 to 8192 (inclusive). " +
+                    "The specific key size " + keysize + " is not supported");
+        }
+
+        // optional, could be 0 if not specified
+        if ((expSize < 0) || (expSize > keysize)) {
+            throw new InvalidParameterException
+                    ("Exponent size must be positive and no larger than" +
+                    " modulus size");
+        }
     }
 
     /**
@@ -80,16 +97,18 @@ public final class DHKeyPairGenerator extends KeyPairGeneratorSpi {
      * @param random the source of randomness
      */
     public void initialize(int keysize, SecureRandom random) {
-        if ((keysize < 512) || (keysize > 2048) || (keysize % 64 != 0)) {
-            throw new InvalidParameterException("Keysize must be multiple "
-                                                + "of 64, and can only range "
-                                                + "from 512 to 2048 "
-                                                + "(inclusive)");
+        checkKeySize(keysize, 0);
+
+        try {
+            // Use the built-in parameters (ranging from 512 to 8192)
+            // when available.
+            this.params = ParameterCache.getDHParameterSpec(keysize, random);
+        } catch (GeneralSecurityException e) {
+            throw new InvalidParameterException(e.getMessage());
         }
+
         this.pSize = keysize;
-        this.lSize = 0;
         this.random = random;
-        this.params = null;
     }
 
     /**
@@ -100,7 +119,7 @@ public final class DHKeyPairGenerator extends KeyPairGeneratorSpi {
      * generator, and optionally the requested size in bits of the random
      * exponent (private value).
      *
-     * @param params the parameter set used to generate the key pair
+     * @param algParams the parameter set used to generate the key pair
      * @param random the source of randomness
      *
      * @exception InvalidAlgorithmParameterException if the given parameters
@@ -113,22 +132,12 @@ public final class DHKeyPairGenerator extends KeyPairGeneratorSpi {
                 ("Inappropriate parameter type");
         }
 
-        params = (DHParameterSpec)algParams;
+        params = (DHParameterSpec) algParams;
         pSize = params.getP().bitLength();
-        if ((pSize < 512) || (pSize > 2048) ||
-            (pSize % 64 != 0)) {
-            throw new InvalidAlgorithmParameterException
-                ("Prime size must be multiple of 64, and can only range "
-                 + "from 512 to 2048 (inclusive)");
-        }
-
-        // exponent size is optional, could be 0
-        lSize = params.getL();
-
-        // Require exponentSize < primeSize
-        if ((lSize != 0) && (lSize > pSize)) {
-            throw new InvalidAlgorithmParameterException
-                ("Exponent size must not be larger than modulus size");
+        try {
+            checkKeySize(pSize, params.getL());
+        } catch (InvalidParameterException ipe) {
+            throw new InvalidAlgorithmParameterException(ipe.getMessage());
         }
         this.random = random;
     }
@@ -143,24 +152,12 @@ public final class DHKeyPairGenerator extends KeyPairGeneratorSpi {
             random = SunJCE.getRandom();
         }
 
-        if (params == null) {
-            try {
-                params = ParameterCache.getDHParameterSpec(pSize, random);
-            } catch (GeneralSecurityException e) {
-                // should never happen
-                throw new ProviderException(e);
-            }
-        }
-
         BigInteger p = params.getP();
         BigInteger g = params.getG();
 
-        if (lSize <= 0) {
-            lSize = pSize >> 1;
-            // use an exponent size of (pSize / 2) but at least 384 bits
-            if (lSize < 384) {
-                lSize = 384;
-            }
+        int lSize = params.getL();
+        if (lSize == 0) { // not specified; use our own default
+            lSize = getDefDHPrivateExpSize(params);
         }
 
         BigInteger x;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -748,8 +748,7 @@ void MacroAssembler::pushptr(AddressLiteral src) {
   }
 }
 
-void MacroAssembler::reset_last_Java_frame(bool clear_fp,
-                                           bool clear_pc) {
+void MacroAssembler::reset_last_Java_frame(bool clear_fp) {
   // we must set sp to zero to clear frame
   movptr(Address(r15_thread, JavaThread::last_Java_sp_offset()), NULL_WORD);
   // must clear fp, so that compiled frames are not confused; it is
@@ -758,9 +757,8 @@ void MacroAssembler::reset_last_Java_frame(bool clear_fp,
     movptr(Address(r15_thread, JavaThread::last_Java_fp_offset()), NULL_WORD);
   }
 
-  if (clear_pc) {
-    movptr(Address(r15_thread, JavaThread::last_Java_pc_offset()), NULL_WORD);
-  }
+  // Always clear the pc because it could have been set by make_walkable()
+  movptr(Address(r15_thread, JavaThread::last_Java_pc_offset()), NULL_WORD);
 }
 
 void MacroAssembler::set_last_Java_frame(Register last_java_sp,
@@ -2561,7 +2559,7 @@ void MacroAssembler::call_VM_base(Register oop_result,
   }
   // reset last Java frame
   // Only interpreter should have to clear fp
-  reset_last_Java_frame(java_thread, true, false);
+  reset_last_Java_frame(java_thread, true);
 
 #ifndef CC_INTERP
    // C++ interp handles this in the interpreter
@@ -3202,7 +3200,24 @@ void MacroAssembler::pow_or_exp(bool is_exp, int num_fpu_regs_in_use) {
     jmp(done);
   } else {
     // Stack: X Y
-    Label x_negative, y_odd;
+    Label x_negative, y_not_2;
+
+    static double two = 2.0;
+    ExternalAddress two_addr((address)&two);
+
+    // constant maybe too far on 64 bit
+    lea(tmp2, two_addr);
+    fld_d(Address(tmp2, 0));    // Stack: 2 X Y
+    fcmp(tmp, 2, true, false);  // Stack: X Y
+    jcc(Assembler::parity, y_not_2);
+    jcc(Assembler::notEqual, y_not_2);
+
+    fxch(); fpop();             // Stack: X
+    fmul(0);                    // Stack: X*X
+
+    jmp(done);
+
+    bind(y_not_2);
 
     fldz();                     // Stack: 0 X Y
     fcmp(tmp, 1, true, false);  // Stack: X Y
@@ -3791,7 +3806,7 @@ void MacroAssembler::push_IU_state() {
   pusha();
 }
 
-void MacroAssembler::reset_last_Java_frame(Register java_thread, bool clear_fp, bool clear_pc) {
+void MacroAssembler::reset_last_Java_frame(Register java_thread, bool clear_fp) {
   // determine java_thread register
   if (!java_thread->is_valid()) {
     java_thread = rdi;
@@ -3803,8 +3818,8 @@ void MacroAssembler::reset_last_Java_frame(Register java_thread, bool clear_fp, 
     movptr(Address(java_thread, JavaThread::last_Java_fp_offset()), NULL_WORD);
   }
 
-  if (clear_pc)
-    movptr(Address(java_thread, JavaThread::last_Java_pc_offset()), NULL_WORD);
+  // Always clear the pc because it could have been set by make_walkable()
+  movptr(Address(java_thread, JavaThread::last_Java_pc_offset()), NULL_WORD);
 
 }
 
@@ -4104,6 +4119,42 @@ void MacroAssembler::vxorps(XMMRegister dst, XMMRegister nds, AddressLiteral src
   }
 }
 
+void MacroAssembler::resolve_jobject(Register value,
+                                     Register thread,
+                                     Register tmp) {
+  assert_different_registers(value, thread, tmp);
+  Label done, not_weak;
+  testptr(value, value);
+  jcc(Assembler::zero, done);                // Use NULL as-is.
+  testptr(value, JNIHandles::weak_tag_mask); // Test for jweak tag.
+  jcc(Assembler::zero, not_weak);
+  // Resolve jweak.
+  movptr(value, Address(value, -JNIHandles::weak_tag_value));
+  verify_oop(value);
+#if INCLUDE_ALL_GCS
+  if (UseG1GC) {
+    g1_write_barrier_pre(noreg /* obj */,
+                         value /* pre_val */,
+                         thread /* thread */,
+                         tmp /* tmp */,
+                         true /* tosca_live */,
+                         true /* expand_call */);
+  }
+#endif // INCLUDE_ALL_GCS
+  jmp(done);
+  bind(not_weak);
+  // Resolve (untagged) jobject.
+  movptr(value, Address(value, 0));
+  verify_oop(value);
+  bind(done);
+}
+
+void MacroAssembler::clear_jweak_tag(Register possibly_jweak) {
+  const int32_t inverted_jweak_mask = ~static_cast<int32_t>(JNIHandles::weak_tag_mask);
+  STATIC_ASSERT(inverted_jweak_mask == -2); // otherwise check this code
+  // The inverted mask is sign-extended
+  andptr(possibly_jweak, inverted_jweak_mask);
+}
 
 //////////////////////////////////////////////////////////////////////////////////
 #if INCLUDE_ALL_GCS
@@ -4838,8 +4889,13 @@ void MacroAssembler::lookup_interface_method(Register recv_klass,
                                              RegisterOrConstant itable_index,
                                              Register method_result,
                                              Register scan_temp,
-                                             Label& L_no_such_interface) {
-  assert_different_registers(recv_klass, intf_klass, method_result, scan_temp);
+                                             Label& L_no_such_interface,
+                                             bool return_method) {
+  assert_different_registers(recv_klass, intf_klass, scan_temp);
+  assert_different_registers(method_result, intf_klass, scan_temp);
+  assert(recv_klass != method_result || !return_method,
+         "recv_klass can be destroyed when method isn't needed");
+
   assert(itable_index.is_constant() || itable_index.as_register() == method_result,
          "caller must use same register for non-constant itable index as for method");
 
@@ -4861,9 +4917,11 @@ void MacroAssembler::lookup_interface_method(Register recv_klass,
     round_to(scan_temp, BytesPerLong);
   }
 
-  // Adjust recv_klass by scaled itable_index, so we can free itable_index.
-  assert(itableMethodEntry::size() * wordSize == wordSize, "adjust the scaling in the code below");
-  lea(recv_klass, Address(recv_klass, itable_index, Address::times_ptr, itentry_off));
+  if (return_method) {
+    // Adjust recv_klass by scaled itable_index, so we can free itable_index.
+    assert(itableMethodEntry::size() * wordSize == wordSize, "adjust the scaling in the code below");
+    lea(recv_klass, Address(recv_klass, itable_index, Address::times_ptr, itentry_off));
+  }
 
   // for (scan = klass->itable(); scan->interface() != NULL; scan += scan_step) {
   //   if (scan->interface() == intf) {
@@ -4897,9 +4955,11 @@ void MacroAssembler::lookup_interface_method(Register recv_klass,
 
   bind(found_method);
 
-  // Got a hit.
-  movl(scan_temp, Address(scan_temp, itableOffsetEntry::offset_offset_in_bytes()));
-  movptr(method_result, Address(recv_klass, scan_temp, Address::times_1));
+  if (return_method) {
+    // Got a hit.
+    movl(scan_temp, Address(scan_temp, itableOffsetEntry::offset_offset_in_bytes()));
+    movptr(method_result, Address(recv_klass, scan_temp, Address::times_1));
+  }
 }
 
 
@@ -5193,7 +5253,7 @@ RegisterOrConstant MacroAssembler::delayed_value_impl(intptr_t* delayed_value_ad
       {
         ResourceMark rm;
         stringStream ss;
-        ss.print("DelayedValue="INTPTR_FORMAT, delayed_value_addr[1]);
+        ss.print("DelayedValue=" INTPTR_FORMAT, delayed_value_addr[1]);
         buf = code_string(ss.as_string());
       }
       jcc(Assembler::notZero, L);
@@ -6143,7 +6203,9 @@ void MacroAssembler::verified_entry(int framesize, int stack_bang_size, bool fp_
     // Save caller's stack pointer into RBP if the frame pointer is preserved.
     if (PreserveFramePointer) {
       movptr(rbp, rsp);
-      addptr(rbp, framesize + wordSize);
+      if (framesize > 0) {
+        addptr(rbp, framesize);
+      }
     }
   }
 
@@ -7761,6 +7823,503 @@ void MacroAssembler::multiply_to_len(Register x, Register xlen, Register y, Regi
   pop(zlen);
   pop(xlen);
 
+  pop(tmp5);
+  pop(tmp4);
+  pop(tmp3);
+  pop(tmp2);
+  pop(tmp1);
+}
+
+//Helper functions for square_to_len()
+
+/**
+ * Store the squares of x[], right shifted one bit (divided by 2) into z[]
+ * Preserves x and z and modifies rest of the registers.
+ */
+
+void MacroAssembler::square_rshift(Register x, Register xlen, Register z, Register tmp1, Register tmp3, Register tmp4, Register tmp5, Register rdxReg, Register raxReg) {
+  // Perform square and right shift by 1
+  // Handle odd xlen case first, then for even xlen do the following
+  // jlong carry = 0;
+  // for (int j=0, i=0; j < xlen; j+=2, i+=4) {
+  //     huge_128 product = x[j:j+1] * x[j:j+1];
+  //     z[i:i+1] = (carry << 63) | (jlong)(product >>> 65);
+  //     z[i+2:i+3] = (jlong)(product >>> 1);
+  //     carry = (jlong)product;
+  // }
+
+  xorq(tmp5, tmp5);     // carry
+  xorq(rdxReg, rdxReg);
+  xorl(tmp1, tmp1);     // index for x
+  xorl(tmp4, tmp4);     // index for z
+
+  Label L_first_loop, L_first_loop_exit;
+
+  testl(xlen, 1);
+  jccb(Assembler::zero, L_first_loop); //jump if xlen is even
+
+  // Square and right shift by 1 the odd element using 32 bit multiply
+  movl(raxReg, Address(x, tmp1, Address::times_4, 0));
+  imulq(raxReg, raxReg);
+  shrq(raxReg, 1);
+  adcq(tmp5, 0);
+  movq(Address(z, tmp4, Address::times_4, 0), raxReg);
+  incrementl(tmp1);
+  addl(tmp4, 2);
+
+  // Square and  right shift by 1 the rest using 64 bit multiply
+  bind(L_first_loop);
+  cmpptr(tmp1, xlen);
+  jccb(Assembler::equal, L_first_loop_exit);
+
+  // Square
+  movq(raxReg, Address(x, tmp1, Address::times_4,  0));
+  rorq(raxReg, 32);    // convert big-endian to little-endian
+  mulq(raxReg);        // 64-bit multiply rax * rax -> rdx:rax
+
+  // Right shift by 1 and save carry
+  shrq(tmp5, 1);       // rdx:rax:tmp5 = (tmp5:rdx:rax) >>> 1
+  rcrq(rdxReg, 1);
+  rcrq(raxReg, 1);
+  adcq(tmp5, 0);
+
+  // Store result in z
+  movq(Address(z, tmp4, Address::times_4, 0), rdxReg);
+  movq(Address(z, tmp4, Address::times_4, 8), raxReg);
+
+  // Update indices for x and z
+  addl(tmp1, 2);
+  addl(tmp4, 4);
+  jmp(L_first_loop);
+
+  bind(L_first_loop_exit);
+}
+
+
+/**
+ * Perform the following multiply add operation using BMI2 instructions
+ * carry:sum = sum + op1*op2 + carry
+ * op2 should be in rdx
+ * op2 is preserved, all other registers are modified
+ */
+void MacroAssembler::multiply_add_64_bmi2(Register sum, Register op1, Register op2, Register carry, Register tmp2) {
+  // assert op2 is rdx
+  mulxq(tmp2, op1, op1);  //  op1 * op2 -> tmp2:op1
+  addq(sum, carry);
+  adcq(tmp2, 0);
+  addq(sum, op1);
+  adcq(tmp2, 0);
+  movq(carry, tmp2);
+}
+
+/**
+ * Perform the following multiply add operation:
+ * carry:sum = sum + op1*op2 + carry
+ * Preserves op1, op2 and modifies rest of registers
+ */
+void MacroAssembler::multiply_add_64(Register sum, Register op1, Register op2, Register carry, Register rdxReg, Register raxReg) {
+  // rdx:rax = op1 * op2
+  movq(raxReg, op2);
+  mulq(op1);
+
+  //  rdx:rax = sum + carry + rdx:rax
+  addq(sum, carry);
+  adcq(rdxReg, 0);
+  addq(sum, raxReg);
+  adcq(rdxReg, 0);
+
+  // carry:sum = rdx:sum
+  movq(carry, rdxReg);
+}
+
+/**
+ * Add 64 bit long carry into z[] with carry propogation.
+ * Preserves z and carry register values and modifies rest of registers.
+ *
+ */
+void MacroAssembler::add_one_64(Register z, Register zlen, Register carry, Register tmp1) {
+  Label L_fourth_loop, L_fourth_loop_exit;
+
+  movl(tmp1, 1);
+  subl(zlen, 2);
+  addq(Address(z, zlen, Address::times_4, 0), carry);
+
+  bind(L_fourth_loop);
+  jccb(Assembler::carryClear, L_fourth_loop_exit);
+  subl(zlen, 2);
+  jccb(Assembler::negative, L_fourth_loop_exit);
+  addq(Address(z, zlen, Address::times_4, 0), tmp1);
+  jmp(L_fourth_loop);
+  bind(L_fourth_loop_exit);
+}
+
+/**
+ * Shift z[] left by 1 bit.
+ * Preserves x, len, z and zlen registers and modifies rest of the registers.
+ *
+ */
+void MacroAssembler::lshift_by_1(Register x, Register len, Register z, Register zlen, Register tmp1, Register tmp2, Register tmp3, Register tmp4) {
+
+  Label L_fifth_loop, L_fifth_loop_exit;
+
+  // Fifth loop
+  // Perform primitiveLeftShift(z, zlen, 1)
+
+  const Register prev_carry = tmp1;
+  const Register new_carry = tmp4;
+  const Register value = tmp2;
+  const Register zidx = tmp3;
+
+  // int zidx, carry;
+  // long value;
+  // carry = 0;
+  // for (zidx = zlen-2; zidx >=0; zidx -= 2) {
+  //    (carry:value)  = (z[i] << 1) | carry ;
+  //    z[i] = value;
+  // }
+
+  movl(zidx, zlen);
+  xorl(prev_carry, prev_carry); // clear carry flag and prev_carry register
+
+  bind(L_fifth_loop);
+  decl(zidx);  // Use decl to preserve carry flag
+  decl(zidx);
+  jccb(Assembler::negative, L_fifth_loop_exit);
+
+  if (UseBMI2Instructions) {
+     movq(value, Address(z, zidx, Address::times_4, 0));
+     rclq(value, 1);
+     rorxq(value, value, 32);
+     movq(Address(z, zidx, Address::times_4,  0), value);  // Store back in big endian form
+  }
+  else {
+    // clear new_carry
+    xorl(new_carry, new_carry);
+
+    // Shift z[i] by 1, or in previous carry and save new carry
+    movq(value, Address(z, zidx, Address::times_4, 0));
+    shlq(value, 1);
+    adcl(new_carry, 0);
+
+    orq(value, prev_carry);
+    rorq(value, 0x20);
+    movq(Address(z, zidx, Address::times_4,  0), value);  // Store back in big endian form
+
+    // Set previous carry = new carry
+    movl(prev_carry, new_carry);
+  }
+  jmp(L_fifth_loop);
+
+  bind(L_fifth_loop_exit);
+}
+
+
+/**
+ * Code for BigInteger::squareToLen() intrinsic
+ *
+ * rdi: x
+ * rsi: len
+ * r8:  z
+ * rcx: zlen
+ * r12: tmp1
+ * r13: tmp2
+ * r14: tmp3
+ * r15: tmp4
+ * rbx: tmp5
+ *
+ */
+void MacroAssembler::square_to_len(Register x, Register len, Register z, Register zlen, Register tmp1, Register tmp2, Register tmp3, Register tmp4, Register tmp5, Register rdxReg, Register raxReg) {
+
+  Label L_second_loop, L_second_loop_exit, L_third_loop, L_third_loop_exit, fifth_loop, fifth_loop_exit, L_last_x, L_multiply;
+  push(tmp1);
+  push(tmp2);
+  push(tmp3);
+  push(tmp4);
+  push(tmp5);
+
+  // First loop
+  // Store the squares, right shifted one bit (i.e., divided by 2).
+  square_rshift(x, len, z, tmp1, tmp3, tmp4, tmp5, rdxReg, raxReg);
+
+  // Add in off-diagonal sums.
+  //
+  // Second, third (nested) and fourth loops.
+  // zlen +=2;
+  // for (int xidx=len-2,zidx=zlen-4; xidx > 0; xidx-=2,zidx-=4) {
+  //    carry = 0;
+  //    long op2 = x[xidx:xidx+1];
+  //    for (int j=xidx-2,k=zidx; j >= 0; j-=2) {
+  //       k -= 2;
+  //       long op1 = x[j:j+1];
+  //       long sum = z[k:k+1];
+  //       carry:sum = multiply_add_64(sum, op1, op2, carry, tmp_regs);
+  //       z[k:k+1] = sum;
+  //    }
+  //    add_one_64(z, k, carry, tmp_regs);
+  // }
+
+  const Register carry = tmp5;
+  const Register sum = tmp3;
+  const Register op1 = tmp4;
+  Register op2 = tmp2;
+
+  push(zlen);
+  push(len);
+  addl(zlen,2);
+  bind(L_second_loop);
+  xorq(carry, carry);
+  subl(zlen, 4);
+  subl(len, 2);
+  push(zlen);
+  push(len);
+  cmpl(len, 0);
+  jccb(Assembler::lessEqual, L_second_loop_exit);
+
+  // Multiply an array by one 64 bit long.
+  if (UseBMI2Instructions) {
+    op2 = rdxReg;
+    movq(op2, Address(x, len, Address::times_4,  0));
+    rorxq(op2, op2, 32);
+  }
+  else {
+    movq(op2, Address(x, len, Address::times_4,  0));
+    rorq(op2, 32);
+  }
+
+  bind(L_third_loop);
+  decrementl(len);
+  jccb(Assembler::negative, L_third_loop_exit);
+  decrementl(len);
+  jccb(Assembler::negative, L_last_x);
+
+  movq(op1, Address(x, len, Address::times_4,  0));
+  rorq(op1, 32);
+
+  bind(L_multiply);
+  subl(zlen, 2);
+  movq(sum, Address(z, zlen, Address::times_4,  0));
+
+  // Multiply 64 bit by 64 bit and add 64 bits lower half and upper 64 bits as carry.
+  if (UseBMI2Instructions) {
+    multiply_add_64_bmi2(sum, op1, op2, carry, tmp2);
+  }
+  else {
+    multiply_add_64(sum, op1, op2, carry, rdxReg, raxReg);
+  }
+
+  movq(Address(z, zlen, Address::times_4, 0), sum);
+
+  jmp(L_third_loop);
+  bind(L_third_loop_exit);
+
+  // Fourth loop
+  // Add 64 bit long carry into z with carry propogation.
+  // Uses offsetted zlen.
+  add_one_64(z, zlen, carry, tmp1);
+
+  pop(len);
+  pop(zlen);
+  jmp(L_second_loop);
+
+  // Next infrequent code is moved outside loops.
+  bind(L_last_x);
+  movl(op1, Address(x, 0));
+  jmp(L_multiply);
+
+  bind(L_second_loop_exit);
+  pop(len);
+  pop(zlen);
+  pop(len);
+  pop(zlen);
+
+  // Fifth loop
+  // Shift z left 1 bit.
+  lshift_by_1(x, len, z, zlen, tmp1, tmp2, tmp3, tmp4);
+
+  // z[zlen-1] |= x[len-1] & 1;
+  movl(tmp3, Address(x, len, Address::times_4, -4));
+  andl(tmp3, 1);
+  orl(Address(z, zlen, Address::times_4,  -4), tmp3);
+
+  pop(tmp5);
+  pop(tmp4);
+  pop(tmp3);
+  pop(tmp2);
+  pop(tmp1);
+}
+
+/**
+ * Helper function for mul_add()
+ * Multiply the in[] by int k and add to out[] starting at offset offs using
+ * 128 bit by 32 bit multiply and return the carry in tmp5.
+ * Only quad int aligned length of in[] is operated on in this function.
+ * k is in rdxReg for BMI2Instructions, for others it is in tmp2.
+ * This function preserves out, in and k registers.
+ * len and offset point to the appropriate index in "in" & "out" correspondingly
+ * tmp5 has the carry.
+ * other registers are temporary and are modified.
+ *
+ */
+void MacroAssembler::mul_add_128_x_32_loop(Register out, Register in,
+  Register offset, Register len, Register tmp1, Register tmp2, Register tmp3,
+  Register tmp4, Register tmp5, Register rdxReg, Register raxReg) {
+
+  Label L_first_loop, L_first_loop_exit;
+
+  movl(tmp1, len);
+  shrl(tmp1, 2);
+
+  bind(L_first_loop);
+  subl(tmp1, 1);
+  jccb(Assembler::negative, L_first_loop_exit);
+
+  subl(len, 4);
+  subl(offset, 4);
+
+  Register op2 = tmp2;
+  const Register sum = tmp3;
+  const Register op1 = tmp4;
+  const Register carry = tmp5;
+
+  if (UseBMI2Instructions) {
+    op2 = rdxReg;
+  }
+
+  movq(op1, Address(in, len, Address::times_4,  8));
+  rorq(op1, 32);
+  movq(sum, Address(out, offset, Address::times_4,  8));
+  rorq(sum, 32);
+  if (UseBMI2Instructions) {
+    multiply_add_64_bmi2(sum, op1, op2, carry, raxReg);
+  }
+  else {
+    multiply_add_64(sum, op1, op2, carry, rdxReg, raxReg);
+  }
+  // Store back in big endian from little endian
+  rorq(sum, 0x20);
+  movq(Address(out, offset, Address::times_4,  8), sum);
+
+  movq(op1, Address(in, len, Address::times_4,  0));
+  rorq(op1, 32);
+  movq(sum, Address(out, offset, Address::times_4,  0));
+  rorq(sum, 32);
+  if (UseBMI2Instructions) {
+    multiply_add_64_bmi2(sum, op1, op2, carry, raxReg);
+  }
+  else {
+    multiply_add_64(sum, op1, op2, carry, rdxReg, raxReg);
+  }
+  // Store back in big endian from little endian
+  rorq(sum, 0x20);
+  movq(Address(out, offset, Address::times_4,  0), sum);
+
+  jmp(L_first_loop);
+  bind(L_first_loop_exit);
+}
+
+/**
+ * Code for BigInteger::mulAdd() intrinsic
+ *
+ * rdi: out
+ * rsi: in
+ * r11: offs (out.length - offset)
+ * rcx: len
+ * r8:  k
+ * r12: tmp1
+ * r13: tmp2
+ * r14: tmp3
+ * r15: tmp4
+ * rbx: tmp5
+ * Multiply the in[] by word k and add to out[], return the carry in rax
+ */
+void MacroAssembler::mul_add(Register out, Register in, Register offs,
+   Register len, Register k, Register tmp1, Register tmp2, Register tmp3,
+   Register tmp4, Register tmp5, Register rdxReg, Register raxReg) {
+
+  Label L_carry, L_last_in, L_done;
+
+// carry = 0;
+// for (int j=len-1; j >= 0; j--) {
+//    long product = (in[j] & LONG_MASK) * kLong +
+//                   (out[offs] & LONG_MASK) + carry;
+//    out[offs--] = (int)product;
+//    carry = product >>> 32;
+// }
+//
+  push(tmp1);
+  push(tmp2);
+  push(tmp3);
+  push(tmp4);
+  push(tmp5);
+
+  Register op2 = tmp2;
+  const Register sum = tmp3;
+  const Register op1 = tmp4;
+  const Register carry =  tmp5;
+
+  if (UseBMI2Instructions) {
+    op2 = rdxReg;
+    movl(op2, k);
+  }
+  else {
+    movl(op2, k);
+  }
+
+  xorq(carry, carry);
+
+  //First loop
+
+  //Multiply in[] by k in a 4 way unrolled loop using 128 bit by 32 bit multiply
+  //The carry is in tmp5
+  mul_add_128_x_32_loop(out, in, offs, len, tmp1, tmp2, tmp3, tmp4, tmp5, rdxReg, raxReg);
+
+  //Multiply the trailing in[] entry using 64 bit by 32 bit, if any
+  decrementl(len);
+  jccb(Assembler::negative, L_carry);
+  decrementl(len);
+  jccb(Assembler::negative, L_last_in);
+
+  movq(op1, Address(in, len, Address::times_4,  0));
+  rorq(op1, 32);
+
+  subl(offs, 2);
+  movq(sum, Address(out, offs, Address::times_4,  0));
+  rorq(sum, 32);
+
+  if (UseBMI2Instructions) {
+    multiply_add_64_bmi2(sum, op1, op2, carry, raxReg);
+  }
+  else {
+    multiply_add_64(sum, op1, op2, carry, rdxReg, raxReg);
+  }
+
+  // Store back in big endian from little endian
+  rorq(sum, 0x20);
+  movq(Address(out, offs, Address::times_4,  0), sum);
+
+  testl(len, len);
+  jccb(Assembler::zero, L_carry);
+
+  //Multiply the last in[] entry, if any
+  bind(L_last_in);
+  movl(op1, Address(in, 0));
+  movl(sum, Address(out, offs, Address::times_4,  -4));
+
+  movl(raxReg, k);
+  mull(op1); //tmp4 * eax -> edx:eax
+  addl(sum, carry);
+  adcl(rdxReg, 0);
+  addl(sum, raxReg);
+  adcl(rdxReg, 0);
+  movl(carry, rdxReg);
+
+  movl(Address(out, offs, Address::times_4,  -4), sum);
+
+  bind(L_carry);
+  //return tmp5/carry as carry in rax
+  movl(rax, carry);
+
+  bind(L_done);
   pop(tmp5);
   pop(tmp4);
   pop(tmp3);

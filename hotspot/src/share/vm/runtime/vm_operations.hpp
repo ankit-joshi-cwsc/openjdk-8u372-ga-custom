@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -97,6 +97,8 @@
   template(LinuxDllLoad)                          \
   template(RotateGCLog)                           \
   template(WhiteBoxOperation)                     \
+  template(ClassLoaderStatsOperation)             \
+  template(JFROldObject)                          \
 
 class VM_Operation: public CHeapObj<mtInternal> {
  public:
@@ -183,7 +185,7 @@ class VM_Operation: public CHeapObj<mtInternal> {
   static const char* mode_to_string(Mode mode);
 
   // Debugging
-  void print_on_error(outputStream* st) const;
+  virtual void print_on_error(outputStream* st) const;
   const char* name() const { return _names[type()]; }
   static const char* name(int type) {
     assert(type >= 0 && type < VMOp_Terminating, "invalid VM operation type");

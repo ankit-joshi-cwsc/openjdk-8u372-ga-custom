@@ -1,5 +1,6 @@
 #
 # Copyright (c) 2005, 2013, Oracle and/or its affiliates. All rights reserved.
+# Copyright 2019 Red Hat Inc.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -47,7 +48,7 @@
 # flags.make	- with macro settings
 # vm.make	- to support making "$(MAKE) -v vm.make" in makefiles
 # adlc.make	-
-# trace.make	- generate tracing event and type definitions
+# jfr.make	- generate jfr event and type definitions
 # jvmti.make	- generate JVMTI bindings from the spec (JSR-163)
 # sa.make	- generate SA jar file and natives
 #
@@ -112,6 +113,10 @@ TOPLEVEL_EXCLUDE_DIRS	= $(ALWAYS_EXCLUDE_DIRS) -o -name adlc -o -name opto -o -n
 endif
 endif
 
+ifneq ($(ENABLE_JFR),true)
+ALWAYS_EXCLUDE_DIRS += -o -name jfr
+endif
+
 # Get things from the platform file.
 COMPILER	= $(shell sed -n 's/^compiler[ 	]*=[ 	]*//p' $(PLATFORM_FILE))
 
@@ -120,7 +125,7 @@ SIMPLE_DIRS	= \
 	$(PLATFORM_DIR)/generated/dependencies \
 	$(PLATFORM_DIR)/generated/adfiles \
 	$(PLATFORM_DIR)/generated/jvmtifiles \
-	$(PLATFORM_DIR)/generated/tracefiles \
+	$(PLATFORM_DIR)/generated/jfrfiles \
 	$(PLATFORM_DIR)/generated/dtracefiles
 
 TARGETS      = debug fastdebug optimized product
@@ -130,7 +135,7 @@ SUBMAKE_DIRS = $(addprefix $(PLATFORM_DIR)/,$(TARGETS))
 BUILDTREE_MAKE	= $(GAMMADIR)/make/$(OS_FAMILY)/makefiles/buildtree.make
 
 # dtrace.make is used on BSD versions that implement Dtrace (like MacOS X)
-BUILDTREE_TARGETS = Makefile flags.make flags_vm.make vm.make adlc.make jvmti.make trace.make sa.make dtrace.make
+BUILDTREE_TARGETS = Makefile flags.make flags_vm.make vm.make adlc.make jvmti.make jfr.make sa.make dtrace.make
 
 BUILDTREE_VARS	= GAMMADIR=$(GAMMADIR) OS_FAMILY=$(OS_FAMILY) \
 	SRCARCH=$(SRCARCH) BUILDARCH=$(BUILDARCH) LIBARCH=$(LIBARCH) VARIANT=$(VARIANT)
@@ -200,6 +205,12 @@ DATA_MODE/amd64 = 64
 
 DATA_MODE = $(DATA_MODE/$(BUILDARCH))
 
+ifeq ($(ENABLE_JFR), true)
+  INCLUDE_JFR = 1
+else
+  INCLUDE_JFR = 0
+endif
+
 flags.make: $(BUILDTREE_MAKE) ../shared_dirs.lst
 	@echo Creating $@ ...
 	$(QUIETLY) ( \
@@ -221,6 +232,10 @@ flags.make: $(BUILDTREE_MAKE) ../shared_dirs.lst
 	echo "SA_BUILD_VERSION = $(HS_BUILD_VER)"; \
 	echo "HOTSPOT_BUILD_USER = $(HOTSPOT_BUILD_USER)"; \
 	echo "HOTSPOT_VM_DISTRO = $(HOTSPOT_VM_DISTRO)"; \
+	echo "VENDOR = $(COMPANY_NAME)"; \
+	echo "VENDOR_URL = $(VENDOR_URL)"; \
+	echo "VENDOR_URL_BUG = $(VENDOR_URL_BUG)"; \
+	echo "VENDOR_URL_VM_BUG = $(VENDOR_URL_VM_BUG)"; \
 	echo "OPENJDK = $(OPENJDK)"; \
 	echo "$(LP64_SETTING/$(DATA_MODE))"; \
 	echo; \
@@ -275,6 +290,7 @@ flags.make: $(BUILDTREE_MAKE) ../shared_dirs.lst
 	    echo && \
 	    echo "HOTSPOT_EXTRA_SYSDEFS\$$(HOTSPOT_EXTRA_SYSDEFS) = $(HOTSPOT_EXTRA_SYSDEFS)" && \
 	    echo "SYSDEFS += \$$(HOTSPOT_EXTRA_SYSDEFS)"; \
+	echo && echo "CFLAGS += -DINCLUDE_JFR=$(INCLUDE_JFR)"; \
 	echo; \
 	[ -n "$(SPEC)" ] && \
 	    echo "include $(SPEC)"; \
@@ -343,7 +359,7 @@ jvmti.make: $(BUILDTREE_MAKE)
 	echo "include \$$(GAMMADIR)/make/$(OS_FAMILY)/makefiles/$(@F)"; \
 	) > $@
 
-trace.make: $(BUILDTREE_MAKE)
+jfr.make: $(BUILDTREE_MAKE)
 	@echo Creating $@ ...
 	$(QUIETLY) ( \
 	$(BUILDTREE_COMMENT); \

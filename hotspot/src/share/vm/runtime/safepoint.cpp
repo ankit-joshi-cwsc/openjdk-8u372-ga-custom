@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2015, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,6 +32,7 @@
 #include "code/scopeDesc.hpp"
 #include "gc_interface/collectedHeap.hpp"
 #include "interpreter/interpreter.hpp"
+#include "jfr/jfrEvents.hpp"
 #include "memory/resourceArea.hpp"
 #include "memory/universe.inline.hpp"
 #include "oops/oop.inline.hpp"
@@ -56,6 +57,10 @@
 #ifdef TARGET_ARCH_x86
 # include "nativeInst_x86.hpp"
 # include "vmreg_x86.inline.hpp"
+#endif
+#ifdef TARGET_ARCH_aarch64
+# include "nativeInst_aarch64.hpp"
+# include "vmreg_aarch64.inline.hpp"
 #endif
 #ifdef TARGET_ARCH_sparc
 # include "nativeInst_sparc.hpp"
@@ -83,6 +88,73 @@
 
 PRAGMA_FORMAT_MUTE_WARNINGS_FOR_GCC
 
+template <typename E>
+static void set_current_safepoint_id(E* event, int adjustment = 0) {
+  assert(event != NULL, "invariant");
+  event->set_safepointId(SafepointSynchronize::safepoint_counter() + adjustment);
+}
+
+static void post_safepoint_begin_event(EventSafepointBegin* event,
+                                       int thread_count,
+                                       int critical_thread_count) {
+  assert(event != NULL, "invariant");
+  assert(event->should_commit(), "invariant");
+  set_current_safepoint_id(event);
+  event->set_totalThreadCount(thread_count);
+  event->set_jniCriticalThreadCount(critical_thread_count);
+  event->commit();
+}
+
+static void post_safepoint_cleanup_event(EventSafepointCleanup* event) {
+  assert(event != NULL, "invariant");
+  assert(event->should_commit(), "invariant");
+  set_current_safepoint_id(event);
+  event->commit();
+}
+
+static void post_safepoint_synchronize_event(EventSafepointStateSynchronization* event,
+                                             int initial_number_of_threads,
+                                             int threads_waiting_to_block,
+                                             unsigned int iterations) {
+  assert(event != NULL, "invariant");
+  if (event->should_commit()) {
+    // Group this event together with the ones committed after the counter is increased
+    set_current_safepoint_id(event, 1);
+    event->set_initialThreadCount(initial_number_of_threads);
+    event->set_runningThreadCount(threads_waiting_to_block);
+    event->set_iterations(iterations);
+    event->commit();
+  }
+}
+
+static void post_safepoint_wait_blocked_event(EventSafepointWaitBlocked* event,
+                                              int initial_threads_waiting_to_block) {
+  assert(event != NULL, "invariant");
+  assert(event->should_commit(), "invariant");
+  set_current_safepoint_id(event);
+  event->set_runningThreadCount(initial_threads_waiting_to_block);
+  event->commit();
+}
+
+static void post_safepoint_cleanup_task_event(EventSafepointCleanupTask* event,
+                                              const char* name) {
+  assert(event != NULL, "invariant");
+  if (event->should_commit()) {
+    set_current_safepoint_id(event);
+    event->set_name(name);
+    event->commit();
+  }
+}
+
+static void post_safepoint_end_event(EventSafepointEnd* event) {
+  assert(event != NULL, "invariant");
+  if (event->should_commit()) {
+    // Group this event together with the ones committed before the counter increased
+    set_current_safepoint_id(event, -1);
+    event->commit();
+  }
+}
+
 // --------------------------------------------------------------------------------------------------
 // Implementation of Safepoint begin/end
 
@@ -97,7 +169,7 @@ static bool timeout_error_printed = false;
 
 // Roll all threads forward to a safepoint and suspend them all
 void SafepointSynchronize::begin() {
-
+  EventSafepointBegin begin_event;
   Thread* myThread = Thread::current();
   assert(myThread->is_VM_thread(), "Only VM thread may execute a safepoint");
 
@@ -142,7 +214,7 @@ void SafepointSynchronize::begin() {
 
   // Save the starting time, so that it can be compared to see if this has taken
   // too long to complete.
-  jlong safepoint_limit_time;
+  jlong safepoint_limit_time = 0;
   timeout_error_printed = false;
 
   // PrintSafepointStatisticsTimeout can be specified separately. When
@@ -189,6 +261,9 @@ void SafepointSynchronize::begin() {
   //     between states, the safepointing code will wait for the thread to
   //     block itself when it attempts transitions to a new state.
   //
+  EventSafepointStateSynchronization sync_event;
+  int initial_running = 0;
+
   _state            = _synchronizing;
   OrderAccess::fence();
 
@@ -243,8 +318,11 @@ void SafepointSynchronize::begin() {
       }
     }
 
-    if (PrintSafepointStatistics && iterations == 0) {
-      begin_statistics(nof_threads, still_running);
+    if (iterations == 0) {
+      initial_running = still_running;
+      if (PrintSafepointStatistics) {
+        begin_statistics(nof_threads, still_running);
+      }
     }
 
     if (still_running > 0) {
@@ -336,43 +414,56 @@ void SafepointSynchronize::begin() {
     update_statistics_on_spin_end();
   }
 
-  // wait until all threads are stopped
-  while (_waiting_to_block > 0) {
-    if (TraceSafepoint) tty->print_cr("Waiting for %d thread(s) to block", _waiting_to_block);
-    if (!SafepointTimeout || timeout_error_printed) {
-      Safepoint_lock->wait(true);  // true, means with no safepoint checks
-    } else {
-      // Compute remaining time
-      jlong remaining_time = safepoint_limit_time - os::javaTimeNanos();
+  if (sync_event.should_commit()) {
+    post_safepoint_synchronize_event(&sync_event, initial_running, _waiting_to_block, iterations);
+  }
 
-      // If there is no remaining time, then there is an error
-      if (remaining_time < 0 || Safepoint_lock->wait(true, remaining_time / MICROUNITS)) {
-        print_safepoint_timeout(_blocking_timeout);
+  // wait until all threads are stopped
+  {
+    EventSafepointWaitBlocked wait_blocked_event;
+    int initial_waiting_to_block = _waiting_to_block;
+
+    while (_waiting_to_block > 0) {
+      if (TraceSafepoint) tty->print_cr("Waiting for %d thread(s) to block", _waiting_to_block);
+      if (!SafepointTimeout || timeout_error_printed) {
+        Safepoint_lock->wait(true);  // true, means with no safepoint checks
+      } else {
+        // Compute remaining time
+        jlong remaining_time = safepoint_limit_time - os::javaTimeNanos();
+
+        // If there is no remaining time, then there is an error
+        if (remaining_time < 0 || Safepoint_lock->wait(true, remaining_time / MICROUNITS)) {
+          print_safepoint_timeout(_blocking_timeout);
+        }
       }
     }
-  }
-  assert(_waiting_to_block == 0, "sanity check");
+    assert(_waiting_to_block == 0, "sanity check");
 
 #ifndef PRODUCT
-  if (SafepointTimeout) {
-    jlong current_time = os::javaTimeNanos();
-    if (safepoint_limit_time < current_time) {
-      tty->print_cr("# SafepointSynchronize: Finished after "
-                    INT64_FORMAT_W(6) " ms",
-                    ((current_time - safepoint_limit_time) / MICROUNITS +
-                     SafepointTimeoutDelay));
+    if (SafepointTimeout) {
+      jlong current_time = os::javaTimeNanos();
+      if (safepoint_limit_time < current_time) {
+        tty->print_cr("# SafepointSynchronize: Finished after "
+                      INT64_FORMAT_W(6) " ms",
+                      ((current_time - safepoint_limit_time) / MICROUNITS +
+                       SafepointTimeoutDelay));
+      }
     }
-  }
 #endif
 
-  assert((_safepoint_counter & 0x1) == 0, "must be even");
-  assert(Threads_lock->owned_by_self(), "must hold Threads_lock");
-  _safepoint_counter ++;
+    assert((_safepoint_counter & 0x1) == 0, "must be even");
+    assert(Threads_lock->owned_by_self(), "must hold Threads_lock");
+    _safepoint_counter ++;
 
-  // Record state
-  _state = _synchronized;
+    // Record state
+    _state = _synchronized;
 
-  OrderAccess::fence();
+    OrderAccess::fence();
+
+    if (wait_blocked_event.should_commit()) {
+      post_safepoint_wait_blocked_event(&wait_blocked_event, initial_waiting_to_block);
+    }
+  }
 
 #ifdef ASSERT
   for (JavaThread *cur = Threads::first(); cur != NULL; cur = cur->next()) {
@@ -395,11 +486,21 @@ void SafepointSynchronize::begin() {
   }
 
   // Call stuff that needs to be run when a safepoint is just about to be completed
-  do_cleanup_tasks();
+  {
+    EventSafepointCleanup cleanup_event;
+    do_cleanup_tasks();
+    if (cleanup_event.should_commit()) {
+      post_safepoint_cleanup_event(&cleanup_event);
+    }
+  }
 
   if (PrintSafepointStatistics) {
     // Record how much time spend on the above cleanup tasks
     update_statistics_on_cleanup_end(os::javaTimeNanos());
+  }
+
+  if (begin_event.should_commit()) {
+    post_safepoint_begin_event(&begin_event, nof_threads, _current_jni_active_count);
   }
 }
 
@@ -409,6 +510,7 @@ void SafepointSynchronize::end() {
 
   assert(Threads_lock->owned_by_self(), "must hold Threads_lock");
   assert((_safepoint_counter & 0x1) == 1, "must be odd");
+  EventSafepointEnd event;
   _safepoint_counter ++;
   // memory fence isn't required here since an odd _safepoint_counter
   // value can do no harm and a fence is issued below anyway.
@@ -494,6 +596,9 @@ void SafepointSynchronize::end() {
   // record this time so VMThread can keep track how much time has elasped
   // since last safepoint.
   _end_of_last_safepoint = os::javaTimeMillis();
+  if (event.should_commit()) {
+    post_safepoint_end_event(&event);
+  }
 }
 
 bool SafepointSynchronize::is_cleanup_needed() {
@@ -507,36 +612,67 @@ bool SafepointSynchronize::is_cleanup_needed() {
 // Various cleaning tasks that should be done periodically at safepoints
 void SafepointSynchronize::do_cleanup_tasks() {
   {
-    TraceTime t1("deflating idle monitors", TraceSafepointCleanupTime);
+    const char* name = "deflating idle monitors";
+    EventSafepointCleanupTask event;
+    TraceTime t1(name, TraceSafepointCleanupTime);
     ObjectSynchronizer::deflate_idle_monitors();
+    if (event.should_commit()) {
+      post_safepoint_cleanup_task_event(&event, name);
+    }
   }
 
   {
-    TraceTime t2("updating inline caches", TraceSafepointCleanupTime);
+    const char* name = "updating inline caches";
+    EventSafepointCleanupTask event;
+    TraceTime t2(name, TraceSafepointCleanupTime);
     InlineCacheBuffer::update_inline_caches();
+    if (event.should_commit()) {
+      post_safepoint_cleanup_task_event(&event, name);
+    }
   }
   {
-    TraceTime t3("compilation policy safepoint handler", TraceSafepointCleanupTime);
+    const char* name = "compilation policy safepoint handler";
+    EventSafepointCleanupTask event;
+    TraceTime t3(name, TraceSafepointCleanupTime);
     CompilationPolicy::policy()->do_safepoint_work();
+    if (event.should_commit()) {
+      post_safepoint_cleanup_task_event(&event, name);
+    }
   }
 
   {
-    TraceTime t4("mark nmethods", TraceSafepointCleanupTime);
+    const char* name = "mark nmethods";
+    EventSafepointCleanupTask event;
+    TraceTime t4(name, TraceSafepointCleanupTime);
     NMethodSweeper::mark_active_nmethods();
+    if (event.should_commit()) {
+      post_safepoint_cleanup_task_event(&event, name);
+    }
   }
 
   if (SymbolTable::needs_rehashing()) {
-    TraceTime t5("rehashing symbol table", TraceSafepointCleanupTime);
+    const char* name = "rehashing symbol table";
+    EventSafepointCleanupTask event;
+    TraceTime t5(name, TraceSafepointCleanupTime);
     SymbolTable::rehash_table();
+    if (event.should_commit()) {
+      post_safepoint_cleanup_task_event(&event, name);
+    }
   }
 
   if (StringTable::needs_rehashing()) {
-    TraceTime t6("rehashing string table", TraceSafepointCleanupTime);
+    const char* name = "rehashing string table";
+    EventSafepointCleanupTask event;
+    TraceTime t6(name, TraceSafepointCleanupTime);
     StringTable::rehash_table();
+    if (event.should_commit()) {
+      post_safepoint_cleanup_task_event(&event, name);
+    }
   }
 
   // rotate log files?
   if (UseGCLogFileRotation) {
+    TraceTime t8("rotating gc logs", TraceSafepointCleanupTime);
     gclog_or_tty->rotate_log(false);
   }
 
@@ -739,79 +875,11 @@ void SafepointSynchronize::block(JavaThread *thread) {
 // ------------------------------------------------------------------------------------------------------
 // Exception handlers
 
-#ifndef PRODUCT
-
-#ifdef SPARC
-
-#ifdef _LP64
-#define PTR_PAD ""
-#else
-#define PTR_PAD "        "
-#endif
-
-static void print_ptrs(intptr_t oldptr, intptr_t newptr, bool wasoop) {
-  bool is_oop = newptr ? (cast_to_oop(newptr))->is_oop() : false;
-  tty->print_cr(PTR_FORMAT PTR_PAD " %s %c " PTR_FORMAT PTR_PAD " %s %s",
-                oldptr, wasoop?"oop":"   ", oldptr == newptr ? ' ' : '!',
-                newptr, is_oop?"oop":"   ", (wasoop && !is_oop) ? "STALE" : ((wasoop==false&&is_oop==false&&oldptr !=newptr)?"STOMP":"     "));
-}
-
-static void print_longs(jlong oldptr, jlong newptr, bool wasoop) {
-  bool is_oop = newptr ? (cast_to_oop(newptr))->is_oop() : false;
-  tty->print_cr(PTR64_FORMAT " %s %c " PTR64_FORMAT " %s %s",
-                oldptr, wasoop?"oop":"   ", oldptr == newptr ? ' ' : '!',
-                newptr, is_oop?"oop":"   ", (wasoop && !is_oop) ? "STALE" : ((wasoop==false&&is_oop==false&&oldptr !=newptr)?"STOMP":"     "));
-}
-
-static void print_me(intptr_t *new_sp, intptr_t *old_sp, bool *was_oops) {
-#ifdef _LP64
-  tty->print_cr("--------+------address-----+------before-----------+-------after----------+");
-  const int incr = 1;           // Increment to skip a long, in units of intptr_t
-#else
-  tty->print_cr("--------+--address-+------before-----------+-------after----------+");
-  const int incr = 2;           // Increment to skip a long, in units of intptr_t
-#endif
-  tty->print_cr("---SP---|");
-  for( int i=0; i<16; i++ ) {
-    tty->print("blob %c%d |"PTR_FORMAT" ","LO"[i>>3],i&7,new_sp); print_ptrs(*old_sp++,*new_sp++,*was_oops++); }
-  tty->print_cr("--------|");
-  for( int i1=0; i1<frame::memory_parameter_word_sp_offset-16; i1++ ) {
-    tty->print("argv pad|"PTR_FORMAT" ",new_sp); print_ptrs(*old_sp++,*new_sp++,*was_oops++); }
-  tty->print("     pad|"PTR_FORMAT" ",new_sp); print_ptrs(*old_sp++,*new_sp++,*was_oops++);
-  tty->print_cr("--------|");
-  tty->print(" G1     |"PTR_FORMAT" ",new_sp); print_longs(*(jlong*)old_sp,*(jlong*)new_sp,was_oops[incr-1]); old_sp += incr; new_sp += incr; was_oops += incr;
-  tty->print(" G3     |"PTR_FORMAT" ",new_sp); print_longs(*(jlong*)old_sp,*(jlong*)new_sp,was_oops[incr-1]); old_sp += incr; new_sp += incr; was_oops += incr;
-  tty->print(" G4     |"PTR_FORMAT" ",new_sp); print_longs(*(jlong*)old_sp,*(jlong*)new_sp,was_oops[incr-1]); old_sp += incr; new_sp += incr; was_oops += incr;
-  tty->print(" G5     |"PTR_FORMAT" ",new_sp); print_longs(*(jlong*)old_sp,*(jlong*)new_sp,was_oops[incr-1]); old_sp += incr; new_sp += incr; was_oops += incr;
-  tty->print_cr(" FSR    |"PTR_FORMAT" "PTR64_FORMAT"       "PTR64_FORMAT,new_sp,*(jlong*)old_sp,*(jlong*)new_sp);
-  old_sp += incr; new_sp += incr; was_oops += incr;
-  // Skip the floats
-  tty->print_cr("--Float-|"PTR_FORMAT,new_sp);
-  tty->print_cr("---FP---|");
-  old_sp += incr*32;  new_sp += incr*32;  was_oops += incr*32;
-  for( int i2=0; i2<16; i2++ ) {
-    tty->print("call %c%d |"PTR_FORMAT" ","LI"[i2>>3],i2&7,new_sp); print_ptrs(*old_sp++,*new_sp++,*was_oops++); }
-  tty->cr();
-}
-#endif  // SPARC
-#endif  // PRODUCT
-
 
 void SafepointSynchronize::handle_polling_page_exception(JavaThread *thread) {
   assert(thread->is_Java_thread(), "polling reference encountered by VM thread");
   assert(thread->thread_state() == _thread_in_Java, "should come from Java code");
   assert(SafepointSynchronize::is_synchronizing(), "polling encountered outside safepoint synchronization");
-
-  // Uncomment this to get some serious before/after printing of the
-  // Sparc safepoint-blob frame structure.
-  /*
-  intptr_t* sp = thread->last_Java_sp();
-  intptr_t stack_copy[150];
-  for( int i=0; i<150; i++ ) stack_copy[i] = sp[i];
-  bool was_oops[150];
-  for( int i=0; i<150; i++ )
-    was_oops[i] = stack_copy[i] ? ((oop)stack_copy[i])->is_oop() : false;
-  */
 
   if (ShowSafepointMsgs) {
     tty->print("handle_polling_page_exception: ");
@@ -824,7 +892,6 @@ void SafepointSynchronize::handle_polling_page_exception(JavaThread *thread) {
   ThreadSafepointState* state = thread->safepoint_state();
 
   state->handle_polling_page_exception();
-  // print_me(sp,stack_copy,was_oops);
 }
 
 
@@ -859,9 +926,9 @@ void SafepointSynchronize::print_safepoint_timeout(SafepointTimeoutReason reason
     tty->print_cr("# SafepointSynchronize::begin: (End of list)");
   }
 
-  // To debug the long safepoint, specify both DieOnSafepointTimeout &
+  // To debug the long safepoint, specify both AbortVMOnSafepointTimeout &
   // ShowMessageBoxOnError.
-  if (DieOnSafepointTimeout) {
+  if (AbortVMOnSafepointTimeout) {
     char msg[1024];
     VM_Operation *op = VMThread::vm_operation();
     sprintf(msg, "Safepoint sync time longer than " INTX_FORMAT "ms detected when executing %s.",
@@ -983,7 +1050,7 @@ void ThreadSafepointState::restart() {
 
     case _running:
     default:
-       tty->print_cr("restart thread "INTPTR_FORMAT" with state %d",
+       tty->print_cr("restart thread " INTPTR_FORMAT " with state %d",
                       _thread, _type);
        _thread->print();
       ShouldNotReachHere();
@@ -994,7 +1061,7 @@ void ThreadSafepointState::restart() {
 
 
 void ThreadSafepointState::print_on(outputStream *st) const {
-  const char *s;
+  const char *s = NULL;
 
   switch(_type) {
     case _running                : s = "_running";              break;
@@ -1051,6 +1118,7 @@ void ThreadSafepointState::handle_polling_page_exception() {
   if( nm->is_at_poll_return(real_return_addr) ) {
     // See if return type is an oop.
     bool return_oop = nm->method()->is_returning_oop();
+    HandleMark hm(thread());
     Handle return_value;
     if (return_oop) {
       // The oop result has been saved on the stack together with all
@@ -1282,7 +1350,7 @@ void SafepointSynchronize::print_statistics() {
     sstats = &_safepoint_stats[index];
     tty->print("%.3f: ", sstats->_time_stamp);
     tty->print("%-26s       ["
-               INT32_FORMAT_W(8)INT32_FORMAT_W(11)INT32_FORMAT_W(15)
+               INT32_FORMAT_W(8) INT32_FORMAT_W(11) INT32_FORMAT_W(15)
                "    ]    ",
                sstats->_vmop_type == -1 ? "no vm operation" :
                VM_Operation::name(sstats->_vmop_type),
@@ -1291,9 +1359,9 @@ void SafepointSynchronize::print_statistics() {
                sstats->_nof_threads_wait_to_block);
     // "/ MICROUNITS " is to convert the unit from nanos to millis.
     tty->print("  ["
-               INT64_FORMAT_W(6)INT64_FORMAT_W(6)
-               INT64_FORMAT_W(6)INT64_FORMAT_W(6)
-               INT64_FORMAT_W(6)"    ]  ",
+               INT64_FORMAT_W(6) INT64_FORMAT_W(6)
+               INT64_FORMAT_W(6) INT64_FORMAT_W(6)
+               INT64_FORMAT_W(6) "    ]  ",
                sstats->_time_to_spin / MICROUNITS,
                sstats->_time_to_wait_to_block / MICROUNITS,
                sstats->_time_to_sync / MICROUNITS,
@@ -1301,9 +1369,9 @@ void SafepointSynchronize::print_statistics() {
                sstats->_time_to_exec_vmop / MICROUNITS);
 
     if (need_to_track_page_armed_status) {
-      tty->print(INT32_FORMAT"         ", sstats->_page_armed);
+      tty->print(INT32_FORMAT "         ", sstats->_page_armed);
     }
-    tty->print_cr(INT32_FORMAT"   ", sstats->_nof_threads_hit_page_trap);
+    tty->print_cr(INT32_FORMAT "   ", sstats->_nof_threads_hit_page_trap);
   }
 }
 
@@ -1340,17 +1408,17 @@ void SafepointSynchronize::print_stat_on_exit() {
 
   for (int index = 0; index < VM_Operation::VMOp_Terminating; index++) {
     if (_safepoint_reasons[index] != 0) {
-      tty->print_cr("%-26s"UINT64_FORMAT_W(10), VM_Operation::name(index),
+      tty->print_cr("%-26s" UINT64_FORMAT_W(10), VM_Operation::name(index),
                     _safepoint_reasons[index]);
     }
   }
 
-  tty->print_cr(UINT64_FORMAT_W(5)" VM operations coalesced during safepoint",
+  tty->print_cr(UINT64_FORMAT_W(5) " VM operations coalesced during safepoint",
                 _coalesced_vmop_count);
-  tty->print_cr("Maximum sync time  "INT64_FORMAT_W(5)" ms",
+  tty->print_cr("Maximum sync time  " INT64_FORMAT_W(5) " ms",
                 _max_sync_time / MICROUNITS);
   tty->print_cr("Maximum vm operation time (except for Exit VM operation)  "
-                INT64_FORMAT_W(5)" ms",
+                INT64_FORMAT_W(5) " ms",
                 _max_vmop_time / MICROUNITS);
 }
 

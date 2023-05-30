@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2012, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -55,6 +55,8 @@
  * NSS PKCS11 config file are changed, DSA not supported now.
  */
 
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.security.KeyStore;
 import sun.security.x509.*;
 import java.io.*;
@@ -170,6 +172,13 @@ public class KeyToolTest {
      */
     void testOK(String input, String cmd) throws Exception {
         try {
+            // Workaround for "8057810: Make SHA256withDSA the default
+            // jarsigner and keytool algorithm for DSA keys". Unfortunately
+            // SunPKCS11-NSS does not support SHA256withDSA yet.
+            if (cmd.contains("p11-nss.txt") && cmd.contains("-genkey")
+                    && !cmd.contains("-keyalg")) {
+                cmd += " -sigalg SHA1withDSA -keysize 1024";
+            }
             test(input, cmd);
         } catch(Exception e) {
             afterFail(input, cmd, "OK");
@@ -245,6 +254,9 @@ public class KeyToolTest {
      * Helper method, print some output after a test does not do as expected
      */
     void afterFail(String input, String cmd, String should) {
+        if (cmd.contains("p11-nss.txt")) {
+            cmd = "-J-Dnss.lib=" + System.getProperty("nss.lib") + " " + cmd;
+        }
         System.err.println("\nTest fails for the command ---\n" +
                 "keytool " + cmd + "\nOr its debug version ---\n" +
                 "keytool -debug " + cmd);
@@ -799,7 +811,7 @@ public class KeyToolTest {
         remove("x.jks.p1.cert");
         remove("csr1");
         // PrivateKeyEntry can do certreq
-        testOK("", "-keystore x.jks -storepass changeit -keypass changeit -genkeypair -dname CN=olala");
+        testOK("", "-keystore x.jks -storepass changeit -keypass changeit -genkeypair -dname CN=olala -keysize 1024");
         testOK("", "-keystore x.jks -storepass changeit -certreq -file csr1 -alias mykey");
         testOK("", "-keystore x.jks -storepass changeit -certreq -file csr1");
         testOK("", "-keystore x.jks -storepass changeit -certreq -file csr1 -sigalg SHA1withDSA");
@@ -842,6 +854,24 @@ public class KeyToolTest {
         fin.close();
         remove("x.jks");
         remove("mykey.cert");
+    }
+
+    // 8074935: jdk8 keytool doesn't validate pem files for RFC 1421 correctness
+    static void checkPem(String file) throws Exception {
+        boolean maybeLast = false;
+        for (String s: Files.readAllLines(Paths.get(file))) {
+            if (s.isEmpty()) continue;
+            if (s.startsWith("---")) continue;
+            if (maybeLast) {
+                throw new Exception("Last line already seen");
+            }
+            if (s.length() > 64) {
+                throw new Exception(s);
+            }
+            if (s.length() < 64) {
+                maybeLast = true;
+            }
+        }
     }
 
     void v3extTest(String keyAlg) throws Exception {
@@ -998,6 +1028,7 @@ public class KeyToolTest {
         testOK("", pre+"san3 -ext san=dns:me.org");
         testOK("", pre+"san4 -ext san=ip:192.168.0.1");
         testOK("", pre+"san5 -ext san=oid:1.2.3.4");
+        testOK("", pre+"san6 -ext san=dns:1abc.com"); //begin with digit
         testOK("", pre+"san235 -ext san=uri:http://me.org,dns:me.org,oid:1.2.3.4");
 
         ks = loadStore("x.jks", "changeit", "JKS");
@@ -1153,11 +1184,14 @@ public class KeyToolTest {
                 "-rfc -file test.req");
         // printcertreq
         testOK("", "-printcertreq -file test.req");
-        // issue: deny KU, change criticality of 1.2.3 and 1.2.4, change content of BC, add 2.3.4
+        checkPem("test.req");
+        // issue: deny KU, change criticality of 1.2.3 and 1.2.4,
+        // change content of BC, add 2.3.4
         testOK("", simple+"-gencert -alias ca -infile test.req -ext " +
                 "honored=all,-KU,1.2.3:critical,1.2.4:non-critical " +
                 "-ext BC=2 -ext 2.3.4=01020304 " +
                 "-debug -rfc -outfile test.cert");
+        checkPem("test.cert");
         testOK("", simple+"-importcert -file test.cert -alias a");
         ks = loadStore("x.jks", "changeit", "JKS");
         X509CertImpl a = (X509CertImpl)ks.getCertificate("a");

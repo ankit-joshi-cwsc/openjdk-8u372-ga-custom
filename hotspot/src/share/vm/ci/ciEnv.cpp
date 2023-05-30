@@ -40,6 +40,7 @@
 #include "compiler/compilerOracle.hpp"
 #include "gc_interface/collectedHeap.inline.hpp"
 #include "interpreter/linkResolver.hpp"
+#include "jfr/jfrEvents.hpp"
 #include "memory/allocation.inline.hpp"
 #include "memory/oopFactory.hpp"
 #include "memory/universe.inline.hpp"
@@ -138,6 +139,11 @@ ciEnv::ciEnv(CompileTask* task, int system_dictionary_modification_counter)
   _ClassCastException_instance = NULL;
   _the_null_string = NULL;
   _the_min_jint_string = NULL;
+
+  _jvmti_can_hotswap_or_post_breakpoint = false;
+  _jvmti_can_access_local_variables = false;
+  _jvmti_can_post_on_exceptions = false;
+  _jvmti_can_pop_frame = false;
 }
 
 ciEnv::ciEnv(Arena* arena) : _ciEnv_arena(mtCompiler) {
@@ -188,6 +194,11 @@ ciEnv::ciEnv(Arena* arena) : _ciEnv_arena(mtCompiler) {
   _ClassCastException_instance = NULL;
   _the_null_string = NULL;
   _the_min_jint_string = NULL;
+
+  _jvmti_can_hotswap_or_post_breakpoint = false;
+  _jvmti_can_access_local_variables = false;
+  _jvmti_can_post_on_exceptions = false;
+  _jvmti_can_pop_frame = false;
 }
 
 ciEnv::~ciEnv() {
@@ -207,6 +218,31 @@ void ciEnv::cache_jvmti_state() {
   _jvmti_can_hotswap_or_post_breakpoint = JvmtiExport::can_hotswap_or_post_breakpoint();
   _jvmti_can_access_local_variables     = JvmtiExport::can_access_local_variables();
   _jvmti_can_post_on_exceptions         = JvmtiExport::can_post_on_exceptions();
+  _jvmti_can_pop_frame                  = JvmtiExport::can_pop_frame();
+}
+
+bool ciEnv::should_retain_local_variables() const {
+  return _jvmti_can_access_local_variables || _jvmti_can_pop_frame;
+}
+
+bool ciEnv::jvmti_state_changed() const {
+  if (!_jvmti_can_access_local_variables &&
+      JvmtiExport::can_access_local_variables()) {
+    return true;
+  }
+  if (!_jvmti_can_hotswap_or_post_breakpoint &&
+      JvmtiExport::can_hotswap_or_post_breakpoint()) {
+    return true;
+  }
+  if (!_jvmti_can_post_on_exceptions &&
+      JvmtiExport::can_post_on_exceptions()) {
+    return true;
+  }
+  if (!_jvmti_can_pop_frame &&
+      JvmtiExport::can_pop_frame()) {
+    return true;
+  }
+  return false;
 }
 
 // ------------------------------------------------------------------
@@ -551,7 +587,6 @@ ciKlass* ciEnv::get_klass_by_index(constantPoolHandle cpool,
 ciConstant ciEnv::get_constant_by_index_impl(constantPoolHandle cpool,
                                              int pool_index, int cache_index,
                                              ciInstanceKlass* accessor) {
-  bool ignore_will_link;
   EXCEPTION_CONTEXT;
   int index = pool_index;
   if (cache_index >= 0) {
@@ -598,8 +633,8 @@ ciConstant ciEnv::get_constant_by_index_impl(constantPoolHandle cpool,
       return ciConstant(T_OBJECT, constant);
     }
   } else if (tag.is_klass() || tag.is_unresolved_klass()) {
-    // 4881222: allow ldc to take a class type
-    ciKlass* klass = get_klass_by_index_impl(cpool, index, ignore_will_link, accessor);
+    bool will_link;
+    ciKlass* klass = get_klass_by_index_impl(cpool, index, will_link, accessor);
     if (HAS_PENDING_EXCEPTION) {
       CLEAR_PENDING_EXCEPTION;
       record_out_of_memory_failure();
@@ -607,7 +642,8 @@ ciConstant ciEnv::get_constant_by_index_impl(constantPoolHandle cpool,
     }
     assert (klass->is_instance_klass() || klass->is_array_klass(),
             "must be an instance or array klass ");
-    return ciConstant(T_OBJECT, klass->java_mirror());
+    ciInstance* mirror = (will_link ? klass->java_mirror() : get_unloaded_klass_mirror(klass));
+    return ciConstant(T_OBJECT, mirror);
   } else if (tag.is_method_type()) {
     // must execute Java code to link this CP entry into cache[i].f1
     ciSymbol* signature = get_symbol(cpool->method_type_signature_at(index));
@@ -615,6 +651,7 @@ ciConstant ciEnv::get_constant_by_index_impl(constantPoolHandle cpool,
     return ciConstant(T_OBJECT, ciobj);
   } else if (tag.is_method_handle()) {
     // must execute Java code to link this CP entry into cache[i].f1
+    bool ignore_will_link;
     int ref_kind        = cpool->method_handle_ref_kind_at(index);
     int callee_index    = cpool->method_handle_klass_index_at(index);
     ciKlass* callee     = get_klass_by_index_impl(cpool, callee_index, ignore_will_link, accessor);
@@ -952,13 +989,7 @@ void ciEnv::register_method(ciMethod* target,
     No_Safepoint_Verifier nsv;
 
     // Change in Jvmti state may invalidate compilation.
-    if (!failing() &&
-        ( (!jvmti_can_hotswap_or_post_breakpoint() &&
-           JvmtiExport::can_hotswap_or_post_breakpoint()) ||
-          (!jvmti_can_access_local_variables() &&
-           JvmtiExport::can_access_local_variables()) ||
-          (!jvmti_can_post_on_exceptions() &&
-           JvmtiExport::can_post_on_exceptions()) )) {
+    if (!failing() && jvmti_state_changed()) {
       record_failure("Jvmti state change invalidated dependencies");
     }
 

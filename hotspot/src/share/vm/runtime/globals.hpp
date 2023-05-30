@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -40,6 +40,9 @@
 #ifdef TARGET_ARCH_x86
 # include "globals_x86.hpp"
 #endif
+#ifdef TARGET_ARCH_aarch64
+# include "globals_aarch64.hpp"
+#endif
 #ifdef TARGET_ARCH_sparc
 # include "globals_sparc.hpp"
 #endif
@@ -69,6 +72,9 @@
 #endif
 #ifdef TARGET_OS_ARCH_linux_x86
 # include "globals_linux_x86.hpp"
+#endif
+#ifdef TARGET_OS_ARCH_linux_aarch64
+# include "globals_linux_aarch64.hpp"
 #endif
 #ifdef TARGET_OS_ARCH_linux_sparc
 # include "globals_linux_sparc.hpp"
@@ -104,6 +110,9 @@
 #ifdef TARGET_ARCH_x86
 # include "c1_globals_x86.hpp"
 #endif
+#ifdef TARGET_ARCH_aarch64
+# include "c1_globals_aarch64.hpp"
+#endif
 #ifdef TARGET_ARCH_sparc
 # include "c1_globals_sparc.hpp"
 #endif
@@ -132,6 +141,9 @@
 #ifdef COMPILER2
 #ifdef TARGET_ARCH_x86
 # include "c2_globals_x86.hpp"
+#endif
+#ifdef TARGET_ARCH_aarch64
+# include "c2_globals_aarch64.hpp"
 #endif
 #ifdef TARGET_ARCH_sparc
 # include "c2_globals_sparc.hpp"
@@ -203,6 +215,10 @@ define_pd_global(uint64_t,MaxRAM,                    1ULL*G);
 #endif // COMPILER2
 
 #endif // no compilers
+
+#if !INCLUDE_JFR
+#define LogJFR false
+#endif
 
 // string type aliases used only in this file
 typedef const char* ccstr;
@@ -365,33 +381,33 @@ class DoubleFlagSetting {
 
 class CommandLineFlags {
  public:
-  static bool boolAt(const char* name, size_t len, bool* value);
-  static bool boolAt(const char* name, bool* value)      { return boolAt(name, strlen(name), value); }
+  static bool boolAt(const char* name, size_t len, bool* value, bool allow_locked = false, bool return_flag = false);
+  static bool boolAt(const char* name, bool* value, bool allow_locked = false, bool return_flag = false)   { return boolAt(name, strlen(name), value, allow_locked, return_flag); }
   static bool boolAtPut(const char* name, size_t len, bool* value, Flag::Flags origin);
   static bool boolAtPut(const char* name, bool* value, Flag::Flags origin)   { return boolAtPut(name, strlen(name), value, origin); }
 
-  static bool intxAt(const char* name, size_t len, intx* value);
-  static bool intxAt(const char* name, intx* value)      { return intxAt(name, strlen(name), value); }
+  static bool intxAt(const char* name, size_t len, intx* value, bool allow_locked = false, bool return_flag = false);
+  static bool intxAt(const char* name, intx* value, bool allow_locked = false, bool return_flag = false)      { return intxAt(name, strlen(name), value, allow_locked, return_flag); }
   static bool intxAtPut(const char* name, size_t len, intx* value, Flag::Flags origin);
   static bool intxAtPut(const char* name, intx* value, Flag::Flags origin)   { return intxAtPut(name, strlen(name), value, origin); }
 
-  static bool uintxAt(const char* name, size_t len, uintx* value);
-  static bool uintxAt(const char* name, uintx* value)    { return uintxAt(name, strlen(name), value); }
+  static bool uintxAt(const char* name, size_t len, uintx* value, bool allow_locked = false, bool return_flag = false);
+  static bool uintxAt(const char* name, uintx* value, bool allow_locked = false, bool return_flag = false)    { return uintxAt(name, strlen(name), value, allow_locked, return_flag); }
   static bool uintxAtPut(const char* name, size_t len, uintx* value, Flag::Flags origin);
   static bool uintxAtPut(const char* name, uintx* value, Flag::Flags origin) { return uintxAtPut(name, strlen(name), value, origin); }
 
-  static bool uint64_tAt(const char* name, size_t len, uint64_t* value);
-  static bool uint64_tAt(const char* name, uint64_t* value) { return uint64_tAt(name, strlen(name), value); }
+  static bool uint64_tAt(const char* name, size_t len, uint64_t* value, bool allow_locked = false, bool return_flag = false);
+  static bool uint64_tAt(const char* name, uint64_t* value, bool allow_locked = false, bool return_flag = false) { return uint64_tAt(name, strlen(name), value, allow_locked, return_flag); }
   static bool uint64_tAtPut(const char* name, size_t len, uint64_t* value, Flag::Flags origin);
   static bool uint64_tAtPut(const char* name, uint64_t* value, Flag::Flags origin) { return uint64_tAtPut(name, strlen(name), value, origin); }
 
-  static bool doubleAt(const char* name, size_t len, double* value);
-  static bool doubleAt(const char* name, double* value)    { return doubleAt(name, strlen(name), value); }
+  static bool doubleAt(const char* name, size_t len, double* value, bool allow_locked = false, bool return_flag = false);
+  static bool doubleAt(const char* name, double* value, bool allow_locked = false, bool return_flag = false)    { return doubleAt(name, strlen(name), value, allow_locked, return_flag); }
   static bool doubleAtPut(const char* name, size_t len, double* value, Flag::Flags origin);
   static bool doubleAtPut(const char* name, double* value, Flag::Flags origin) { return doubleAtPut(name, strlen(name), value, origin); }
 
-  static bool ccstrAt(const char* name, size_t len, ccstr* value);
-  static bool ccstrAt(const char* name, ccstr* value)    { return ccstrAt(name, strlen(name), value); }
+  static bool ccstrAt(const char* name, size_t len, ccstr* value, bool allow_locked = false, bool return_flag = false);
+  static bool ccstrAt(const char* name, ccstr* value, bool allow_locked = false, bool return_flag = false)    { return ccstrAt(name, strlen(name), value, allow_locked, return_flag); }
   // Contract:  Flag will make private copy of the incoming value.
   // Outgoing value is always malloc-ed, and caller MUST call free.
   static bool ccstrAtPut(const char* name, size_t len, ccstr* value, Flag::Flags origin);
@@ -602,6 +618,9 @@ class CommandLineFlags {
   product(bool, UseSHA, false,                                              \
           "Control whether SHA instructions can be used on SPARC")          \
                                                                             \
+  product(bool, UseGHASHIntrinsics, false,                                  \
+          "Use intrinsics for GHASH versions of crypto")                    \
+                                                                            \
   product(uintx, LargePageSizeInBytes, 0,                                   \
           "Large page size (0 to let VM choose the page size)")             \
                                                                             \
@@ -699,6 +718,9 @@ class CommandLineFlags {
   product(bool, CriticalJNINatives, true,                                   \
           "Check for critical JNI entry points")                            \
                                                                             \
+  product(bool, UseLegacyJNINameEscaping, false,                            \
+          "Use the original JNI name escaping scheme")                      \
+                                                                            \
   notproduct(bool, StressCriticalJNINatives, false,                         \
           "Exercise register saving code in critical natives")              \
                                                                             \
@@ -768,8 +790,8 @@ class CommandLineFlags {
           "Time out and warn or fail after SafepointTimeoutDelay "          \
           "milliseconds if failed to reach safepoint")                      \
                                                                             \
-  develop(bool, DieOnSafepointTimeout, false,                               \
-          "Die upon failure to reach safepoint (see SafepointTimeout)")     \
+  diagnostic(bool, AbortVMOnSafepointTimeout, false,                        \
+          "Abort upon failure to reach safepoint (see SafepointTimeout)")   \
                                                                             \
   /* 50 retries * (5 * current_retry_count) millis = ~6.375 seconds */      \
   /* typically, at most a few retries are needed */                         \
@@ -1124,6 +1146,10 @@ class CommandLineFlags {
           "Use detached threads that are recycled upon termination "        \
           "(for Solaris only)")                                             \
                                                                             \
+  experimental(bool, DisablePrimordialThreadGuardPages, false,              \
+               "Disable the use of stack guard pages if the JVM is loaded " \
+               "on the primordial process thread")                          \
+                                                                            \
   product(bool, UseLWPSynchronization, true,                                \
           "Use LWP-based instead of libthread-based synchronization "       \
           "(SPARC only)")                                                   \
@@ -1172,9 +1198,6 @@ class CommandLineFlags {
                                                                             \
   product(bool, ReduceSignalUsage, false,                                   \
           "Reduce the use of OS signals in Java and/or the VM")             \
-                                                                            \
-  develop_pd(bool, ShareVtableStubs,                                        \
-          "Share vtable stubs (smaller code but worse branch prediction")   \
                                                                             \
   develop(bool, LoadLineNumberTables, true,                                 \
           "Tell whether the class file parser loads line number tables")    \
@@ -1279,6 +1302,13 @@ class CommandLineFlags {
           "Decay time (in milliseconds) to re-enable bulk rebiasing of a "  \
           "type after previous bulk rebias")                                \
                                                                             \
+  product(bool, ExitOnOutOfMemoryError, false,                              \
+          "JVM exits on the first occurrence of an out-of-memory error")    \
+                                                                            \
+  product(bool, CrashOnOutOfMemoryError, false,                             \
+          "JVM aborts, producing an error log and core/mini dump, on the "  \
+          "first occurrence of an out-of-memory error")                     \
+                                                                            \
   /* tracing */                                                             \
                                                                             \
   notproduct(bool, TraceRuntimeCalls, false,                                \
@@ -1324,7 +1354,7 @@ class CommandLineFlags {
   develop(bool, TraceClassInitialization, false,                            \
           "Trace class initialization")                                     \
                                                                             \
-  develop(bool, TraceExceptions, false,                                     \
+  product(bool, TraceExceptions, false,                                     \
           "Trace exceptions")                                               \
                                                                             \
   develop(bool, TraceICs, false,                                            \
@@ -2004,7 +2034,7 @@ class CommandLineFlags {
   experimental(uintx, WorkStealingSpinToYieldRatio, 10,                     \
           "Ratio of hard spins to calls to yield")                          \
                                                                             \
-  develop(uintx, ObjArrayMarkingStride, 512,                                \
+  develop(uintx, ObjArrayMarkingStride, 2048,                               \
           "Number of object array elements to push onto the marking stack " \
           "before pushing a continuation entry")                            \
                                                                             \
@@ -2057,9 +2087,23 @@ class CommandLineFlags {
   product_pd(uint64_t, MaxRAM,                                              \
           "Real memory size (in bytes) used to set maximum heap size")      \
                                                                             \
+  product(bool, AggressiveHeap, false,                                      \
+          "Optimize heap options for long-running memory intensive apps")   \
+                                                                            \
   product(uintx, ErgoHeapSizeLimit, 0,                                      \
           "Maximum ergonomically set heap size (in bytes); zero means use " \
-          "MaxRAM / MaxRAMFraction")                                        \
+          "MaxRAM * MaxRAMPercentage / 100")                                \
+                                                                            \
+  experimental(bool, UseCGroupMemoryLimitForHeap, false,                    \
+          "Use CGroup memory limit as physical memory limit for heap "      \
+          "sizing"                                                          \
+          "Deprecated, replaced by container support")                      \
+                                                                            \
+  diagnostic(bool, PrintContainerInfo, false,                               \
+          "Print container related information")                            \
+                                                                            \
+  diagnostic(bool, PrintActiveCpus, false,                                  \
+           "Print the number of CPUs detected in os::active_processor_count") \
                                                                             \
   product(uintx, MaxRAMFraction, 4,                                         \
           "Maximum fraction (1/n) of real memory used for maximum heap "    \
@@ -2075,6 +2119,19 @@ class CommandLineFlags {
                                                                             \
   product(uintx, InitialRAMFraction, 64,                                    \
           "Fraction (1/n) of real memory used for initial heap size")       \
+                                                                            \
+  product(double, MaxRAMPercentage, 25.0,                                   \
+          "Maximum percentage of real memory used for maximum heap size")   \
+                                                                            \
+  product(double, MinRAMPercentage, 50.0,                                   \
+          "Minimum percentage of real memory used for maximum heap"         \
+          "size on systems with small physical memory size")                \
+                                                                            \
+  product(double, InitialRAMPercentage, 1.5625,                             \
+          "Percentage of real memory used for initial heap size")           \
+                                                                            \
+  product(intx, ActiveProcessorCount, -1,                                   \
+          "Specify the CPU count the VM should use and report as active")   \
                                                                             \
   develop(uintx, MaxVirtMemFraction, 2,                                     \
           "Maximum fraction (1/n) of virtual memory used for ergonomically "\
@@ -2251,6 +2308,14 @@ class CommandLineFlags {
                                                                             \
   diagnostic(bool, VerifyDuringGC, false,                                   \
           "Verify memory system during GC (between phases)")                \
+                                                                            \
+  diagnostic(ccstrlist, VerifySubSet, "",                                   \
+          "Memory sub-systems to verify when Verify*GC flag(s) "            \
+          "are enabled. One or more sub-systems can be specified "          \
+          "in a comma separated string. Sub-systems are: "                  \
+          "threads, heap, symbol_table, string_table, codecache, "          \
+          "dictionary, classloader_data_graph, metaspace, jni_handles, "    \
+          "c-heap, codecache_oops")                                         \
                                                                             \
   diagnostic(bool, GCParallelVerificationEnabled, true,                     \
           "Enable parallel memory system verification")                     \
@@ -2633,6 +2698,12 @@ class CommandLineFlags {
                                                                             \
   product(bool, DisplayVMOutputToStdout, false,                             \
           "If DisplayVMOutput is true, display all VM output to stdout")    \
+                                                                            \
+  product(bool, ErrorFileToStderr, false,                                   \
+          "If true, error data is printed to stderr instead of a file")     \
+                                                                            \
+  product(bool, ErrorFileToStdout, false,                                   \
+          "If true, error data is printed to stdout instead of a file")     \
                                                                             \
   product(bool, UseHeavyMonitors, false,                                    \
           "use heavyweight instead of lightweight Java monitors")           \
@@ -3434,6 +3505,9 @@ class CommandLineFlags {
   notproduct(bool, CIObjectFactoryVerify, false,                            \
           "enable potentially expensive verification in ciObjectFactory")   \
                                                                             \
+  diagnostic(bool, AbortVMOnCompilationFailure, false,                      \
+          "Abort VM when method had failed to compile.")                    \
+                                                                            \
   /* Priorities */                                                          \
   product_pd(bool, UseThreadPriorities,  "Use native thread priorities")    \
                                                                             \
@@ -3808,7 +3882,7 @@ class CommandLineFlags {
   product(uintx, SharedMiscDataSize,    NOT_LP64(2*M) LP64_ONLY(4*M),       \
           "Size of the shared miscellaneous data area (in bytes)")          \
                                                                             \
-  product(uintx, SharedMiscCodeSize,    120*K,                              \
+  product(uintx, SharedMiscCodeSize,    AARCH64_ONLY(192*K) NOT_AARCH64(120*K), \
           "Size of the shared miscellaneous code area (in bytes)")          \
                                                                             \
   product(uintx, SharedBaseAddress, LP64_ONLY(32*G)                         \
@@ -3936,15 +4010,35 @@ class CommandLineFlags {
           "Allocation less than this value will be allocated "              \
           "using malloc. Larger allocations will use mmap.")                \
                                                                             \
-  product(bool, EnableTracing, false,                                       \
-          "Enable event-based tracing")                                     \
-                                                                            \
-  product(bool, UseLockedTracing, false,                                    \
-          "Use locked-tracing when doing event-based tracing")              \
-                                                                            \
   product_pd(bool, PreserveFramePointer,                                    \
              "Use the FP register for holding the frame pointer "           \
-             "and not as a general purpose register.")
+             "and not as a general purpose register.")                      \
+                                                                            \
+  product(bool, EnableTracing, false,                                       \
+          "Enable event-based tracing"                                      \
+          "Deprecated: use FlightRecorder instead")                         \
+                                                                            \
+  product(bool, UseLockedTracing, false,                                    \
+          "Use locked-tracing when doing event-based tracing"               \
+          "Deprecated: use FlightRecorder instead")                         \
+                                                                            \
+  JFR_ONLY(product(bool, FlightRecorder, false,                             \
+          "Enable Flight Recorder"))                                        \
+                                                                            \
+  JFR_ONLY(product(ccstr, FlightRecorderOptions, NULL,                      \
+          "Flight Recorder options"))                                       \
+                                                                            \
+  JFR_ONLY(product(ccstr, StartFlightRecording, NULL,                       \
+          "Start flight recording with options"))                           \
+                                                                            \
+  JFR_ONLY(product(bool, UnlockCommercialFeatures, false,                   \
+          "This flag is ignored. Left for compatibility"))                  \
+                                                                            \
+  experimental(bool, UseFastUnorderedTimeStamps, false,                     \
+          "Use platform unstable time where supported for timestamps only") \
+                                                                            \
+  JFR_ONLY(product(bool, LogJFR, false,                                     \
+          "Enable JFR logging (consider +Verbose)"))                        \
 
 /*
  *  Macros for factoring of globals

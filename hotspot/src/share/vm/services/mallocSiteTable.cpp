@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -84,12 +84,18 @@ bool MallocSiteTable::initialize() {
   // Create pseudo call stack for hashtable entry allocation
   address pc[3];
   if (NMT_TrackingStackDepth >= 3) {
-    pc[2] = (address)MallocSiteTable::allocation_at;
+    uintx *fp = (uintx*)MallocSiteTable::allocation_at;
+    // On ppc64, 'fp' is a pointer to a function descriptor which is a struct  of
+    // three native pointers where the first pointer is the real function address.
+    // See: http://refspecs.linuxfoundation.org/ELF/ppc64/PPC-elf64abi-1.9.html#FUNC-DES
+    pc[2] = (address)(fp PPC64_ONLY(BIG_ENDIAN_ONLY([0])));
   }
   if (NMT_TrackingStackDepth >= 2) {
-    pc[1] = (address)MallocSiteTable::lookup_or_add;
+    uintx *fp = (uintx*)MallocSiteTable::lookup_or_add;
+    pc[1] = (address)(fp PPC64_ONLY(BIG_ENDIAN_ONLY([0])));
   }
-  pc[0] = (address)MallocSiteTable::new_entry;
+  uintx *fp = (uintx*)MallocSiteTable::new_entry;
+  pc[0] = (address)(fp PPC64_ONLY(BIG_ENDIAN_ONLY([0])));
 
   // Instantiate NativeCallStack object, have to use placement new operator. (see comments above)
   NativeCallStack* stack = ::new ((void*)_hash_entry_allocation_stack)
@@ -97,7 +103,7 @@ bool MallocSiteTable::initialize() {
 
   // Instantiate hash entry for hashtable entry allocation callsite
   MallocSiteHashtableEntry* entry = ::new ((void*)_hash_entry_allocation_site)
-    MallocSiteHashtableEntry(*stack);
+    MallocSiteHashtableEntry(*stack, mtNMT);
 
   // Add the allocation site to hashtable.
   int index = hash_to_index(stack->hash());
@@ -134,15 +140,16 @@ bool MallocSiteTable::walk(MallocSiteWalker* walker) {
  *  Under any of above circumstances, caller should handle the situation.
  */
 MallocSite* MallocSiteTable::lookup_or_add(const NativeCallStack& key, size_t* bucket_idx,
-  size_t* pos_idx) {
-  int index = hash_to_index(key.hash());
+  size_t* pos_idx, MEMFLAGS flags) {
+  assert(flags != mtNone, "Should have a real memory type");
+  unsigned int index = hash_to_index(key.hash());
   assert(index >= 0, "Negative index");
   *bucket_idx = (size_t)index;
   *pos_idx = 0;
 
   // First entry for this hash bucket
   if (_table[index] == NULL) {
-    MallocSiteHashtableEntry* entry = new_entry(key);
+    MallocSiteHashtableEntry* entry = new_entry(key, flags);
     // OOM check
     if (entry == NULL) return NULL;
 
@@ -157,13 +164,12 @@ MallocSite* MallocSiteTable::lookup_or_add(const NativeCallStack& key, size_t* b
   MallocSiteHashtableEntry* head = _table[index];
   while (head != NULL && (*pos_idx) <= MAX_BUCKET_LENGTH) {
     MallocSite* site = head->data();
-    if (site->equals(key)) {
-      // found matched entry
+    if (site->flag() == flags && site->equals(key)) {
       return head->data();
     }
 
     if (head->next() == NULL && (*pos_idx) < MAX_BUCKET_LENGTH) {
-      MallocSiteHashtableEntry* entry = new_entry(key);
+      MallocSiteHashtableEntry* entry = new_entry(key, flags);
       // OOM check
       if (entry == NULL) return NULL;
       if (head->atomic_insert(entry)) {
@@ -192,10 +198,10 @@ MallocSite* MallocSiteTable::malloc_site(size_t bucket_idx, size_t pos_idx) {
 // Allocates MallocSiteHashtableEntry object. Special call stack
 // (pre-installed allocation site) has to be used to avoid infinite
 // recursion.
-MallocSiteHashtableEntry* MallocSiteTable::new_entry(const NativeCallStack& key) {
+MallocSiteHashtableEntry* MallocSiteTable::new_entry(const NativeCallStack& key, MEMFLAGS flags) {
   void* p = AllocateHeap(sizeof(MallocSiteHashtableEntry), mtNMT,
     *hash_entry_allocation_stack(), AllocFailStrategy::RETURN_NULL);
-  return ::new (p) MallocSiteHashtableEntry(key);
+  return ::new (p) MallocSiteHashtableEntry(key, flags);
 }
 
 void MallocSiteTable::reset() {

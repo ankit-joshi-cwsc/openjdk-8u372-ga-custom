@@ -124,6 +124,7 @@ address StubRoutines::_aescrypt_encryptBlock               = NULL;
 address StubRoutines::_aescrypt_decryptBlock               = NULL;
 address StubRoutines::_cipherBlockChaining_encryptAESCrypt = NULL;
 address StubRoutines::_cipherBlockChaining_decryptAESCrypt = NULL;
+address StubRoutines::_ghash_processBlocks                 = NULL;
 
 address StubRoutines::_sha1_implCompress     = NULL;
 address StubRoutines::_sha1_implCompressMB   = NULL;
@@ -136,6 +137,10 @@ address StubRoutines::_updateBytesCRC32 = NULL;
 address StubRoutines::_crc_table_adr = NULL;
 
 address StubRoutines::_multiplyToLen = NULL;
+address StubRoutines::_squareToLen = NULL;
+address StubRoutines::_mulAdd = NULL;
+address StubRoutines::_montgomeryMultiply = NULL;
+address StubRoutines::_montgomerySquare = NULL;
 
 double (* StubRoutines::_intrinsic_log   )(double) = NULL;
 double (* StubRoutines::_intrinsic_log10 )(double) = NULL;
@@ -170,6 +175,9 @@ void StubRoutines::initialize1() {
     }
     CodeBuffer buffer(_code1);
     StubGenerator_generate(&buffer, false);
+    // When new stubs added we need to make sure there is some space left
+    // to catch situation when we should increase size again.
+    assert(code_size1 == 0 || buffer.insts_remaining() > 200, "increase code_size1");
   }
 }
 
@@ -222,6 +230,9 @@ void StubRoutines::initialize2() {
     }
     CodeBuffer buffer(_code2);
     StubGenerator_generate(&buffer, true);
+    // When new stubs added we need to make sure there is some space left
+    // to catch situation when we should increase size again.
+    assert(code_size2 == 0 || buffer.insts_remaining() > 200, "increase code_size2");
   }
 
 #ifdef ASSERT

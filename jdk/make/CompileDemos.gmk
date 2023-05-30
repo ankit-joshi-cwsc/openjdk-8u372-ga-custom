@@ -229,7 +229,7 @@ define SetupJVMTIDemo
     BUILD_DEMO_JVMTI_$1_LANG := $4
   endif
   ifeq (C++, $4)
-    $1_EXTRA_CXX := $(LDFLAGS_CXX_JDK) $(LIBCXX)
+    $1_EXTRA_CXX := $$(LDFLAGS_CXX_JDK) $(LIBCXX)
   endif
 
   $1_CXXFLAGS := $(CXXFLAGS_JDKLIB) -I$(JDK_TOPDIR)/src/share/demo/jvmti/$1 \
@@ -251,8 +251,8 @@ define SetupJVMTIDemo
       LANG := $$(BUILD_DEMO_JVMTI_$1_LANG), \
       OPTIMIZATION := LOW, \
       CXXFLAGS := $$($1_CXXFLAGS), \
-      LDFLAGS := $(filter-out -incremental:no -opt:ref, $(LDFLAGS_JDKLIB)), \
-      LDFLAGS_macosx := $(call SET_EXECUTABLE_ORIGIN), \
+      LDFLAGS := $(filter-out -incremental:no -opt:ref, $$(LDFLAGS_JDKLIB)), \
+      LDFLAGS_macosx := $$(call SET_EXECUTABLE_ORIGIN), \
       LDFLAGS_SUFFIX := $$($1_EXTRA_CXX), \
       LDFLAGS_SUFFIX_posix := $5, \
       LDFLAGS_SUFFIX_windows := $6, \
@@ -451,29 +451,6 @@ ifeq ($(OPENJDK_TARGET_OS), solaris)
 
   BUILD_DEMOS += $(JDK_OUTPUTDIR)/demo/jni/Poller/lib/$(LIBRARY_PREFIX)Poller$(SHARED_LIBRARY_SUFFIX)
 
-endif
-
-##################################################################################################
-
-ifndef OPENJDK
-  DB_DEMO_ZIPFILE := $(wildcard $(JDK_TOPDIR)/src/closed/share/db/db-derby-*-bin.zip)
-
-  $(JDK_OUTPUTDIR)/demo/_the.db.unzipped: $(DB_DEMO_ZIPFILE)
-	$(MKDIR) -p $(@D)
-	$(RM) -r $(JDK_OUTPUTDIR)/demo/db $(JDK_OUTPUTDIR)/demo/demo
-	$(CD) $(JDK_OUTPUTDIR)/demo && $(UNZIP) -q -o $<
-	$(MV) $(JDK_OUTPUTDIR)/demo/db-derby-*-bin/demo $(JDK_OUTPUTDIR)/demo/db
-	$(CD) $(JDK_OUTPUTDIR)/demo && $(RM) -r db-derby-*-bin
-	$(TOUCH) $@
-
-  # Copy this after the unzip above to avoid race with directory creation and mv command.
-  $(JDK_OUTPUTDIR)/demo/db/README-JDK-DEMOS.html: \
-      $(JDK_TOPDIR)/src/closed/share/db/README-JDK-DEMOS.html \
-      | $(JDK_OUTPUTDIR)/demo/_the.db.unzipped
-	$(MKDIR) -p $(@D)
-	$(CAT) $< | $(SED) "s/XXXX/$(shell cat $(JDK_TOPDIR)/src/closed/share/db/COPYRIGHTYEAR)/" > $@
-
-  BUILD_DEMOS += $(JDK_OUTPUTDIR)/demo/_the.db.unzipped $(JDK_OUTPUTDIR)/demo/db/README-JDK-DEMOS.html
 endif
 
 ##################################################################################################

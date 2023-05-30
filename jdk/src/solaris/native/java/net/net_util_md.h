@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2012, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -47,9 +47,13 @@
    close subroutine does not return until the select call returns.
    ...
 */
-#if defined(__linux__) || defined(MACOSX) || defined (_AIX)
+#if !defined(__solaris__)
 extern int NET_Timeout(int s, long timeout);
+extern int NET_Timeout0(int s, long timeout, long currentTime);
 extern int NET_Read(int s, void* buf, size_t len);
+extern int NET_NonBlockingRead(int s, void* buf, size_t len);
+extern int NET_TimeoutWithCurrentTime(int s, long timeout, long currentTime);
+extern long NET_GetCurrentTime();
 extern int NET_RecvFrom(int s, void *buf, int len, unsigned int flags,
        struct sockaddr *from, int *fromlen);
 extern int NET_ReadV(int s, const struct iovec * vector, int count);
@@ -133,22 +137,6 @@ typedef struct sock_flow_props_s {
 
 #endif /* SO_FLOW_SLA */
 #endif /* __solaris__ */
-
-/* needed from libsocket on Solaris 8 */
-
-typedef int (*getaddrinfo_f)(const char *nodename, const char *servname,
-    const struct addrinfo *hints, struct addrinfo **res);
-
-typedef void (*freeaddrinfo_f)(struct addrinfo *);
-
-typedef const char * (*gai_strerror_f)(int ecode);
-
-typedef int (*getnameinfo_f)(const struct sockaddr *, size_t,
-    char *, size_t, char *, size_t, int);
-
-extern getaddrinfo_f getaddrinfo_ptr;
-extern freeaddrinfo_f freeaddrinfo_ptr;
-extern getnameinfo_f getnameinfo_ptr;
 
 void ThrowUnknownHostExceptionWithGaiError(JNIEnv *env,
                                            const char* hostname,

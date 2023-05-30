@@ -335,7 +335,6 @@ void G1RemSet::oops_into_collection_set_do(G1ParPushHeapRSClosure* oc,
 }
 
 void G1RemSet::prepare_for_oops_into_collection_set_do() {
-  cleanupHRRS();
   _g1->set_refine_cte_cl_concurrency(false);
   DirtyCardQueueSet& dcqs = JavaThread::dirty_card_queue_set();
   dcqs.concatenate_logs();
@@ -378,9 +377,8 @@ void G1RemSet::cleanup_after_oops_into_collection_set_do() {
   // Free any completed buffers in the DirtyCardQueueSet used to hold cards
   // which contain references that point into the collection.
   _g1->into_cset_dirty_card_queue_set().clear();
-  assert(_g1->into_cset_dirty_card_queue_set().completed_buffers_num() == 0,
+  assert(!_g1->into_cset_dirty_card_queue_set().completed_buffers_exist_dirty(),
          "all buffers should be freed");
-  _g1->into_cset_dirty_card_queue_set().clear_n_completed_buffers();
 }
 
 class ScrubRSClosure: public HeapRegionClosure {
@@ -443,7 +441,7 @@ G1UpdateRSOrPushRefOopClosure(G1CollectedHeap* g1h,
 bool G1RemSet::refine_card(jbyte* card_ptr, uint worker_i,
                            bool check_for_refs_into_cset) {
   assert(_g1->is_in_exact(_ct_bs->addr_for(card_ptr)),
-         err_msg("Card at "PTR_FORMAT" index "SIZE_FORMAT" representing heap at "PTR_FORMAT" (%u) must be in committed heap",
+         err_msg("Card at " PTR_FORMAT " index " SIZE_FORMAT " representing heap at " PTR_FORMAT " (%u) must be in committed heap",
                  p2i(card_ptr),
                  _ct_bs->index_for(_ct_bs->addr_for(card_ptr)),
                  _ct_bs->addr_for(card_ptr),
@@ -569,20 +567,19 @@ bool G1RemSet::refine_card(jbyte* card_ptr, uint worker_i,
   // fail arbitrarily). We tell the iteration code to perform this
   // filtering when it has been determined that there has been an actual
   // allocation in this region and making it safe to check the young type.
-  bool filter_young = true;
 
-  HeapWord* stop_point =
+  bool card_processed =
     r->oops_on_card_seq_iterate_careful(dirtyRegion,
                                         &filter_then_update_rs_oop_cl,
-                                        filter_young,
                                         card_ptr);
 
-  // If stop_point is non-null, then we encountered an unallocated region
-  // (perhaps the unfilled portion of a TLAB.)  For now, we'll dirty the
-  // card and re-enqueue: if we put off the card until a GC pause, then the
-  // unallocated portion will be filled in.  Alternatively, we might try
-  // the full complexity of the technique used in "regular" precleaning.
-  if (stop_point != NULL) {
+  // If unable to process the card then we encountered an unparsable
+  // part of the heap (e.g. a partially allocated object) while
+  // processing a stale card.  Despite the card being stale, redirty
+  // and re-enqueue, because we've already cleaned the card.  Without
+  // this we could incorrectly discard a non-stale card.
+  if (!card_processed) {
+    assert(!_g1->is_gc_active(), "Unparsable heap during GC");
     // The card might have gotten re-dirtied and re-enqueued while we
     // worked.  (In fact, it's pretty likely.)
     if (*card_ptr != CardTableModRefBS::dirty_card_val()) {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1996, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1996, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -148,6 +148,10 @@ struct SetFullScreenExclusiveModeStateStruct {
     jboolean isFSEMState;
 };
 
+struct OverrideHandle {
+    jobject frame;
+    HWND handle;
+};
 
 /************************************************************************
  * AwtWindow fields
@@ -164,6 +168,7 @@ jfieldID AwtWindow::sysYID;
 jfieldID AwtWindow::sysWID;
 jfieldID AwtWindow::sysHID;
 jfieldID AwtWindow::windowTypeID;
+jmethodID AwtWindow::notifyWindowStateChangedMID;
 
 jmethodID AwtWindow::getWarningStringMID;
 jmethodID AwtWindow::calculateSecurityWarningPositionMID;
@@ -223,6 +228,7 @@ AwtWindow::AwtWindow() {
     m_alwaysOnTop = false;
 
     fullScreenExclusiveModeState = FALSE;
+    m_overriddenHwnd = NULL;
 }
 
 AwtWindow::~AwtWindow()
@@ -1539,6 +1545,15 @@ void AwtWindow::SendWindowEvent(jint id, HWND opposite,
         CHECK_NULL(sequencedEventConst);
     }
 
+    static jclass windowCls = NULL;
+    if (windowCls == NULL) {
+        jclass windowClsLocal = env->FindClass("java/awt/Window");
+        CHECK_NULL(windowClsLocal);
+        windowCls = (jclass)env->NewGlobalRef(windowClsLocal);
+        env->DeleteLocalRef(windowClsLocal);
+        CHECK_NULL(windowCls);
+    }
+
     if (env->EnsureLocalCapacity(3) < 0) {
         return;
     }
@@ -1549,6 +1564,28 @@ void AwtWindow::SendWindowEvent(jint id, HWND opposite,
         AwtComponent *awtOpposite = AwtComponent::GetComponent(opposite);
         if (awtOpposite != NULL) {
             jOpposite = awtOpposite->GetTarget(env);
+            if ((jOpposite != NULL) &&
+                !env->IsInstanceOf(jOpposite, windowCls)) {
+                env->DeleteLocalRef(jOpposite);
+                jOpposite = NULL;
+
+                HWND parent = AwtComponent::GetTopLevelParentForWindow(opposite);
+                if ((parent != NULL) && (parent != opposite)) {
+                    if (parent == GetHWnd()) {
+                        jOpposite = env->NewLocalRef(target);
+                    } else {
+                        AwtComponent* awtParent = AwtComponent::GetComponent(parent);
+                        if (awtParent != NULL) {
+                            jOpposite = awtParent->GetTarget(env);
+                            if ((jOpposite != NULL) &&
+                                !env->IsInstanceOf(jOpposite, windowCls)) {
+                                env->DeleteLocalRef(jOpposite);
+                                jOpposite = NULL;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     jobject event = env->NewObject(wClassEvent, wEventInitMID, target, id,
@@ -1576,6 +1613,16 @@ void AwtWindow::SendWindowEvent(jint id, HWND opposite,
     SendEvent(event);
 
     env->DeleteLocalRef(event);
+}
+
+void AwtWindow::NotifyWindowStateChanged(jint oldState, jint newState)
+{
+    JNIEnv *env = (JNIEnv *)JNU_GetEnv(jvm, JNI_VERSION_1_2);
+    jobject peer = GetPeer(env);
+    if (peer != NULL) {
+        env->CallVoidMethod(peer, AwtWindow::notifyWindowStateChangedMID,
+            oldState, newState);
+    }
 }
 
 BOOL AwtWindow::AwtSetActiveWindow(BOOL isMouseEventCause, UINT hittest)
@@ -2471,6 +2518,24 @@ ret:
    delete rfs;
 }
 
+void AwtWindow::_OverrideHandle(void *param)
+{
+    JNIEnv *env = (JNIEnv *)JNU_GetEnv(jvm, JNI_VERSION_1_2);
+
+    OverrideHandle* oh = (OverrideHandle *)param;
+    jobject self = oh->frame;
+    AwtWindow *f = NULL;
+
+    PDATA pData;
+    JNI_CHECK_PEER_GOTO(self, ret);
+    f = (AwtWindow *)pData;
+    f->OverrideHWnd(oh->handle);
+ret:
+    env->DeleteGlobalRef(self);
+
+    delete oh;
+}
+
 /*
  * This is AwtWindow-specific function that is not intended for reusing
  */
@@ -3108,7 +3173,29 @@ Java_java_awt_Window_initIDs(JNIEnv *env, jclass cls)
     CATCH_BAD_ALLOC;
 }
 
-} /* extern "C" */
+/*
+
+* Class:     sun_awt_windows_WLightweightFramePeer
+* Method:    overrideNativeHandle
+* Signature: (J)V
+*/
+
+JNIEXPORT void JNICALL Java_sun_awt_windows_WLightweightFramePeer_overrideNativeHandle
+(JNIEnv *env, jobject self, jlong hwnd)
+{
+    TRY;
+
+    OverrideHandle *oh = new OverrideHandle;
+    oh->frame = env->NewGlobalRef(self);
+    oh->handle = (HWND)hwnd;
+
+    AwtToolkit::GetInstance().SyncCall(AwtFrame::_OverrideHandle, oh);
+    // global ref and oh are deleted in _OverrideHandle()
+
+    CATCH_BAD_ALLOC;
+}
+
+}/* extern "C" */
 
 
 /************************************************************************
@@ -3134,6 +3221,11 @@ Java_sun_awt_windows_WWindowPeer_initIDs(JNIEnv *env, jclass cls)
 
     AwtWindow::windowTypeID = env->GetFieldID(cls, "windowType",
             "Ljava/awt/Window$Type;");
+
+    AwtWindow::notifyWindowStateChangedMID =
+        env->GetMethodID(cls, "notifyWindowStateChanged", "(II)V");
+    DASSERT(AwtWindow::notifyWindowStateChangedMID);
+    CHECK_NULL(AwtWindow::notifyWindowStateChangedMID);
 
     CATCH_BAD_ALLOC;
 }
@@ -3246,12 +3338,9 @@ Java_sun_awt_windows_WWindowPeer_createAwtWindow(JNIEnv *env, jobject self,
 {
     TRY;
 
-    PDATA pData;
-//    JNI_CHECK_PEER_RETURN(parent);
     AwtToolkit::CreateComponent(self, parent,
                                 (AwtToolkit::ComponentFactory)
                                 AwtWindow::Create);
-    JNI_CHECK_PEER_CREATION_RETURN(self);
 
     CATCH_BAD_ALLOC;
 }

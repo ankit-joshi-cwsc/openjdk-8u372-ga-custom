@@ -393,7 +393,7 @@ uint PhaseCFG::build_cfg() {
   VectorSet visited(a);
 
   // Allocate stack with enough space to avoid frequent realloc
-  Node_Stack nstack(a, C->unique() >> 1);
+  Node_Stack nstack(a, C->live_nodes() >> 1);
   nstack.push(_root, 0);
   uint sum = 0;                 // Counter for blocks
 
@@ -1207,6 +1207,9 @@ void PhaseCFG::verify() const {
       assert(get_block_for_node(n) == block, "");
       if (j >= 1 && n->is_Mach() && n->as_Mach()->ideal_Opcode() == Op_CreateEx) {
         assert(j == 1 || block->get_node(j-1)->is_Phi(), "CreateEx must be first instruction in block");
+      }
+      if (n->needs_anti_dependence_check()) {
+        verify_anti_dependences(block, n);
       }
       for (uint k = 0; k < n->req(); k++) {
         Node *def = n->in(k);

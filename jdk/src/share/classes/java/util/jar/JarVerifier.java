@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -84,6 +84,9 @@ class JarVerifier {
     /** the bytes for the manDig object */
     byte manifestRawBytes[] = null;
 
+    /** the manifest name this JarVerifier is created upon */
+    final String manifestName;
+
     /** controls eager signature validation */
     boolean eagerValidation;
 
@@ -93,7 +96,8 @@ class JarVerifier {
     /** collect -DIGEST-MANIFEST values for blacklist */
     private List<Object> manifestDigests;
 
-    public JarVerifier(byte rawBytes[]) {
+    public JarVerifier(String name, byte rawBytes[]) {
+        manifestName = name;
         manifestRawBytes = rawBytes;
         sigFileSigners = new Hashtable<>();
         verifiedSigners = new Hashtable<>();
@@ -180,10 +184,12 @@ class JarVerifier {
 
         // only set the jev object for entries that have a signature
         // (either verified or not)
-        if (sigFileSigners.get(name) != null ||
-                verifiedSigners.get(name) != null) {
-            mev.setEntry(name, je);
-            return;
+        if (!name.equalsIgnoreCase(JarFile.MANIFEST_NAME)) {
+            if (sigFileSigners.get(name) != null ||
+                    verifiedSigners.get(name) != null) {
+                mev.setEntry(name, je);
+                return;
+            }
         }
 
         // don't compute the digest for this entry
@@ -270,7 +276,8 @@ class JarVerifier {
                             }
 
                             sfv.setSignatureFile(bytes);
-                            sfv.process(sigFileSigners, manifestDigests);
+                            sfv.process(sigFileSigners, manifestDigests,
+                                    manifestName);
                         }
                     }
                     return;
@@ -313,7 +320,7 @@ class JarVerifier {
                         sfv.setSignatureFile(bytes);
                     }
                 }
-                sfv.process(sigFileSigners, manifestDigests);
+                sfv.process(sigFileSigners, manifestDigests, manifestName);
 
             } catch (IOException ioe) {
                 // e.g. sun.security.pkcs.ParsingException
@@ -428,9 +435,9 @@ class JarVerifier {
         manDig = null;
         // MANIFEST.MF is always treated as signed and verified,
         // move its signers from sigFileSigners to verifiedSigners.
-        if (sigFileSigners.containsKey(JarFile.MANIFEST_NAME)) {
-            CodeSigner[] codeSigners = sigFileSigners.remove(JarFile.MANIFEST_NAME);
-            verifiedSigners.put(JarFile.MANIFEST_NAME, codeSigners);
+        if (sigFileSigners.containsKey(manifestName)) {
+            CodeSigner[] codeSigners = sigFileSigners.remove(manifestName);
+            verifiedSigners.put(manifestName, codeSigners);
         }
     }
 
@@ -448,7 +455,7 @@ class JarVerifier {
         {
             this.is = is;
             this.jv = jv;
-            this.mev = new ManifestEntryVerifier(man);
+            this.mev = new ManifestEntryVerifier(man, jv.manifestName);
             this.jv.beginEntry(je, mev);
             this.numLeft = je.getSize();
             if (this.numLeft == 0)
@@ -876,5 +883,25 @@ class JarVerifier {
 
     static CodeSource getUnsignedCS(URL url) {
         return new VerifierCodeSource(null, url, (java.security.cert.Certificate[]) null);
+    }
+
+    /**
+     * Returns whether the name is trusted. Used by
+     * {@link Manifest#getTrustedAttributes(String)}.
+     */
+    boolean isTrustedManifestEntry(String name) {
+        // How many signers? MANIFEST.MF is always verified
+        CodeSigner[] forMan = verifiedSigners.get(manifestName);
+        if (forMan == null) {
+            return true;
+        }
+        // Check sigFileSigners first, because we are mainly dealing with
+        // non-file entries which will stay in sigFileSigners forever.
+        CodeSigner[] forName = sigFileSigners.get(name);
+        if (forName == null) {
+            forName = verifiedSigners.get(name);
+        }
+        // Returns trusted if all signers sign the entry
+        return forName != null && forName.length == forMan.length;
     }
 }

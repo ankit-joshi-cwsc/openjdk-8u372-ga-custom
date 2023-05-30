@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,18 +25,31 @@ package jdk.testlibrary;
 
 import static jdk.testlibrary.Asserts.assertTrue;
 
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Arrays;
+import java.util.LinkedList;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.attribute.FileAttribute;
+
 import java.util.Collections;
+import java.util.Objects;
 import java.util.regex.Pattern;
 import java.util.regex.Matcher;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.nio.file.Files;
 
 /**
  * Common library for various test helper functions.
@@ -66,7 +79,7 @@ public final class Utils {
     public static final double TIMEOUT_FACTOR;
     static {
         String toFactor = System.getProperty("test.timeout.factor", "1.0");
-       TIMEOUT_FACTOR = Double.parseDouble(toFactor);
+        TIMEOUT_FACTOR = Double.parseDouble(toFactor);
     }
 
     /**
@@ -74,6 +87,9 @@ public final class Utils {
     * converted to {@code long}.
     */
     public static final long DEFAULT_TEST_TIMEOUT = TimeUnit.SECONDS.toMillis(120);
+
+    private static final int MAX_BUFFER_SIZE = Integer.MAX_VALUE - 8;
+    private static final int DEFAULT_BUFFER_SIZE = 8192;
 
     private Utils() {
         // Private constructor to prevent class instantiation
@@ -241,7 +257,6 @@ public final class Utils {
      * @throws Exception If multiple matching jvms are found.
      */
     public static int tryFindJvmPid(String key) throws Throwable {
-        ProcessBuilder pb = null;
         OutputAnalyzer output = null;
         try {
             JDKToolLauncher jcmdLauncher = JDKToolLauncher.create("jcmd");
@@ -266,6 +281,59 @@ public final class Utils {
             System.out.println(String.format("Utils.findJvmPid(%s) failed: %s", key, t));
             throw t;
         }
+    }
+
+    /**
+     * Returns file content as a list of strings
+     *
+     * @param file File to operate on
+     * @return List of strings
+     * @throws IOException
+     */
+    public static List<String> fileAsList(File file) throws IOException {
+        assertTrue(file.exists() && file.isFile(),
+                file.getAbsolutePath() + " does not exist or not a file");
+        List<String> output = new ArrayList<>();
+        try (BufferedReader reader = new BufferedReader(new FileReader(file.getAbsolutePath()))) {
+            while (reader.ready()) {
+                output.add(reader.readLine().replace(NEW_LINE, ""));
+            }
+        }
+        return output;
+    }
+
+    /**
+     * Helper method to read all bytes from InputStream
+     *
+     * @param is InputStream to read from
+     * @return array of bytes
+     * @throws IOException
+     */
+    public static byte[] readAllBytes(InputStream is) throws IOException {
+        byte[] buf = new byte[DEFAULT_BUFFER_SIZE];
+        int capacity = buf.length;
+        int nread = 0;
+        int n;
+        for (;;) {
+            // read to EOF which may read more or less than initial buffer size
+            while ((n = is.read(buf, nread, capacity - nread)) > 0)
+                nread += n;
+
+            // if the last call to read returned -1, then we're done
+            if (n < 0)
+                break;
+
+            // need to allocate a larger buffer
+            if (capacity <= MAX_BUFFER_SIZE - capacity) {
+                capacity = capacity << 1;
+            } else {
+                if (capacity == MAX_BUFFER_SIZE)
+                    throw new OutOfMemoryError("Required array size too large");
+                capacity = MAX_BUFFER_SIZE;
+            }
+            buf = Arrays.copyOf(buf, capacity);
+        }
+        return (capacity == nread) ? buf : Arrays.copyOf(buf, nread);
     }
 
     /**
@@ -310,5 +378,90 @@ public final class Utils {
             }
         }
         return null;
+    }
+
+    private static final int BUFFER_SIZE = 1024;
+
+    /**
+     * Reads all bytes from the input stream and writes the bytes to the
+     * given output stream in the order that they are read. On return, the
+     * input stream will be at end of stream. This method does not close either
+     * stream.
+     * <p>
+     * This method may block indefinitely reading from the input stream, or
+     * writing to the output stream. The behavior for the case where the input
+     * and/or output stream is <i>asynchronously closed</i>, or the thread
+     * interrupted during the transfer, is highly input and output stream
+     * specific, and therefore not specified.
+     * <p>
+     * If an I/O error occurs reading from the input stream or writing to the
+     * output stream, then it may do so after some bytes have been read or
+     * written. Consequently the input stream may not be at end of stream and
+     * one, or both, streams may be in an inconsistent state. It is strongly
+     * recommended that both streams be promptly closed if an I/O error occurs.
+     *
+     * @param  in the input stream, non-null
+     * @param  out the output stream, non-null
+     * @return the number of bytes transferred
+     * @throws IOException if an I/O error occurs when reading or writing
+     * @throws NullPointerException if {@code in} or {@code out} is {@code null}
+     *
+     */
+    public static long transferTo(InputStream in, OutputStream out)
+            throws IOException  {
+        long transferred = 0;
+        byte[] buffer = new byte[BUFFER_SIZE];
+        int read;
+        while ((read = in.read(buffer, 0, BUFFER_SIZE)) >= 0) {
+            out.write(buffer, 0, read);
+            transferred += read;
+        }
+        return transferred;
+    }
+
+    // Parses the specified source file for "@{id} breakpoint" tags and returns
+    // list of the line numbers containing the tag.
+    // Example:
+    //   System.out.println("BP is here");  // @1 breakpoint
+    public static List<Integer> parseBreakpoints(String filePath, int id) {
+        final String pattern = "@" + id + " breakpoint";
+        int lineNum = 1;
+        List<Integer> result = new LinkedList<>();
+        try {
+            for (String line: Files.readAllLines(Paths.get(filePath))) {
+                if (line.contains(pattern)) {
+                    result.add(lineNum);
+                }
+                lineNum++;
+            }
+        } catch (IOException ex) {
+            throw new RuntimeException("failed to parse " + filePath, ex);
+        }
+        return result;
+    }
+
+    // gets full test source path for the given test filename
+    public static String getTestSourcePath(String fileName) {
+        return Paths.get(System.getProperty("test.src")).resolve(fileName).toString();
+    }
+
+    /**
+     * Creates an empty directory in "user.dir" or "."
+     * <p>
+     * This method is meant as a replacement for {@code Files#createTempDirectory(String, String, FileAttribute...)}
+     * that doesn't leave files behind in /tmp directory of the test machine
+     * <p>
+     * If the property "user.dir" is not set, "." will be used.
+     *
+     * @param prefix
+     * @param attrs
+     * @return the path to the newly created directory
+     * @throws IOException
+     *
+     * @see {@link Files#createTempDirectory(String, String, FileAttribute...)}
+     */
+    public static Path createTempDirectory(String prefix, FileAttribute<?>... attrs) throws IOException {
+        Path dir = Paths.get(System.getProperty("user.dir", "."));
+        return Files.createTempDirectory(dir, prefix);
     }
 }

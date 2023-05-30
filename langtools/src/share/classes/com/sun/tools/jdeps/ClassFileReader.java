@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -34,8 +34,10 @@ import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.*;
+import java.util.jar.Attributes;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
+import java.util.jar.Manifest;
 
 /**
  * ClassFileReader reads ClassFile(s) of a given path that can be
@@ -153,6 +155,8 @@ public class ClassFileReader {
             throw new UnsupportedOperationException("Not supported yet.");
         }
     }
+
+    public boolean isMultiReleaseJar() throws IOException { return false; }
 
     public String toString() {
         return path.toString();
@@ -290,6 +294,16 @@ public class ClassFileReader {
                 }
             };
         }
+
+        @Override
+        public boolean isMultiReleaseJar() throws IOException {
+            Manifest mf = this.jarfile.getManifest();
+            if (mf != null) {
+                Attributes atts = mf.getMainAttributes();
+                return "true".equalsIgnoreCase(atts.getValue("Multi-Release"));
+            }
+            return false;
+        }
     }
 
     class JarFileIterator implements Iterator<ClassFile> {
@@ -323,7 +337,10 @@ public class ClassFileReader {
                     cf = reader.readClassFile(jf, nextEntry);
                     return true;
                 } catch (ClassFileError | IOException ex) {
-                    skippedEntries.add(nextEntry.getName());
+                    skippedEntries.add(String.format("%s: %s (%s)",
+                                                     ex.getMessage(),
+                                                     nextEntry.getName(),
+                                                     jf.getName()));
                 }
                 nextEntry = nextEntry();
             }

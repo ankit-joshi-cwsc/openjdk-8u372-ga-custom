@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -302,7 +302,25 @@ void report_java_out_of_memory(const char* message) {
       VMError err(message);
       err.report_java_out_of_memory();
     }
+
+    if (CrashOnOutOfMemoryError) {
+      tty->print_cr("Aborting due to java.lang.OutOfMemoryError: %s", message);
+      fatal(err_msg("OutOfMemory encountered: %s", message));
+    }
+
+    if (ExitOnOutOfMemoryError) {
+      tty->print_cr("Terminating due to java.lang.OutOfMemoryError: %s", message);
+      exit(3);
+    }
   }
+}
+
+void report_insufficient_metaspace(size_t required_size) {
+  warning("\nThe MaxMetaspaceSize of " SIZE_FORMAT " bytes is not large enough.\n"
+          "Either don't specify the -XX:MaxMetaspaceSize=<size>\n"
+          "or increase the size to at least " SIZE_FORMAT ".\n",
+          MaxMetaspaceSize, required_size);
+  exit(2);
 }
 
 static bool error_reported = false;
@@ -429,12 +447,13 @@ extern "C" void nm(intptr_t p) {
 extern "C" void disnm(intptr_t p) {
   Command c("disnm");
   CodeBlob* cb = CodeCache::find_blob((address) p);
-  nmethod* nm = cb->as_nmethod_or_null();
-  if (nm) {
-    nm->print();
-    Disassembler::decode(nm);
-  } else {
-    cb->print();
+  if (cb != NULL) {
+    nmethod* nm = cb->as_nmethod_or_null();
+    if (nm != NULL) {
+      nm->print();
+    } else {
+      cb->print();
+    }
     Disassembler::decode(cb);
   }
 }
@@ -669,6 +688,7 @@ void help() {
   tty->print_cr("  pns(void* sp, void* fp, void* pc)  - print native (i.e. mixed) stack trace. E.g.");
   tty->print_cr("                   pns($sp, $rbp, $pc) on Linux/amd64 and Solaris/amd64 or");
   tty->print_cr("                   pns($sp, $ebp, $pc) on Linux/x86 or");
+  tty->print_cr("                   pns($sp, $fp, $pc)  on Linux/AArch64 or");
   tty->print_cr("                   pns($sp, 0, $pc)    on Linux/ppc64 or");
   tty->print_cr("                   pns($sp + 0x7ff, 0, $pc) on Solaris/SPARC");
   tty->print_cr("                 - in gdb do 'set overload-resolution off' before calling pns()");

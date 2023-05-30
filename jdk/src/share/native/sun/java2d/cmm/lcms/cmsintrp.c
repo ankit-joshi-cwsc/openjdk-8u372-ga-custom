@@ -30,7 +30,7 @@
 //---------------------------------------------------------------------------------
 //
 //  Little Color Management System
-//  Copyright (c) 1998-2012 Marti Maria Saguer
+//  Copyright (c) 1998-2020 Marti Maria Saguer
 //
 // Permission is hereby granted, free of charge, to any person obtaining
 // a copy of this software and associated documentation files (the "Software"),
@@ -57,6 +57,13 @@
 
 // This module incorporates several interpolation routines, for 1 to 8 channels on input and
 // up to 65535 channels on output. The user may change those by using the interpolation plug-in
+
+// Some people may want to compile as C++ with all warnings on, in this case make compiler silent
+#ifdef _MSC_VER
+#    if (_MSC_VER >= 1400)
+#       pragma warning( disable : 4365 )
+#    endif
+#endif
 
 // Interpolation routines by default
 static cmsInterpFunction DefaultInterpolatorsFactory(cmsUInt32Number nInputChannels, cmsUInt32Number nOutputChannels, cmsUInt32Number dwFlags);
@@ -131,12 +138,12 @@ cmsBool _cmsSetInterpolationRoutine(cmsContext ContextID, cmsInterpParams* p)
 // This function precalculates as many parameters as possible to speed up the interpolation.
 cmsInterpParams* _cmsComputeInterpParamsEx(cmsContext ContextID,
                                            const cmsUInt32Number nSamples[],
-                                           int InputChan, int OutputChan,
+                                           cmsUInt32Number InputChan, cmsUInt32Number OutputChan,
                                            const void *Table,
                                            cmsUInt32Number dwFlags)
 {
     cmsInterpParams* p;
-    int i;
+    cmsUInt32Number i;
 
     // Check for maximum inputs
     if (InputChan > MAX_INPUT_DIMENSIONS) {
@@ -180,12 +187,13 @@ cmsInterpParams* _cmsComputeInterpParamsEx(cmsContext ContextID,
 
 
 // This one is a wrapper on the anterior, but assuming all directions have same number of nodes
-cmsInterpParams* _cmsComputeInterpParams(cmsContext ContextID, int nSamples, int InputChan, int OutputChan, const void* Table, cmsUInt32Number dwFlags)
+cmsInterpParams* CMSEXPORT _cmsComputeInterpParams(cmsContext ContextID, cmsUInt32Number nSamples,
+                                                   cmsUInt32Number InputChan, cmsUInt32Number OutputChan, const void* Table, cmsUInt32Number dwFlags)
 {
     int i;
     cmsUInt32Number Samples[MAX_INPUT_DIMENSIONS];
 
-    // Fill the auxiliar array
+    // Fill the auxiliary array
     for (i=0; i < MAX_INPUT_DIMENSIONS; i++)
         Samples[i] = nSamples;
 
@@ -195,14 +203,14 @@ cmsInterpParams* _cmsComputeInterpParams(cmsContext ContextID, int nSamples, int
 
 
 // Free all associated memory
-void _cmsFreeInterpParams(cmsInterpParams* p)
+void CMSEXPORT _cmsFreeInterpParams(cmsInterpParams* p)
 {
     if (p != NULL) _cmsFree(p ->ContextID, p);
 }
 
 
 // Inline fixed point interpolation
-cmsINLINE cmsUInt16Number LinearInterp(cmsS15Fixed16Number a, cmsS15Fixed16Number l, cmsS15Fixed16Number h)
+cmsINLINE CMS_NO_SANITIZE cmsUInt16Number LinearInterp(cmsS15Fixed16Number a, cmsS15Fixed16Number l, cmsS15Fixed16Number h)
 {
     cmsUInt32Number dif = (cmsUInt32Number) (h - l) * a + 0x8000;
     dif = (dif >> 16) + l;
@@ -212,9 +220,9 @@ cmsINLINE cmsUInt16Number LinearInterp(cmsS15Fixed16Number a, cmsS15Fixed16Numbe
 
 //  Linear interpolation (Fixed-point optimized)
 static
-void LinLerp1D(register const cmsUInt16Number Value[],
-               register cmsUInt16Number Output[],
-               register const cmsInterpParams* p)
+void LinLerp1D(CMSREGISTER const cmsUInt16Number Value[],
+               CMSREGISTER cmsUInt16Number Output[],
+               CMSREGISTER const cmsInterpParams* p)
 {
     cmsUInt16Number y1, y0;
     int cell0, rest;
@@ -225,26 +233,26 @@ void LinLerp1D(register const cmsUInt16Number Value[],
     if (Value[0] == 0xffff) {
 
         Output[0] = LutTable[p -> Domain[0]];
-        return;
     }
+    else
+    {
+        val3 = p->Domain[0] * Value[0];
+        val3 = _cmsToFixedDomain(val3);    // To fixed 15.16
 
-    val3 = p -> Domain[0] * Value[0];
-    val3 = _cmsToFixedDomain(val3);    // To fixed 15.16
+        cell0 = FIXED_TO_INT(val3);             // Cell is 16 MSB bits
+        rest = FIXED_REST_TO_INT(val3);        // Rest is 16 LSB bits
 
-    cell0 = FIXED_TO_INT(val3);             // Cell is 16 MSB bits
-    rest  = FIXED_REST_TO_INT(val3);        // Rest is 16 LSB bits
+        y0 = LutTable[cell0];
+        y1 = LutTable[cell0 + 1];
 
-    y0 = LutTable[cell0];
-    y1 = LutTable[cell0+1];
-
-
-    Output[0] = LinearInterp(rest, y0, y1);
+        Output[0] = LinearInterp(rest, y0, y1);
+    }
 }
 
 // To prevent out of bounds indexing
 cmsINLINE cmsFloat32Number fclamp(cmsFloat32Number v)
 {
-    return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+    return ((v < 1.0e-9f) || isnan(v)) ? 0.0f : (v > 1.0f ? 1.0f : v);
 }
 
 // Floating-point version of 1D interpolation
@@ -263,30 +271,31 @@ void LinLerp1Dfloat(const cmsFloat32Number Value[],
        // if last value...
        if (val2 == 1.0) {
            Output[0] = LutTable[p -> Domain[0]];
-           return;
        }
+       else
+       {
+           val2 *= p->Domain[0];
 
-       val2 *= p -> Domain[0];
+           cell0 = (int)floor(val2);
+           cell1 = (int)ceil(val2);
 
-       cell0 = (int) floor(val2);
-       cell1 = (int) ceil(val2);
+           // Rest is 16 LSB bits
+           rest = val2 - cell0;
 
-       // Rest is 16 LSB bits
-       rest = val2 - cell0;
+           y0 = LutTable[cell0];
+           y1 = LutTable[cell1];
 
-       y0 = LutTable[cell0] ;
-       y1 = LutTable[cell1] ;
-
-       Output[0] = y0 + (y1 - y0) * rest;
+           Output[0] = y0 + (y1 - y0) * rest;
+       }
 }
 
 
 
 // Eval gray LUT having only one input channel
-static
-void Eval1Input(register const cmsUInt16Number Input[],
-                register cmsUInt16Number Output[],
-                register const cmsInterpParams* p16)
+static CMS_NO_SANITIZE
+void Eval1Input(CMSREGISTER const cmsUInt16Number Input[],
+                CMSREGISTER cmsUInt16Number Output[],
+                CMSREGISTER const cmsInterpParams* p16)
 {
        cmsS15Fixed16Number fk;
        cmsS15Fixed16Number k0, k1, rk, K0, K1;
@@ -327,30 +336,36 @@ void Eval1InputFloat(const cmsFloat32Number Value[],
 
     val2 = fclamp(Value[0]);
 
-        // if last value...
-       if (val2 == 1.0) {
-           Output[0] = LutTable[p -> Domain[0]];
-           return;
-       }
+    // if last value...
+    if (val2 == 1.0) {
 
-       val2 *= p -> Domain[0];
+        y0 = LutTable[p->Domain[0]];
 
-       cell0 = (int) floor(val2);
-       cell1 = (int) ceil(val2);
+        for (OutChan = 0; OutChan < p->nOutputs; OutChan++) {
+            Output[OutChan] = y0;
+        }
+    }
+    else
+    {
+        val2 *= p->Domain[0];
 
-       // Rest is 16 LSB bits
-       rest = val2 - cell0;
+        cell0 = (int)floor(val2);
+        cell1 = (int)ceil(val2);
 
-       cell0 *= p -> opta[0];
-       cell1 *= p -> opta[0];
+        // Rest is 16 LSB bits
+        rest = val2 - cell0;
 
-       for (OutChan=0; OutChan < p->nOutputs; OutChan++) {
+        cell0 *= p->opta[0];
+        cell1 *= p->opta[0];
 
-            y0 = LutTable[cell0 + OutChan] ;
-            y1 = LutTable[cell1 + OutChan] ;
+        for (OutChan = 0; OutChan < p->nOutputs; OutChan++) {
+
+            y0 = LutTable[cell0 + OutChan];
+            y1 = LutTable[cell1 + OutChan];
 
             Output[OutChan] = y0 + (y1 - y0) * rest;
-       }
+        }
+    }
 }
 
 // Bilinear interpolation (16 bits) - cmsFloat32Number version
@@ -381,10 +396,10 @@ void BilinearInterpFloat(const cmsFloat32Number Input[],
     y0 = (int) _cmsQuickFloor(py); fy = py - (cmsFloat32Number) y0;
 
     X0 = p -> opta[1] * x0;
-    X1 = X0 + (Input[0] >= 1.0 ? 0 : p->opta[1]);
+    X1 = X0 + (fclamp(Input[0]) >= 1.0 ? 0 : p->opta[1]);
 
     Y0 = p -> opta[0] * y0;
-    Y1 = Y0 + (Input[1] >= 1.0 ? 0 : p->opta[0]);
+    Y1 = Y0 + (fclamp(Input[1]) >= 1.0 ? 0 : p->opta[0]);
 
     for (OutChan = 0; OutChan < TotalOut; OutChan++) {
 
@@ -407,10 +422,10 @@ void BilinearInterpFloat(const cmsFloat32Number Input[],
 }
 
 // Bilinear interpolation (16 bits) - optimized version
-static
-void BilinearInterp16(register const cmsUInt16Number Input[],
-                      register cmsUInt16Number Output[],
-                      register const cmsInterpParams* p)
+static CMS_NO_SANITIZE
+void BilinearInterp16(CMSREGISTER const cmsUInt16Number Input[],
+                      CMSREGISTER cmsUInt16Number Output[],
+                      CMSREGISTER const cmsInterpParams* p)
 
 {
 #define DENS(i,j) (LutTable[(i)+(j)+OutChan])
@@ -419,9 +434,9 @@ void BilinearInterp16(register const cmsUInt16Number Input[],
            const cmsUInt16Number* LutTable = (cmsUInt16Number*) p ->Table;
            int        OutChan, TotalOut;
            cmsS15Fixed16Number    fx, fy;
-  register int        rx, ry;
+  CMSREGISTER int        rx, ry;
            int        x0, y0;
-  register int        X0, X1, Y0, Y1;
+  CMSREGISTER int        X0, X1, Y0, Y1;
            int        d00, d01, d10, d11,
                       dx0, dx1,
                       dxy;
@@ -493,18 +508,18 @@ void TrilinearInterpFloat(const cmsFloat32Number Input[],
     py = fclamp(Input[1]) * p->Domain[1];
     pz = fclamp(Input[2]) * p->Domain[2];
 
-    x0 = (int) _cmsQuickFloor(px); fx = px - (cmsFloat32Number) x0;
-    y0 = (int) _cmsQuickFloor(py); fy = py - (cmsFloat32Number) y0;
-    z0 = (int) _cmsQuickFloor(pz); fz = pz - (cmsFloat32Number) z0;
+    x0 = (int) floor(px); fx = px - (cmsFloat32Number) x0;  // We need full floor funcionality here
+    y0 = (int) floor(py); fy = py - (cmsFloat32Number) y0;
+    z0 = (int) floor(pz); fz = pz - (cmsFloat32Number) z0;
 
     X0 = p -> opta[2] * x0;
-    X1 = X0 + (Input[0] >= 1.0 ? 0 : p->opta[2]);
+    X1 = X0 + (fclamp(Input[0]) >= 1.0 ? 0 : p->opta[2]);
 
     Y0 = p -> opta[1] * y0;
-    Y1 = Y0 + (Input[1] >= 1.0 ? 0 : p->opta[1]);
+    Y1 = Y0 + (fclamp(Input[1]) >= 1.0 ? 0 : p->opta[1]);
 
     Z0 = p -> opta[0] * z0;
-    Z1 = Z0 + (Input[2] >= 1.0 ? 0 : p->opta[0]);
+    Z1 = Z0 + (fclamp(Input[2]) >= 1.0 ? 0 : p->opta[0]);
 
     for (OutChan = 0; OutChan < TotalOut; OutChan++) {
 
@@ -538,10 +553,10 @@ void TrilinearInterpFloat(const cmsFloat32Number Input[],
 }
 
 // Trilinear interpolation (16 bits) - optimized version
-static
-void TrilinearInterp16(register const cmsUInt16Number Input[],
-                       register cmsUInt16Number Output[],
-                       register const cmsInterpParams* p)
+static CMS_NO_SANITIZE
+void TrilinearInterp16(CMSREGISTER const cmsUInt16Number Input[],
+                       CMSREGISTER cmsUInt16Number Output[],
+                       CMSREGISTER const cmsInterpParams* p)
 
 {
 #define DENS(i,j,k) (LutTable[(i)+(j)+(k)+OutChan])
@@ -550,9 +565,9 @@ void TrilinearInterp16(register const cmsUInt16Number Input[],
            const cmsUInt16Number* LutTable = (cmsUInt16Number*) p ->Table;
            int        OutChan, TotalOut;
            cmsS15Fixed16Number    fx, fy, fz;
-  register int        rx, ry, rz;
+  CMSREGISTER int        rx, ry, rz;
            int        x0, y0, z0;
-  register int        X0, X1, Y0, Y1, Z0, Z1;
+  CMSREGISTER int        X0, X1, Y0, Y1, Z0, Z1;
            int        d000, d001, d010, d011,
                       d100, d101, d110, d111,
                       dx00, dx01, dx10, dx11,
@@ -637,19 +652,19 @@ void TetrahedralInterpFloat(const cmsFloat32Number Input[],
     py = fclamp(Input[1]) * p->Domain[1];
     pz = fclamp(Input[2]) * p->Domain[2];
 
-    x0 = (int) _cmsQuickFloor(px); rx = (px - (cmsFloat32Number) x0);
-    y0 = (int) _cmsQuickFloor(py); ry = (py - (cmsFloat32Number) y0);
-    z0 = (int) _cmsQuickFloor(pz); rz = (pz - (cmsFloat32Number) z0);
+    x0 = (int) floor(px); rx = (px - (cmsFloat32Number) x0);  // We need full floor functionality here
+    y0 = (int) floor(py); ry = (py - (cmsFloat32Number) y0);
+    z0 = (int) floor(pz); rz = (pz - (cmsFloat32Number) z0);
 
 
     X0 = p -> opta[2] * x0;
-    X1 = X0 + (Input[0] >= 1.0 ? 0 : p->opta[2]);
+    X1 = X0 + (fclamp(Input[0]) >= 1.0 ? 0 : p->opta[2]);
 
     Y0 = p -> opta[1] * y0;
-    Y1 = Y0 + (Input[1] >= 1.0 ? 0 : p->opta[1]);
+    Y1 = Y0 + (fclamp(Input[1]) >= 1.0 ? 0 : p->opta[1]);
 
     Z0 = p -> opta[0] * z0;
-    Z1 = Z0 + (Input[2] >= 1.0 ? 0 : p->opta[0]);
+    Z1 = Z0 + (fclamp(Input[2]) >= 1.0 ? 0 : p->opta[0]);
 
     for (OutChan=0; OutChan < TotalOut; OutChan++) {
 
@@ -718,10 +733,10 @@ void TetrahedralInterpFloat(const cmsFloat32Number Input[],
 
 
 
-static
-void TetrahedralInterp16(register const cmsUInt16Number Input[],
-                         register cmsUInt16Number Output[],
-                         register const cmsInterpParams* p)
+static CMS_NO_SANITIZE
+void TetrahedralInterp16(CMSREGISTER const cmsUInt16Number Input[],
+                         CMSREGISTER cmsUInt16Number Output[],
+                         CMSREGISTER const cmsInterpParams* p)
 {
     const cmsUInt16Number* LutTable = (cmsUInt16Number*) p -> Table;
     cmsS15Fixed16Number fx, fy, fz;
@@ -852,10 +867,10 @@ void TetrahedralInterp16(register const cmsUInt16Number Input[],
 
 
 #define DENS(i,j,k) (LutTable[(i)+(j)+(k)+OutChan])
-static
-void Eval4Inputs(register const cmsUInt16Number Input[],
-                     register cmsUInt16Number Output[],
-                     register const cmsInterpParams* p16)
+static CMS_NO_SANITIZE
+void Eval4Inputs(CMSREGISTER const cmsUInt16Number Input[],
+                     CMSREGISTER cmsUInt16Number Output[],
+                     CMSREGISTER const cmsInterpParams* p16)
 {
     const cmsUInt16Number* LutTable;
     cmsS15Fixed16Number fk;
@@ -952,13 +967,13 @@ void Eval4Inputs(register const cmsUInt16Number Input[],
                                 c3 = DENS(X0, Y0, Z1) - c0;
 
                             }
-                            else  {
+                            else {
                                 c1 = c2 = c3 = 0;
                             }
 
-                            Rest = c1 * rx + c2 * ry + c3 * rz;
+        Rest = c1 * rx + c2 * ry + c3 * rz;
 
-                            Tmp1[OutChan] = (cmsUInt16Number) ( c0 + ROUND_FIXED_TO_INT(_cmsToFixedDomain(Rest)));
+        Tmp1[OutChan] = (cmsUInt16Number)(c0 + ROUND_FIXED_TO_INT(_cmsToFixedDomain(Rest)));
     }
 
 
@@ -1020,9 +1035,9 @@ void Eval4Inputs(register const cmsUInt16Number Input[],
                                 c1 = c2 = c3 = 0;
                             }
 
-                            Rest = c1 * rx + c2 * ry + c3 * rz;
+        Rest = c1 * rx + c2 * ry + c3 * rz;
 
-                            Tmp2[OutChan] = (cmsUInt16Number) (c0 + ROUND_FIXED_TO_INT(_cmsToFixedDomain(Rest)));
+        Tmp2[OutChan] = (cmsUInt16Number) (c0 + ROUND_FIXED_TO_INT(_cmsToFixedDomain(Rest)));
     }
 
 
@@ -1057,7 +1072,7 @@ void Eval4InputsFloat(const cmsFloat32Number Input[],
        rest = pk - (cmsFloat32Number) k0;
 
        K0 = p -> opta[3] * k0;
-       K1 = K0 + (Input[0] >= 1.0 ? 0 : p->opta[3]);
+       K1 = K0 + (fclamp(Input[0]) >= 1.0 ? 0 : p->opta[3]);
 
        p1 = *p;
        memmove(&p1.Domain[0], &p ->Domain[1], 3*sizeof(cmsUInt32Number));
@@ -1081,11 +1096,11 @@ void Eval4InputsFloat(const cmsFloat32Number Input[],
 }
 
 
-static
-void Eval5Inputs(register const cmsUInt16Number Input[],
-                 register cmsUInt16Number Output[],
+static CMS_NO_SANITIZE
+void Eval5Inputs(CMSREGISTER const cmsUInt16Number Input[],
+                 CMSREGISTER cmsUInt16Number Output[],
 
-                 register const cmsInterpParams* p16)
+                 CMSREGISTER const cmsInterpParams* p16)
 {
        const cmsUInt16Number* LutTable = (cmsUInt16Number*) p16 -> Table;
        cmsS15Fixed16Number fk;
@@ -1144,7 +1159,7 @@ void Eval5InputsFloat(const cmsFloat32Number Input[],
        rest = pk - (cmsFloat32Number) k0;
 
        K0 = p -> opta[4] * k0;
-       K1 = K0 + (Input[0] >= 1.0 ? 0 : p->opta[4]);
+       K1 = K0 + (fclamp(Input[0]) >= 1.0 ? 0 : p->opta[4]);
 
        p1 = *p;
        memmove(&p1.Domain[0], &p ->Domain[1], 4*sizeof(cmsUInt32Number));
@@ -1170,10 +1185,10 @@ void Eval5InputsFloat(const cmsFloat32Number Input[],
 
 
 
-static
-void Eval6Inputs(register const cmsUInt16Number Input[],
-                 register cmsUInt16Number Output[],
-                 register const cmsInterpParams* p16)
+static CMS_NO_SANITIZE
+void Eval6Inputs(CMSREGISTER const cmsUInt16Number Input[],
+                 CMSREGISTER cmsUInt16Number Output[],
+                 CMSREGISTER const cmsInterpParams* p16)
 {
        const cmsUInt16Number* LutTable = (cmsUInt16Number*) p16 -> Table;
        cmsS15Fixed16Number fk;
@@ -1231,7 +1246,7 @@ void Eval6InputsFloat(const cmsFloat32Number Input[],
        rest = pk - (cmsFloat32Number) k0;
 
        K0 = p -> opta[5] * k0;
-       K1 = K0 + (Input[0] >= 1.0 ? 0 : p->opta[5]);
+       K1 = K0 + (fclamp(Input[0]) >= 1.0 ? 0 : p->opta[5]);
 
        p1 = *p;
        memmove(&p1.Domain[0], &p ->Domain[1], 5*sizeof(cmsUInt32Number));
@@ -1256,10 +1271,10 @@ void Eval6InputsFloat(const cmsFloat32Number Input[],
 }
 
 
-static
-void Eval7Inputs(register const cmsUInt16Number Input[],
-                 register cmsUInt16Number Output[],
-                 register const cmsInterpParams* p16)
+static CMS_NO_SANITIZE
+void Eval7Inputs(CMSREGISTER const cmsUInt16Number Input[],
+                 CMSREGISTER cmsUInt16Number Output[],
+                 CMSREGISTER const cmsInterpParams* p16)
 {
        const cmsUInt16Number* LutTable = (cmsUInt16Number*) p16 -> Table;
        cmsS15Fixed16Number fk;
@@ -1316,7 +1331,7 @@ void Eval7InputsFloat(const cmsFloat32Number Input[],
        rest = pk - (cmsFloat32Number) k0;
 
        K0 = p -> opta[6] * k0;
-       K1 = K0 + (Input[0] >= 1.0 ? 0 : p->opta[6]);
+       K1 = K0 + (fclamp(Input[0]) >= 1.0 ? 0 : p->opta[6]);
 
        p1 = *p;
        memmove(&p1.Domain[0], &p ->Domain[1], 6*sizeof(cmsUInt32Number));
@@ -1342,10 +1357,10 @@ void Eval7InputsFloat(const cmsFloat32Number Input[],
        }
 }
 
-static
-void Eval8Inputs(register const cmsUInt16Number Input[],
-                 register cmsUInt16Number Output[],
-                 register const cmsInterpParams* p16)
+static CMS_NO_SANITIZE
+void Eval8Inputs(CMSREGISTER const cmsUInt16Number Input[],
+                 CMSREGISTER cmsUInt16Number Output[],
+                 CMSREGISTER const cmsInterpParams* p16)
 {
        const cmsUInt16Number* LutTable = (cmsUInt16Number*) p16 -> Table;
        cmsS15Fixed16Number fk;
@@ -1401,7 +1416,7 @@ void Eval8InputsFloat(const cmsFloat32Number Input[],
        rest = pk - (cmsFloat32Number) k0;
 
        K0 = p -> opta[7] * k0;
-       K1 = K0 + (Input[0] >= 1.0 ? 0 : p->opta[7]);
+       K1 = K0 + (fclamp(Input[0]) >= 1.0 ? 0 : p->opta[7]);
 
        p1 = *p;
        memmove(&p1.Domain[0], &p ->Domain[1], 7*sizeof(cmsUInt32Number));

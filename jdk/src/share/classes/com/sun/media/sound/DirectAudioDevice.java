@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2002, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2002, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -557,14 +557,15 @@ final class DirectAudioDevice extends AbstractMixer {
                 getEventDispatcher().addLineMonitor(this);
             }
 
-            doIO = true;
-
-            // need to set Active and Started
-            // note: the current API always requires that
-            //       Started and Active are set at the same time...
-            if (isSource && stoppedWritten) {
-                setStarted(true);
-                setActive(true);
+            synchronized(lock) {
+                doIO = true;
+                // need to set Active and Started
+                // note: the current API always requires that
+                //       Started and Active are set at the same time...
+                if (isSource && stoppedWritten) {
+                    setStarted(true);
+                    setActive(true);
+                }
             }
 
             if (Printer.trace) Printer.trace("<< DirectDL: implStart() succeeded");
@@ -591,10 +592,10 @@ final class DirectAudioDevice extends AbstractMixer {
                 // read/write thread, that's why isStartedRunning()
                 // cannot be used
                 doIO = false;
+                setActive(false);
+                setStarted(false);
                 lock.notifyAll();
             }
-            setActive(false);
-            setStarted(false);
             stoppedWritten = false;
 
             if (Printer.trace) Printer.trace(" << DirectDL: implStop() succeeded");
@@ -739,12 +740,14 @@ final class DirectAudioDevice extends AbstractMixer {
             if ((long)off + (long)len > (long)b.length) {
                 throw new ArrayIndexOutOfBoundsException(b.length);
             }
-
-            if (!isActive() && doIO) {
-                // this is not exactly correct... would be nicer
-                // if the native sub system sent a callback when IO really starts
-                setActive(true);
-                setStarted(true);
+            synchronized(lock) {
+                if (!isActive() && doIO) {
+                    // this is not exactly correct... would be nicer
+                    // if the native sub system sent a callback when IO really
+                    // starts
+                    setActive(true);
+                    setStarted(true);
+                }
             }
             int written = 0;
             while (!flushing) {
@@ -969,11 +972,14 @@ final class DirectAudioDevice extends AbstractMixer {
             if ((long)off + (long)len > (long)b.length) {
                 throw new ArrayIndexOutOfBoundsException(b.length);
             }
-            if (!isActive() && doIO) {
-                // this is not exactly correct... would be nicer
-                // if the native sub system sent a callback when IO really starts
-                setActive(true);
-                setStarted(true);
+            synchronized(lock) {
+                if (!isActive() && doIO) {
+                    // this is not exactly correct... would be nicer
+                    // if the native sub system sent a callback when IO really
+                    // starts
+                    setActive(true);
+                    setStarted(true);
+                }
             }
             int read = 0;
             while (doIO && !flushing) {
@@ -1017,15 +1023,15 @@ final class DirectAudioDevice extends AbstractMixer {
     private static final class DirectClip extends DirectDL
             implements Clip, Runnable, AutoClosingClip {
 
-        private Thread thread;
-        private byte[] audioData = null;
-        private int frameSize;         // size of one frame in bytes
-        private int m_lengthInFrames;
-        private int loopCount;
-        private int clipBytePosition;   // index in the audioData array at current playback
-        private int newFramePosition;   // set in setFramePosition()
-        private int loopStartFrame;
-        private int loopEndFrame;      // the last sample included in the loop
+        private volatile Thread thread;
+        private volatile byte[] audioData = null;
+        private volatile int frameSize;         // size of one frame in bytes
+        private volatile int m_lengthInFrames;
+        private volatile int loopCount;
+        private volatile int clipBytePosition;   // index in the audioData array at current playback
+        private volatile int newFramePosition;   // set in setFramePosition()
+        private volatile int loopStartFrame;
+        private volatile int loopEndFrame;      // the last sample included in the loop
 
         // auto closing clip support
         private boolean autoclosing = false;
@@ -1115,7 +1121,7 @@ final class DirectAudioDevice extends AbstractMixer {
         public void open(AudioInputStream stream) throws LineUnavailableException, IOException {
 
             // $$fb part of fix for 4679187: Clip.open() throws unexpected Exceptions
-            Toolkit.isFullySpecifiedAudioFormat(format);
+            Toolkit.isFullySpecifiedAudioFormat(stream.getFormat());
 
             synchronized (mixer) {
                 if (Printer.trace) Printer.trace("> DirectClip.open(stream)");
@@ -1129,11 +1135,18 @@ final class DirectAudioDevice extends AbstractMixer {
                 if (Printer.debug) Printer.debug("DirectClip: open(AIS): lengthInFrames: " + lengthInFrames);
 
                 int bytesRead = 0;
+                int frameSize = stream.getFormat().getFrameSize();
                 if (lengthInFrames != AudioSystem.NOT_SPECIFIED) {
                     // read the data from the stream into an array in one fell swoop.
-                    int arraysize = lengthInFrames * stream.getFormat().getFrameSize();
-                    streamData = new byte[arraysize];
-
+                    int arraysize = lengthInFrames * frameSize;
+                    if (arraysize < 0) {
+                        throw new IllegalArgumentException("Audio data < 0");
+                    }
+                    try {
+                        streamData = new byte[arraysize];
+                    } catch (OutOfMemoryError e) {
+                        throw new IOException("Audio data is too big");
+                    }
                     int bytesRemaining = arraysize;
                     int thisRead = 0;
                     while (bytesRemaining > 0 && thisRead >= 0) {
@@ -1151,9 +1164,14 @@ final class DirectAudioDevice extends AbstractMixer {
                     // we use a slightly modified version of ByteArrayOutputStream
                     // to get direct access to the byte array (we don't want a new array
                     // to be allocated)
-                    int MAX_READ_LIMIT = 16384;
+                    int maxReadLimit = Math.max(16384, frameSize);
                     DirectBAOS dbaos  = new DirectBAOS();
-                    byte tmp[] = new byte[MAX_READ_LIMIT];
+                    byte[] tmp;
+                    try {
+                        tmp = new byte[maxReadLimit];
+                    } catch (OutOfMemoryError e) {
+                        throw new IOException("Audio data is too big");
+                    }
                     int thisRead = 0;
                     while (thisRead >= 0) {
                         thisRead = stream.read(tmp, 0, tmp.length);
@@ -1167,7 +1185,7 @@ final class DirectAudioDevice extends AbstractMixer {
                     } // while
                     streamData = dbaos.getInternalBuffer();
                 }
-                lengthInFrames = bytesRead / stream.getFormat().getFrameSize();
+                lengthInFrames = bytesRead / frameSize;
 
                 if (Printer.debug) Printer.debug("Read to end of stream. lengthInFrames: " + lengthInFrames);
 
@@ -1355,18 +1373,20 @@ final class DirectAudioDevice extends AbstractMixer {
         // main playback loop
         public void run() {
             if (Printer.trace) Printer.trace(">>> DirectClip: run() threadID="+Thread.currentThread().getId());
-            while (thread != null) {
+            Thread curThread = Thread.currentThread();
+            while (thread == curThread) {
                 // doIO is volatile, but we could check it, then get
                 // pre-empted while another thread changes doIO and notifies,
                 // before we wait (so we sleep in wait forever).
                 synchronized(lock) {
-                    if (!doIO) {
+                    while (!doIO && thread == curThread) {
                         try {
                             lock.wait();
-                        } catch(InterruptedException ie) {}
+                        } catch (InterruptedException ignored) {
+                        }
                     }
                 }
-                while (doIO) {
+                while (doIO && thread == curThread) {
                     if (newFramePosition >= 0) {
                         clipBytePosition = newFramePosition * frameSize;
                         newFramePosition = -1;

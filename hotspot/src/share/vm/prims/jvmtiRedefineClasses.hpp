@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -403,14 +403,9 @@ class VM_RedefineClasses: public VM_Operation {
   // Change jmethodIDs to point to the new methods
   void update_jmethod_ids();
 
-  // In addition to marking methods as obsolete, this routine
-  // records which methods are EMCP (Equivalent Module Constant
-  // Pool) in the emcp_methods BitMap and returns the number of
-  // EMCP methods via emcp_method_count_p. This information is
-  // used when information about the previous version of the_class
-  // is squirreled away.
-  void check_methods_and_mark_as_obsolete(BitMap *emcp_methods,
-         int * emcp_method_count_p);
+  // In addition to marking methods as old and/or obsolete, this routine
+  // counts the number of methods that are EMCP (Equivalent Module Constant Pool).
+  int check_methods_and_mark_as_obsolete();
   void transfer_old_native_function_registrations(instanceKlassHandle the_class);
 
   // Install the redefinition of a class
@@ -495,6 +490,10 @@ class VM_RedefineClasses: public VM_Operation {
 
   void flush_dependent_code(instanceKlassHandle k_h, TRAPS);
 
+  // lock classes to redefine since constant pool merging isn't thread safe.
+  void lock_classes();
+  void unlock_classes();
+
   static void dump_methods();
 
   // Check that there are no old or obsolete methods
@@ -538,5 +537,8 @@ class VM_RedefineClasses: public VM_Operation {
   static unsigned char * get_cached_class_file_bytes(JvmtiCachedClassFileData *cache) {
     return cache == NULL ? NULL : cache->data;
   }
+
+  // Error printing
+  void print_on_error(outputStream* st) const;
 };
 #endif // SHARE_VM_PRIMS_JVMTIREDEFINECLASSES_HPP

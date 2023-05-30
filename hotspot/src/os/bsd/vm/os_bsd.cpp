@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -1681,17 +1681,59 @@ void os::print_dll_info(outputStream *st) {
 
   dlclose(handle);
 #elif defined(__APPLE__)
-  uint32_t count;
-  uint32_t i;
-
-  count = _dyld_image_count();
-  for (i = 1; i < count; i++) {
-    const char *name = _dyld_get_image_name(i);
-    intptr_t slide = _dyld_get_image_vmaddr_slide(i);
-    st->print_cr(PTR_FORMAT " \t%s", slide, name);
+  for (uint32_t i = 1; i < _dyld_image_count(); i++) {
+    st->print_cr(PTR_FORMAT " \t%s", _dyld_get_image_header(i),
+        _dyld_get_image_name(i));
   }
 #else
   st->print_cr("Error: Cannot print dynamic libraries.");
+#endif
+}
+
+int os::get_loaded_modules_info(os::LoadedModulesCallbackFunc callback, void *param) {
+#ifdef RTLD_DI_LINKMAP
+  Dl_info dli;
+  void *handle;
+  Link_map *map;
+  Link_map *p;
+
+  if (dladdr(CAST_FROM_FN_PTR(void *, os::print_dll_info), &dli) == 0 ||
+      dli.dli_fname == NULL) {
+    return 1;
+  }
+  handle = dlopen(dli.dli_fname, RTLD_LAZY);
+  if (handle == NULL) {
+    return 1;
+  }
+  dlinfo(handle, RTLD_DI_LINKMAP, &map);
+  if (map == NULL) {
+    dlclose(handle);
+    return 1;
+  }
+
+  while (map->l_prev != NULL)
+    map = map->l_prev;
+
+  while (map != NULL) {
+    // Value for top_address is returned as 0 since we don't have any information about module size
+    if (callback(map->l_name, (address)map->l_addr, (address)0, param)) {
+      dlclose(handle);
+      return 1;
+    }
+    map = map->l_next;
+  }
+
+  dlclose(handle);
+#elif defined(__APPLE__)
+  for (uint32_t i = 1; i < _dyld_image_count(); i++) {
+    // Value for top_address is returned as 0 since we don't have any information about module size
+    if (callback(_dyld_get_image_name(i), (address)_dyld_get_image_header(i), (address)0, param)) {
+      return 1;
+    }
+  }
+  return 0;
+#else
+  return 1;
 #endif
 }
 
@@ -1843,7 +1885,7 @@ void os::jvm_path(char *buf, jint buflen) {
         jrelib_p = buf + len;
         snprintf(jrelib_p, buflen-len, "/%s", COMPILER_VARIANT);
         if (0 != access(buf, F_OK)) {
-          snprintf(jrelib_p, buflen-len, "");
+          snprintf(jrelib_p, buflen-len, "%s", "");
         }
 
         // If the path exists within JAVA_HOME, add the JVM library name
@@ -2565,6 +2607,10 @@ char* os::pd_attempt_reserve_memory_at(size_t bytes, char* requested_addr) {
 
 size_t os::read(int fd, void *buf, unsigned int nBytes) {
   RESTARTABLE_RETURN_INT(::read(fd, buf, nBytes));
+}
+
+size_t os::read_at(int fd, void *buf, unsigned int nBytes, jlong offset) {
+  RESTARTABLE_RETURN_INT(::pread(fd, buf, nBytes, offset));
 }
 
 // TODO-FIXME: reconcile Solaris' os::sleep with the bsd variation.
@@ -3616,7 +3662,7 @@ void os::init(void) {
 
   Bsd::initialize_system_info();
 
-  // main_thread points to the aboriginal thread
+  // _main_thread points to the thread that created/loaded the JVM.
   Bsd::_main_thread = pthread_self();
 
   Bsd::clock_init();
@@ -3770,6 +3816,16 @@ void os::make_polling_page_readable(void) {
 };
 
 int os::active_processor_count() {
+  // User has overridden the number of active processors
+  if (ActiveProcessorCount > 0) {
+    if (PrintActiveCpus) {
+      tty->print_cr("active_processor_count: "
+                    "active processor count set by user : %d",
+                     ActiveProcessorCount);
+    }
+    return ActiveProcessorCount;
+  }
+
   return _processor_count;
 }
 
@@ -3952,8 +4008,7 @@ bool os::dir_is_empty(const char* path) {
 
   /* Scan the directory */
   bool result = true;
-  char buf[sizeof(struct dirent) + MAX_PATH];
-  while (result && (ptr = ::readdir(dir)) != NULL) {
+  while (result && (ptr = readdir(dir)) != NULL) {
     if (strcmp(ptr->d_name, ".") != 0 && strcmp(ptr->d_name, "..") != 0) {
       result = false;
     }
@@ -4711,7 +4766,7 @@ extern char** environ;
 // or -1 on failure (e.g. can't fork a new process).
 // Unlike system(), this function can be called from signal handler. It
 // doesn't block SIGINT et al.
-int os::fork_and_exec(char* cmd) {
+int os::fork_and_exec(char* cmd, bool use_vfork_if_available) {
   const char * argv[4] = {"sh", "-c", cmd, NULL};
 
   // fork() in BsdThreads/NPTL is not async-safe. It needs to run

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -727,7 +727,7 @@ JvmtiEnv::GetAllThreads(jint* threads_count_ptr, jthread** threads_ptr) {
   thread_objs = NEW_RESOURCE_ARRAY(Handle, nthreads);
   NULL_CHECK(thread_objs, JVMTI_ERROR_OUT_OF_MEMORY);
 
-  for (int i=0; i < nthreads; i++) {
+  for (int i = 0; i < nthreads; i++) {
     thread_objs[i] = Handle(tle.get_threadObj(i));
   }
 
@@ -946,26 +946,24 @@ JvmtiEnv::GetThreadInfo(jthread thread, jvmtiThreadInfo* info_ptr) {
     return JVMTI_ERROR_INVALID_THREAD;
 
   Handle thread_obj(current_thread, thread_oop);
-  typeArrayHandle    name;
+  Handle name;
   ThreadPriority priority;
   Handle     thread_group;
   Handle context_class_loader;
   bool          is_daemon;
 
-  { MutexLocker mu(Threads_lock);
+  name = Handle(current_thread, java_lang_Thread::name(thread_obj()));
+  priority = java_lang_Thread::priority(thread_obj());
+  thread_group = Handle(current_thread, java_lang_Thread::threadGroup(thread_obj()));
+  is_daemon = java_lang_Thread::is_daemon(thread_obj());
 
-    name = typeArrayHandle(current_thread, java_lang_Thread::name(thread_obj()));
-    priority = java_lang_Thread::priority(thread_obj());
-    thread_group = Handle(current_thread, java_lang_Thread::threadGroup(thread_obj()));
-    is_daemon = java_lang_Thread::is_daemon(thread_obj());
+  oop loader = java_lang_Thread::context_class_loader(thread_obj());
+  context_class_loader = Handle(current_thread, loader);
 
-    oop loader = java_lang_Thread::context_class_loader(thread_obj());
-    context_class_loader = Handle(current_thread, loader);
-  }
   { const char *n;
 
     if (name() != NULL) {
-      n = UNICODE::as_utf8((jchar*) name->base(T_CHAR), name->length());
+      n = java_lang_String::as_utf8_string(name());
     } else {
       n = UNICODE::as_utf8(NULL, 0);
     }
@@ -1000,8 +998,9 @@ JvmtiEnv::GetOwnedMonitorInfo(JavaThread* java_thread, jint* owned_monitor_count
   GrowableArray<jvmtiMonitorStackDepthInfo*> *owned_monitors_list =
       new (ResourceObj::C_HEAP, mtInternal) GrowableArray<jvmtiMonitorStackDepthInfo*>(1, true);
 
-  uint32_t debug_bits = 0;
-  if (is_thread_fully_suspended(java_thread, true, &debug_bits)) {
+  // It is only safe to perform the direct operation on the current
+  // thread. All other usage needs to use a vm-safepoint-op for safety.
+  if (java_thread == calling_thread) {
     err = get_owned_monitors(calling_thread, java_thread, owned_monitors_list);
   } else {
     // JVMTI get monitors info at safepoint. Do not require target thread to
@@ -1045,8 +1044,9 @@ JvmtiEnv::GetOwnedMonitorStackDepthInfo(JavaThread* java_thread, jint* monitor_i
   GrowableArray<jvmtiMonitorStackDepthInfo*> *owned_monitors_list =
          new (ResourceObj::C_HEAP, mtInternal) GrowableArray<jvmtiMonitorStackDepthInfo*>(1, true);
 
-  uint32_t debug_bits = 0;
-  if (is_thread_fully_suspended(java_thread, true, &debug_bits)) {
+  // It is only safe to perform the direct operation on the current
+  // thread. All other usage needs to use a vm-safepoint-op for safety.
+  if (java_thread == calling_thread) {
     err = get_owned_monitors(calling_thread, java_thread, owned_monitors_list);
   } else {
     // JVMTI get owned monitors info at safepoint. Do not require target thread to
@@ -1087,9 +1087,11 @@ JvmtiEnv::GetOwnedMonitorStackDepthInfo(JavaThread* java_thread, jint* monitor_i
 jvmtiError
 JvmtiEnv::GetCurrentContendedMonitor(JavaThread* java_thread, jobject* monitor_ptr) {
   jvmtiError err = JVMTI_ERROR_NONE;
-  uint32_t debug_bits = 0;
   JavaThread* calling_thread  = JavaThread::current();
-  if (is_thread_fully_suspended(java_thread, true, &debug_bits)) {
+
+  // It is only safe to perform the direct operation on the current
+  // thread. All other usage needs to use a vm-safepoint-op for safety.
+  if (java_thread == calling_thread) {
     err = get_current_contended_monitor(calling_thread, java_thread, monitor_ptr);
   } else {
     // get contended monitor information at safepoint.
@@ -1189,14 +1191,11 @@ JvmtiEnv::GetThreadGroupInfo(jthreadGroup group, jvmtiThreadGroupInfo* info_ptr)
   bool is_daemon;
   ThreadPriority max_priority;
 
-  { MutexLocker mu(Threads_lock);
-
-    name         = typeArrayHandle(current_thread,
-                                   java_lang_ThreadGroup::name(group_obj()));
-    parent_group = Handle(current_thread, java_lang_ThreadGroup::parent(group_obj()));
-    is_daemon    = java_lang_ThreadGroup::is_daemon(group_obj());
-    max_priority = java_lang_ThreadGroup::maxPriority(group_obj());
-  }
+  name         = typeArrayHandle(current_thread,
+                                 java_lang_ThreadGroup::name(group_obj()));
+  parent_group = Handle(current_thread, java_lang_ThreadGroup::parent(group_obj()));
+  is_daemon    = java_lang_ThreadGroup::is_daemon(group_obj());
+  max_priority = java_lang_ThreadGroup::maxPriority(group_obj());
 
   info_ptr->is_daemon    = is_daemon;
   info_ptr->max_priority = max_priority;
@@ -1236,8 +1235,8 @@ JvmtiEnv::GetThreadGroupChildren(jthreadGroup group, jint* thread_count_ptr, jth
 
   Handle group_hdl(current_thread, group_obj);
 
-  { MutexLocker mu(Threads_lock);
-
+  {
+    ObjectLocker ol(group_hdl, current_thread);
     nthreads = java_lang_ThreadGroup::nthreads(group_hdl());
     ngroups  = java_lang_ThreadGroup::ngroups(group_hdl());
 
@@ -1245,7 +1244,7 @@ JvmtiEnv::GetThreadGroupChildren(jthreadGroup group, jint* thread_count_ptr, jth
       objArrayOop threads = java_lang_ThreadGroup::threads(group_hdl());
       assert(nthreads <= threads->length(), "too many threads");
       thread_objs = NEW_RESOURCE_ARRAY(Handle,nthreads);
-      for (int i=0, j=0; i<nthreads; i++) {
+      for (int i = 0, j = 0; i < nthreads; i++) {
         oop thread_obj = threads->obj_at(i);
         assert(thread_obj != NULL, "thread_obj is NULL");
         JavaThread *javathread = java_lang_Thread::thread(thread_obj);
@@ -1262,15 +1261,14 @@ JvmtiEnv::GetThreadGroupChildren(jthreadGroup group, jint* thread_count_ptr, jth
       objArrayOop groups = java_lang_ThreadGroup::groups(group_hdl());
       assert(ngroups <= groups->length(), "too many threads");
       group_objs = NEW_RESOURCE_ARRAY(Handle,ngroups);
-      for (int i=0; i<ngroups; i++) {
+      for (int i = 0; i < ngroups; i++) {
         oop group_obj = groups->obj_at(i);
         assert(group_obj != NULL, "group_obj != NULL");
         group_objs[i] = Handle(current_thread, group_obj);
       }
     }
-  }
+  } // ThreadGroup unlocked here
 
-  // have to make global handles outside of Threads_lock
   *group_count_ptr  = ngroups;
   *thread_count_ptr = nthreads;
   *threads_ptr     = new_jthreadArray(nthreads, thread_objs);
@@ -1298,8 +1296,10 @@ JvmtiEnv::GetThreadGroupChildren(jthreadGroup group, jint* thread_count_ptr, jth
 jvmtiError
 JvmtiEnv::GetStackTrace(JavaThread* java_thread, jint start_depth, jint max_frame_count, jvmtiFrameInfo* frame_buffer, jint* count_ptr) {
   jvmtiError err = JVMTI_ERROR_NONE;
-  uint32_t debug_bits = 0;
-  if (is_thread_fully_suspended(java_thread, true, &debug_bits)) {
+
+  // It is only safe to perform the direct operation on the current
+  // thread. All other usage needs to use a vm-safepoint-op for safety.
+  if (java_thread == JavaThread::current()) {
     err = get_stack_trace(java_thread, start_depth, max_frame_count, frame_buffer, count_ptr);
   } else {
     // JVMTI get stack trace at safepoint. Do not require target thread to
@@ -1618,6 +1618,13 @@ JvmtiEnv::FollowReferences(jint heap_filter, jclass klass, jobject initial_objec
     k_oop = java_lang_Class::as_Klass(k_mirror);
     if (k_oop == NULL) {
       return JVMTI_ERROR_INVALID_CLASS;
+    }
+  }
+
+  if (initial_object != NULL) {
+    oop init_obj = JNIHandles::resolve_external_guard(initial_object);
+    if (init_obj == NULL) {
+      return JVMTI_ERROR_INVALID_OBJECT;
     }
   }
 
@@ -2973,7 +2980,7 @@ JvmtiEnv::DestroyRawMonitor(JvmtiRawMonitor * rmonitor) {
       // objects that are locked.
       int r;
       intptr_t recursion = rmonitor->recursions();
-      for (intptr_t i=0; i <= recursion; i++) {
+      for (intptr_t i = 0; i <= recursion; i++) {
         r = rmonitor->raw_exit(thread);
         assert(r == ObjectMonitor::OM_OK, "raw_exit should have worked");
         if (r != ObjectMonitor::OM_OK) {  // robustness
@@ -3010,7 +3017,7 @@ JvmtiEnv::RawMonitorEnter(JvmtiRawMonitor * rmonitor) {
     // in thread.cpp.
     JvmtiPendingMonitors::enter(rmonitor);
   } else {
-    int r;
+    int r = 0;
     Thread* thread = Thread::current();
 
     if (thread->is_Java_thread()) {
@@ -3073,7 +3080,7 @@ JvmtiEnv::RawMonitorExit(JvmtiRawMonitor * rmonitor) {
       err = JVMTI_ERROR_NOT_MONITOR_OWNER;
     }
   } else {
-    int r;
+    int r = 0;
     Thread* thread = Thread::current();
 
     if (thread->is_Java_thread()) {
@@ -3107,7 +3114,7 @@ JvmtiEnv::RawMonitorExit(JvmtiRawMonitor * rmonitor) {
 // rmonitor - pre-checked for validity
 jvmtiError
 JvmtiEnv::RawMonitorWait(JvmtiRawMonitor * rmonitor, jlong millis) {
-  int r;
+  int r = 0;
   Thread* thread = Thread::current();
 
   if (thread->is_Java_thread()) {
@@ -3166,7 +3173,7 @@ JvmtiEnv::RawMonitorWait(JvmtiRawMonitor * rmonitor, jlong millis) {
 // rmonitor - pre-checked for validity
 jvmtiError
 JvmtiEnv::RawMonitorNotify(JvmtiRawMonitor * rmonitor) {
-  int r;
+  int r = 0;
   Thread* thread = Thread::current();
 
   if (thread->is_Java_thread()) {
@@ -3197,7 +3204,7 @@ JvmtiEnv::RawMonitorNotify(JvmtiRawMonitor * rmonitor) {
 // rmonitor - pre-checked for validity
 jvmtiError
 JvmtiEnv::RawMonitorNotifyAll(JvmtiRawMonitor * rmonitor) {
-  int r;
+  int r = 0;
   Thread* thread = Thread::current();
 
   if (thread->is_Java_thread()) {
@@ -3389,7 +3396,7 @@ JvmtiEnv::GetSystemProperties(jint* count_ptr, char*** property_ptr) {
       strcpy(*tmp_value, key);
     } else {
       // clean up previously allocated memory.
-      for (int j=0; j<i; j++) {
+      for (int j = 0; j < i; j++) {
         Deallocate((unsigned char*)*property_ptr+j);
       }
       Deallocate((unsigned char*)property_ptr);

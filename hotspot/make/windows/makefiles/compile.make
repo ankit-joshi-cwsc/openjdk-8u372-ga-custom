@@ -77,7 +77,8 @@ LP64=1
 !if "$(BUILDARCH)" == "i486"
 MACHINE=I386
 DEFAULT_COMPILER_NAME=VS2003
-CXX_FLAGS=$(CXX_FLAGS) /D "IA32"
+# VS2013 generates bad l2f without /arch:IA32
+CXX_FLAGS=$(CXX_FLAGS) /D "IA32" /arch:IA32
 !endif
 
 # Sanity check, this is the default if not amd64, ia64, or i486
@@ -146,6 +147,30 @@ COMPILER_NAME=VS2010
 !endif
 !if "$(MSC_VER)" == "1700"
 COMPILER_NAME=VS2012
+!endif
+!if "$(MSC_VER)" == "1800"
+COMPILER_NAME=VS2013
+!endif
+!if "$(MSC_VER)" == "1900"
+COMPILER_NAME=VS2015
+!endif
+!if "$(MSC_VER)" == "1912"
+COMPILER_NAME=VS2017
+!endif
+!if "$(MSC_VER)" == "1913"
+COMPILER_NAME=VS2017
+!endif
+!if "$(MSC_VER)" == "1914"
+COMPILER_NAME=VS2017
+!endif
+!if "$(MSC_VER)" == "1915"
+COMPILER_NAME=VS2017
+!endif
+!if "$(MSC_VER)" == "1916"
+COMPILER_NAME=VS2017
+!endif
+!if "$(MSC_VER)" >= "1920" && "$(MSC_VER)" <= "1929"
+COMPILER_NAME=VS2019
 !endif
 !endif
 
@@ -250,11 +275,79 @@ MT=mt.exe
 SAFESEH_FLAG = /SAFESEH
 !endif
 
+!if "$(COMPILER_NAME)" == "VS2013"
+PRODUCT_OPT_OPTION   = /O2 /Oy-
+FASTDEBUG_OPT_OPTION = /O2 /Oy-
+DEBUG_OPT_OPTION     = /Od
+GX_OPTION = /EHsc
+LD_FLAGS = /manifest $(LD_FLAGS)
+MP_FLAG = /MP
+# Manifest Tool - used in VS2005 and later to adjust manifests stored
+# as resources inside build artifacts.
+!if "x$(MT)" == "x"
+MT=mt.exe
+!endif
+SAFESEH_FLAG = /SAFESEH
+!endif
+
+
+!if "$(COMPILER_NAME)" == "VS2015"
+PRODUCT_OPT_OPTION   = /O2 /Oy-
+FASTDEBUG_OPT_OPTION = /O2 /Oy-
+DEBUG_OPT_OPTION     = /Od
+GX_OPTION = /EHsc
+LD_FLAGS = /manifest $(LD_FLAGS)
+MP_FLAG = /MP
+# Manifest Tool - used in VS2005 and later to adjust manifests stored
+# as resources inside build artifacts.
+!if "x$(MT)" == "x"
+MT=mt.exe
+!endif
+SAFESEH_FLAG = /SAFESEH
+!endif
+
+!if "$(COMPILER_NAME)" == "VS2017"
+PRODUCT_OPT_OPTION   = /O2 /Oy-
+FASTDEBUG_OPT_OPTION = /O2 /Oy-
+DEBUG_OPT_OPTION     = /Od
+GX_OPTION = /EHsc
+LD_FLAGS = /manifest $(LD_FLAGS)
+MP_FLAG = /MP
+# Manifest Tool - used in VS2005 and later to adjust manifests stored
+# as resources inside build artifacts.
+!if "x$(MT)" == "x"
+MT=mt.exe
+!endif
+SAFESEH_FLAG = /SAFESEH
+!endif
+
+!if "$(COMPILER_NAME)" == "VS2019"
+PRODUCT_OPT_OPTION   = /O2 /Oy-
+FASTDEBUG_OPT_OPTION = /O2 /Oy-
+DEBUG_OPT_OPTION     = /Od
+GX_OPTION = /EHsc
+LD_FLAGS = /manifest $(LD_FLAGS)
+MP_FLAG = /MP
+# Manifest Tool - used in VS2005 and later to adjust manifests stored
+# as resources inside build artifacts.
+!if "x$(MT)" == "x"
+MT=mt.exe
+!endif
+SAFESEH_FLAG = /SAFESEH
+!endif
+
 !if "$(BUILDARCH)" == "i486"
 LD_FLAGS = $(SAFESEH_FLAG) $(LD_FLAGS)
 !endif
 
 CXX_FLAGS = $(CXX_FLAGS) $(MP_FLAG)
+
+!if "$(ENABLE_JFR)" == "true"
+INCLUDE_JFR=1
+!else
+INCLUDE_JFR=0
+!endif
+CXX_FLAGS=$(CXX_FLAGS) /D INCLUDE_JFR=$(INCLUDE_JFR)
 
 # If NO_OPTIMIZATIONS is defined in the environment, turn everything off
 !ifdef NO_OPTIMIZATIONS
@@ -288,7 +381,7 @@ RC_FLAGS=/D "HS_VER=$(HS_VER)" \
 	 /D "HS_BUILD_ID=$(HS_BUILD_ID)" \
 	 /D "JDK_VER=$(JDK_VER)" \
 	 /D "JDK_DOTVER=$(JDK_DOTVER)" \
-	 /D "HS_COMPANY=$(HS_COMPANY)" \
+	 /D "HS_COMPANY=$(COMPANY_NAME)" \
 	 /D "HS_FILEDESC=$(HS_FILEDESC)" \
 	 /D "HS_COPYRIGHT=$(HS_COPYRIGHT)" \
 	 /D "HS_FNAME=$(HS_FNAME)" \
@@ -299,4 +392,3 @@ RC_FLAGS=/D "HS_VER=$(HS_VER)" \
 !if "$(MFC_DEBUG)" == "true"
 RC_FLAGS = $(RC_FLAGS) /D "_DEBUG"
 !endif
-

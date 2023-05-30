@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2001, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -532,9 +532,10 @@ abstract public class TestScaffold extends TargetAdapter {
                         Location loc = ((Locatable)event).location();
                         ReferenceType rt = loc.declaringType();
                         String name = rt.name();
-                        if (name.startsWith("java.") &&
-                                       !name.startsWith("sun.") &&
-                                       !name.startsWith("com.")) {
+                        if (name.startsWith("java.")
+                            || name.startsWith("sun.")
+                            || name.startsWith("com.")
+                            || name.startsWith("jdk.")) {
                             if (mainStartClass != null) {
                                 redefine(mainStartClass);
                             }
@@ -780,9 +781,16 @@ abstract public class TestScaffold extends TargetAdapter {
     }
 
     public BreakpointEvent resumeTo(Location loc) {
+        return resumeTo(loc, false);
+    }
+
+    public BreakpointEvent resumeTo(Location loc, boolean suspendThread) {
         final BreakpointRequest request =
             requestManager.createBreakpointRequest(loc);
         request.addCountFilter(1);
+        if (suspendThread) {
+            request.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD);
+        }
         request.enable();
         return (BreakpointEvent)waitForRequestedEvent(request);
     }
@@ -841,12 +849,16 @@ abstract public class TestScaffold extends TargetAdapter {
     }
 
     public BreakpointEvent resumeTo(String clsName, int lineNumber) throws AbsentInformationException {
+        return resumeTo(clsName, lineNumber, false);
+    }
+
+    public BreakpointEvent resumeTo(String clsName, int lineNumber, boolean suspendThread) throws AbsentInformationException {
         ReferenceType rt = findReferenceType(clsName);
         if (rt == null) {
             rt = resumeToPrepareOf(clsName).referenceType();
         }
 
-        return resumeTo(findLocation(rt, lineNumber));
+        return resumeTo(findLocation(rt, lineNumber), suspendThread);
     }
 
     public ClassPrepareEvent resumeToPrepareOf(String className) {

@@ -174,6 +174,7 @@ void InterpreterMacroAssembler::load_earlyret_value(TosState state, Register Rsc
     case ltos: ld(R17_tos, in_bytes(JvmtiThreadState::earlyret_value_offset()), RjvmtiState);
                break;
     case btos: // fall through
+    case ztos: // fall through
     case ctos: // fall through
     case stos: // fall through
     case itos: lwz(R17_tos, in_bytes(JvmtiThreadState::earlyret_value_offset()), RjvmtiState);
@@ -302,6 +303,7 @@ void InterpreterMacroAssembler::push(TosState state) {
   switch (state) {
     case atos: push_ptr();                break;
     case btos:
+    case ztos:
     case ctos:
     case stos:
     case itos: push_i();                  break;
@@ -317,6 +319,7 @@ void InterpreterMacroAssembler::pop(TosState state) {
   switch (state) {
     case atos: pop_ptr();            break;
     case btos:
+    case ztos:
     case ctos:
     case stos:
     case itos: pop_i();              break;
@@ -751,6 +754,43 @@ void InterpreterMacroAssembler::merge_frames(Register Rsender_sp, Register retur
   stdux(Rscratch2, R1_SP, Rscratch1); // atomically set *(SP = top_frame_sp) = **SP
 }
 
+void InterpreterMacroAssembler::narrow(Register result) {
+  Register ret_type = R11_scratch1;
+  ld(R11_scratch1, in_bytes(Method::const_offset()), R19_method);
+  lbz(ret_type, in_bytes(ConstMethod::result_type_offset()), R11_scratch1);
+
+  Label notBool, notByte, notChar, done;
+
+  // common case first
+  cmpwi(CCR0, ret_type, T_INT);
+  beq(CCR0, done);
+
+  cmpwi(CCR0, ret_type, T_BOOLEAN);
+  bne(CCR0, notBool);
+  andi(result, result, 0x1);
+  b(done);
+
+  bind(notBool);
+  cmpwi(CCR0, ret_type, T_BYTE);
+  bne(CCR0, notByte);
+  extsb(result, result);
+  b(done);
+
+  bind(notByte);
+  cmpwi(CCR0, ret_type, T_CHAR);
+  bne(CCR0, notChar);
+  andi(result, result, 0xffff);
+  b(done);
+
+  bind(notChar);
+  // cmpwi(CCR0, ret_type, T_SHORT);  // all that's left
+  // bne(CCR0, done);
+  extsh(result, result);
+
+  // Nothing to do for T_INT
+  bind(done);
+}
+
 // Remove activation.
 //
 // Unlock the receiver if this is a synchronized method.
@@ -868,9 +908,7 @@ void InterpreterMacroAssembler::lock_object(Register monitor, Register object) {
     sub(current_header, current_header, R1_SP);
 
     assert(os::vm_page_size() > 0xfff, "page size too small - change the constant");
-    load_const_optimized(tmp,
-                         (address) (~(os::vm_page_size()-1) |
-                                    markOopDesc::lock_mask_in_place));
+    load_const_optimized(tmp, ~(os::vm_page_size()-1) | markOopDesc::lock_mask_in_place);
 
     and_(R0/*==0?*/, current_header, tmp);
     // If condition is true we are done and hence we can store 0 in the displaced

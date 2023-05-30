@@ -46,8 +46,10 @@ U_NAMESPACE_BEGIN
 
 void MorphTableHeader::process(const LETableReference &base, LEGlyphStorage &glyphStorage, LEErrorCode &success) const
 {
-  le_uint32 chainCount = SWAPL(this->nChains);
-  LEReferenceTo<ChainHeader> chainHeader(base, success, chains); // moving header
+    if (LE_FAILURE(success)) return;
+
+    le_uint32 chainCount = SWAPL(this->nChains);
+    LEReferenceTo<ChainHeader> chainHeader(base, success, chains); // moving header
     LEReferenceToArrayOf<ChainHeader> chainHeaderArray(base, success, chains, chainCount);
     le_uint32 chain;
 
@@ -75,6 +77,7 @@ void MorphTableHeader::process(const LETableReference &base, LEGlyphStorage &gly
                     return;
                 }
                 subtableHeader.addOffset(length, success);
+                if (LE_FAILURE(success)) break;
             }
             SubtableCoverage coverage = SWAPW(subtableHeader->coverage);
             FeatureFlags subtableFeatures = SWAPL(subtableHeader->subtableFeatures);
@@ -90,6 +93,8 @@ void MorphTableHeader::process(const LETableReference &base, LEGlyphStorage &gly
 void MorphSubtableHeader::process(const LEReferenceTo<MorphSubtableHeader> &base, LEGlyphStorage &glyphStorage, LEErrorCode &success) const
 {
     SubtableProcessor *processor = NULL;
+
+    if (LE_FAILURE(success)) return;
 
     switch (SWAPW(coverage) & scfTypeMask)
     {

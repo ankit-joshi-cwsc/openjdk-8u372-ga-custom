@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2011, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -28,11 +28,15 @@
  * @author Andreas Sterbenz
  * @library ..
  * @run main/othervm Crypto
+ * @run main/othervm Crypto sm policy
+ * @key randomness
  */
 
-import java.util.*;
-
-import java.security.*;
+import java.io.File;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.Provider;
+import java.security.Signature;
 
 public class Crypto extends SecmodTest {
 
@@ -44,15 +48,19 @@ public class Crypto extends SecmodTest {
         String configName = BASE + SEP + "nsscrypto.cfg";
         Provider p = getSunPKCS11(configName);
 
+        if (args.length > 1 && "sm".equals(args[0])) {
+            System.setProperty("java.security.policy",
+                    BASE + File.separator + args[1]);
+            System.setSecurityManager(new SecurityManager());
+        }
+
         KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA", p);
         KeyPair kp = kpg.generateKeyPair();
 
         System.out.println(kp.getPublic());
         System.out.println(kp.getPrivate());
 
-        SecureRandom random = new SecureRandom();
-        byte[] data = new byte[2048];
-        random.nextBytes(data);
+        byte[] data = generateData(2048);
 
         Signature sig = Signature.getInstance("SHA1withRSA", p);
         sig.initSign(kp.getPrivate());

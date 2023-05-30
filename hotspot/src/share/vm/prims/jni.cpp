@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2012 Red Hat, Inc.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -32,7 +32,10 @@
 #include "classfile/systemDictionary.hpp"
 #include "classfile/vmSymbols.hpp"
 #include "interpreter/linkResolver.hpp"
+#include "jfr/jfrEvents.hpp"
+#include "jfr/support/jfrThreadId.hpp"
 #include "utilities/macros.hpp"
+#include "utilities/ostream.hpp"
 #if INCLUDE_ALL_GCS
 #include "gc_implementation/g1/g1SATBCardTableModRefBS.hpp"
 #endif // INCLUDE_ALL_GCS
@@ -75,7 +78,6 @@
 #include "runtime/vm_operations.hpp"
 #include "services/memTracker.hpp"
 #include "services/runtimeService.hpp"
-#include "trace/tracing.hpp"
 #include "utilities/defaultStream.hpp"
 #include "utilities/dtrace.hpp"
 #include "utilities/events.hpp"
@@ -188,8 +190,6 @@ static jint CurrentVersion = JNI_VERSION_1_8;
 #define FP_SELECT_Double(intcode, fpcode)  fpcode
 #define FP_SELECT(TypeName, intcode, fpcode) \
   FP_SELECT_##TypeName(intcode, fpcode)
-
-#define COMMA ,
 
 // Choose DT_RETURN_MARK macros  based on the type: float/double -> void
 // (dtrace doesn't do FP yet)
@@ -708,6 +708,7 @@ JNI_ENTRY(jint, jni_Throw(JNIEnv *env, jthrowable obj))
 
   THROW_OOP_(JNIHandles::resolve(obj), JNI_OK);
   ShouldNotReachHere();
+  return 0; // Mute compiler.
 JNI_END
 
 #ifndef USDT2
@@ -734,6 +735,7 @@ JNI_ENTRY(jint, jni_ThrowNew(JNIEnv *env, jclass clazz, const char *message))
   Handle protection_domain (THREAD, k->protection_domain());
   THROW_MSG_LOADER_(name, (char *)message, class_loader, protection_domain, JNI_OK);
   ShouldNotReachHere();
+  return 0; // Mute compiler.
 JNI_END
 
 
@@ -1121,7 +1123,14 @@ class JNI_ArgumentPusherVaArg : public JNI_ArgumentPusher {
  protected:
   va_list _ap;
 
-  inline void get_bool()   { _arguments->push_int(va_arg(_ap, jint)); } // bool is coerced to int when using va_arg
+  inline void get_bool()   {
+    // Normalize boolean arguments from native code by converting 1-255 to JNI_TRUE and
+    // 0 to JNI_FALSE.  Boolean return values from native are normalized the same in
+    // TemplateInterpreterGenerator::generate_result_handler_for and
+    // SharedRuntime::generate_native_wrapper.
+    jboolean b = va_arg(_ap, jint);
+    _arguments->push_int((jint)(b == 0 ? JNI_FALSE : JNI_TRUE));
+  }
   inline void get_char()   { _arguments->push_int(va_arg(_ap, jint)); } // char is coerced to int when using va_arg
   inline void get_short()  { _arguments->push_int(va_arg(_ap, jint)); } // short is coerced to int when using va_arg
   inline void get_byte()   { _arguments->push_int(va_arg(_ap, jint)); } // byte is coerced to int when using va_arg
@@ -1132,8 +1141,7 @@ class JNI_ArgumentPusherVaArg : public JNI_ArgumentPusher {
   inline void get_long()   { _arguments->push_long(va_arg(_ap, jlong)); }
   inline void get_float()  { _arguments->push_float((jfloat)va_arg(_ap, jdouble)); } // float is coerced to double w/ va_arg
   inline void get_double() { _arguments->push_double(va_arg(_ap, jdouble)); }
-  inline void get_object() { jobject l = va_arg(_ap, jobject);
-                             _arguments->push_oop(Handle((oop *)l, false)); }
+  inline void get_object() { _arguments->push_jobject(va_arg(_ap, jobject)); }
 
   inline void set_ap(va_list rap) {
 #ifdef va_copy
@@ -1167,9 +1175,17 @@ class JNI_ArgumentPusherVaArg : public JNI_ArgumentPusher {
       while ( 1 ) {
         switch ( fingerprint & parameter_feature_mask ) {
           case bool_parm:
+            get_bool();
+            break;
           case char_parm:
+            get_char();
+            break;
           case short_parm:
+            get_short();
+            break;
           case byte_parm:
+            get_byte();
+            break;
           case int_parm:
             get_int();
             break;
@@ -1203,7 +1219,14 @@ class JNI_ArgumentPusherArray : public JNI_ArgumentPusher {
  protected:
   const jvalue *_ap;
 
-  inline void get_bool()   { _arguments->push_int((jint)(_ap++)->z); }
+  inline void get_bool()   {
+    // Normalize boolean arguments from native code by converting 1-255 to JNI_TRUE and
+    // 0 to JNI_FALSE.  Boolean return values from native are normalized the same in
+    // TemplateInterpreterGenerator::generate_result_handler_for and
+    // SharedRuntime::generate_native_wrapper.
+    jboolean b = (_ap++)->z;
+    _arguments->push_int((jint)(b == 0 ? JNI_FALSE : JNI_TRUE));
+  }
   inline void get_char()   { _arguments->push_int((jint)(_ap++)->c); }
   inline void get_short()  { _arguments->push_int((jint)(_ap++)->s); }
   inline void get_byte()   { _arguments->push_int((jint)(_ap++)->b); }
@@ -1212,7 +1235,7 @@ class JNI_ArgumentPusherArray : public JNI_ArgumentPusher {
   inline void get_long()   { _arguments->push_long((_ap++)->j);  }
   inline void get_float()  { _arguments->push_float((_ap++)->f); }
   inline void get_double() { _arguments->push_double((_ap++)->d);}
-  inline void get_object() { _arguments->push_oop(Handle((oop *)(_ap++)->l, false)); }
+  inline void get_object() { _arguments->push_jobject((_ap++)->l); }
 
   inline void set_ap(const jvalue *rap) { _ap = rap; }
 
@@ -1429,7 +1452,7 @@ JNI_ENTRY(jobject, jni_NewObjectA(JNIEnv *env, jclass clazz, jmethodID methodID,
                                env, clazz, (uintptr_t) methodID);
 #endif /* USDT2 */
   jobject obj = NULL;
-  DT_RETURN_MARK(NewObjectA, jobject, (const jobject)obj);
+  DT_RETURN_MARK(NewObjectA, jobject, (const jobject&)obj);
 
   instanceOop i = alloc_object(clazz, CHECK_NULL);
   obj = JNIHandles::make_local(env, i);
@@ -1796,34 +1819,34 @@ JNI_END
 
 // the runtime type of subword integral basic types is integer
 DEFINE_CALLMETHODV(jboolean, Boolean, T_BOOLEAN
-                  , HOTSPOT_JNI_CALLBOOLEANMETHOD_ENTRY(env, obj, (uintptr_t)methodID),
-                  HOTSPOT_JNI_CALLBOOLEANMETHOD_RETURN(_ret_ref))
+                  , HOTSPOT_JNI_CALLBOOLEANMETHODV_ENTRY(env, obj, (uintptr_t)methodID),
+                  HOTSPOT_JNI_CALLBOOLEANMETHODV_RETURN(_ret_ref))
 DEFINE_CALLMETHODV(jbyte,    Byte,    T_BYTE
-                  , HOTSPOT_JNI_CALLBYTEMETHOD_ENTRY(env, obj, (uintptr_t)methodID),
-                  HOTSPOT_JNI_CALLBYTEMETHOD_RETURN(_ret_ref))
+                  , HOTSPOT_JNI_CALLBYTEMETHODV_ENTRY(env, obj, (uintptr_t)methodID),
+                  HOTSPOT_JNI_CALLBYTEMETHODV_RETURN(_ret_ref))
 DEFINE_CALLMETHODV(jchar,    Char,    T_CHAR
-                  , HOTSPOT_JNI_CALLCHARMETHOD_ENTRY(env, obj, (uintptr_t)methodID),
-                  HOTSPOT_JNI_CALLCHARMETHOD_RETURN(_ret_ref))
+                  , HOTSPOT_JNI_CALLCHARMETHODV_ENTRY(env, obj, (uintptr_t)methodID),
+                  HOTSPOT_JNI_CALLCHARMETHODV_RETURN(_ret_ref))
 DEFINE_CALLMETHODV(jshort,   Short,   T_SHORT
-                  , HOTSPOT_JNI_CALLSHORTMETHOD_ENTRY(env, obj, (uintptr_t)methodID),
-                  HOTSPOT_JNI_CALLSHORTMETHOD_RETURN(_ret_ref))
+                  , HOTSPOT_JNI_CALLSHORTMETHODV_ENTRY(env, obj, (uintptr_t)methodID),
+                  HOTSPOT_JNI_CALLSHORTMETHODV_RETURN(_ret_ref))
 
 DEFINE_CALLMETHODV(jobject,  Object,  T_OBJECT
-                  , HOTSPOT_JNI_CALLOBJECTMETHOD_ENTRY(env, obj, (uintptr_t)methodID),
-                  HOTSPOT_JNI_CALLOBJECTMETHOD_RETURN(_ret_ref))
+                  , HOTSPOT_JNI_CALLOBJECTMETHODV_ENTRY(env, obj, (uintptr_t)methodID),
+                  HOTSPOT_JNI_CALLOBJECTMETHODV_RETURN(_ret_ref))
 DEFINE_CALLMETHODV(jint,     Int,     T_INT,
-                  HOTSPOT_JNI_CALLINTMETHOD_ENTRY(env, obj, (uintptr_t)methodID),
-                  HOTSPOT_JNI_CALLINTMETHOD_RETURN(_ret_ref))
+                  HOTSPOT_JNI_CALLINTMETHODV_ENTRY(env, obj, (uintptr_t)methodID),
+                  HOTSPOT_JNI_CALLINTMETHODV_RETURN(_ret_ref))
 DEFINE_CALLMETHODV(jlong,    Long,    T_LONG
-                  , HOTSPOT_JNI_CALLLONGMETHOD_ENTRY(env, obj, (uintptr_t)methodID),
-                  HOTSPOT_JNI_CALLLONGMETHOD_RETURN(_ret_ref))
+                  , HOTSPOT_JNI_CALLLONGMETHODV_ENTRY(env, obj, (uintptr_t)methodID),
+                  HOTSPOT_JNI_CALLLONGMETHODV_RETURN(_ret_ref))
 // Float and double probes don't return value because dtrace doesn't currently support it
 DEFINE_CALLMETHODV(jfloat,   Float,   T_FLOAT
-                  , HOTSPOT_JNI_CALLFLOATMETHOD_ENTRY(env, obj, (uintptr_t)methodID),
-                  HOTSPOT_JNI_CALLFLOATMETHOD_RETURN())
+                  , HOTSPOT_JNI_CALLFLOATMETHODV_ENTRY(env, obj, (uintptr_t)methodID),
+                  HOTSPOT_JNI_CALLFLOATMETHODV_RETURN())
 DEFINE_CALLMETHODV(jdouble,  Double,  T_DOUBLE
-                  , HOTSPOT_JNI_CALLDOUBLEMETHOD_ENTRY(env, obj, (uintptr_t)methodID),
-                  HOTSPOT_JNI_CALLDOUBLEMETHOD_RETURN())
+                  , HOTSPOT_JNI_CALLDOUBLEMETHODV_ENTRY(env, obj, (uintptr_t)methodID),
+                  HOTSPOT_JNI_CALLDOUBLEMETHODV_RETURN())
 
 #define DEFINE_CALLMETHODA(ResultType, Result, Tag \
                           , EntryProbe, ReturnProbe)    \
@@ -1848,34 +1871,34 @@ JNI_END
 
 // the runtime type of subword integral basic types is integer
 DEFINE_CALLMETHODA(jboolean, Boolean, T_BOOLEAN
-                  , HOTSPOT_JNI_CALLBOOLEANMETHOD_ENTRY(env, obj, (uintptr_t)methodID),
-                  HOTSPOT_JNI_CALLBOOLEANMETHOD_RETURN(_ret_ref))
+                  , HOTSPOT_JNI_CALLBOOLEANMETHODA_ENTRY(env, obj, (uintptr_t)methodID),
+                  HOTSPOT_JNI_CALLBOOLEANMETHODA_RETURN(_ret_ref))
 DEFINE_CALLMETHODA(jbyte,    Byte,    T_BYTE
-                  , HOTSPOT_JNI_CALLBYTEMETHOD_ENTRY(env, obj, (uintptr_t)methodID),
-                  HOTSPOT_JNI_CALLBYTEMETHOD_RETURN(_ret_ref))
+                  , HOTSPOT_JNI_CALLBYTEMETHODA_ENTRY(env, obj, (uintptr_t)methodID),
+                  HOTSPOT_JNI_CALLBYTEMETHODA_RETURN(_ret_ref))
 DEFINE_CALLMETHODA(jchar,    Char,    T_CHAR
-                  , HOTSPOT_JNI_CALLCHARMETHOD_ENTRY(env, obj, (uintptr_t)methodID),
-                  HOTSPOT_JNI_CALLCHARMETHOD_RETURN(_ret_ref))
+                  , HOTSPOT_JNI_CALLCHARMETHODA_ENTRY(env, obj, (uintptr_t)methodID),
+                  HOTSPOT_JNI_CALLCHARMETHODA_RETURN(_ret_ref))
 DEFINE_CALLMETHODA(jshort,   Short,   T_SHORT
-                  , HOTSPOT_JNI_CALLSHORTMETHOD_ENTRY(env, obj, (uintptr_t)methodID),
-                  HOTSPOT_JNI_CALLSHORTMETHOD_RETURN(_ret_ref))
+                  , HOTSPOT_JNI_CALLSHORTMETHODA_ENTRY(env, obj, (uintptr_t)methodID),
+                  HOTSPOT_JNI_CALLSHORTMETHODA_RETURN(_ret_ref))
 
 DEFINE_CALLMETHODA(jobject,  Object,  T_OBJECT
-                  , HOTSPOT_JNI_CALLOBJECTMETHOD_ENTRY(env, obj, (uintptr_t)methodID),
-                  HOTSPOT_JNI_CALLOBJECTMETHOD_RETURN(_ret_ref))
+                  , HOTSPOT_JNI_CALLOBJECTMETHODA_ENTRY(env, obj, (uintptr_t)methodID),
+                  HOTSPOT_JNI_CALLOBJECTMETHODA_RETURN(_ret_ref))
 DEFINE_CALLMETHODA(jint,     Int,     T_INT,
-                  HOTSPOT_JNI_CALLINTMETHOD_ENTRY(env, obj, (uintptr_t)methodID),
-                  HOTSPOT_JNI_CALLINTMETHOD_RETURN(_ret_ref))
+                  HOTSPOT_JNI_CALLINTMETHODA_ENTRY(env, obj, (uintptr_t)methodID),
+                  HOTSPOT_JNI_CALLINTMETHODA_RETURN(_ret_ref))
 DEFINE_CALLMETHODA(jlong,    Long,    T_LONG
-                  , HOTSPOT_JNI_CALLLONGMETHOD_ENTRY(env, obj, (uintptr_t)methodID),
-                  HOTSPOT_JNI_CALLLONGMETHOD_RETURN(_ret_ref))
+                  , HOTSPOT_JNI_CALLLONGMETHODA_ENTRY(env, obj, (uintptr_t)methodID),
+                  HOTSPOT_JNI_CALLLONGMETHODA_RETURN(_ret_ref))
 // Float and double probes don't return value because dtrace doesn't currently support it
 DEFINE_CALLMETHODA(jfloat,   Float,   T_FLOAT
-                  , HOTSPOT_JNI_CALLFLOATMETHOD_ENTRY(env, obj, (uintptr_t)methodID),
-                  HOTSPOT_JNI_CALLFLOATMETHOD_RETURN())
+                  , HOTSPOT_JNI_CALLFLOATMETHODA_ENTRY(env, obj, (uintptr_t)methodID),
+                  HOTSPOT_JNI_CALLFLOATMETHODA_RETURN())
 DEFINE_CALLMETHODA(jdouble,  Double,  T_DOUBLE
-                  , HOTSPOT_JNI_CALLDOUBLEMETHOD_ENTRY(env, obj, (uintptr_t)methodID),
-                  HOTSPOT_JNI_CALLDOUBLEMETHOD_RETURN())
+                  , HOTSPOT_JNI_CALLDOUBLEMETHODA_ENTRY(env, obj, (uintptr_t)methodID),
+                  HOTSPOT_JNI_CALLDOUBLEMETHODA_RETURN())
 
 DT_VOID_RETURN_MARK_DECL(CallVoidMethod, HOTSPOT_JNI_CALLVOIDMETHOD_RETURN());
 DT_VOID_RETURN_MARK_DECL(CallVoidMethodV, HOTSPOT_JNI_CALLVOIDMETHODV_RETURN());
@@ -2828,6 +2851,7 @@ JNI_QUICK_ENTRY(void, jni_Set##Result##Field(JNIEnv *env, jobject obj, jfieldID 
     field_value.unionType = value; \
     o = JvmtiExport::jni_SetField_probe_nh(thread, obj, o, k, fieldID, false, SigType, (jvalue *)&field_value); \
   } \
+  if (SigType == 'Z') { value = ((jboolean)value) & 1; } \
   o->Fieldname##_field_put(offset, value); \
   ReturnProbe; \
 JNI_END
@@ -3132,12 +3156,13 @@ JNI_ENTRY(void, jni_SetStatic##Result##Field(JNIEnv *env, jclass clazz, jfieldID
     field_value.unionType = value; \
     JvmtiExport::jni_SetField_probe(thread, NULL, NULL, id->holder(), fieldID, true, SigType, (jvalue *)&field_value); \
   } \
+  if (SigType == 'Z') { value = ((jboolean)value) & 1; } \
   id->holder()->java_mirror()-> Fieldname##_field_put (id->offset(), value); \
   ReturnProbe;\
 JNI_END
 
 DEFINE_SETSTATICFIELD(jboolean, bool,   Boolean, 'Z', z
-                      , HOTSPOT_JNI_SETBOOLEANFIELD_ENTRY(env, clazz, (uintptr_t)fieldID, value),
+                      , HOTSPOT_JNI_SETSTATICBOOLEANFIELD_ENTRY(env, clazz, (uintptr_t)fieldID, value),
                       HOTSPOT_JNI_SETBOOLEANFIELD_RETURN())
 DEFINE_SETSTATICFIELD(jbyte,    byte,   Byte,    'B', b
                       , HOTSPOT_JNI_SETSTATICBYTEFIELD_ENTRY(env, clazz, (uintptr_t) fieldID, value),
@@ -3808,7 +3833,7 @@ jni_Get##Result##ArrayRegion(JNIEnv *env, ElementType##Array array, jsize start,
   EntryProbe; \
   DT_VOID_RETURN_MARK(Get##Result##ArrayRegion); \
   typeArrayOop src = typeArrayOop(JNIHandles::resolve_non_null(array)); \
-  if (start < 0 || len < 0 || ((unsigned int)start + (unsigned int)len > (unsigned int)src->length())) { \
+  if (start < 0 || len < 0 || (start > src->length() - len)) { \
     THROW(vmSymbols::java_lang_ArrayIndexOutOfBoundsException()); \
   } else { \
     if (len > 0) { \
@@ -3892,7 +3917,7 @@ jni_Set##Result##ArrayRegion(JNIEnv *env, ElementType##Array array, jsize start,
   EntryProbe; \
   DT_VOID_RETURN_MARK(Set##Result##ArrayRegion); \
   typeArrayOop dst = typeArrayOop(JNIHandles::resolve_non_null(array)); \
-  if (start < 0 || len < 0 || ((unsigned int)start + (unsigned int)len > (unsigned int)dst->length())) { \
+  if (start < 0 || len < 0 || (start > dst->length() - len)) { \
     THROW(vmSymbols::java_lang_ArrayIndexOutOfBoundsException()); \
   } else { \
     if (len > 0) { \
@@ -4176,7 +4201,7 @@ JNI_ENTRY(void, jni_GetStringRegion(JNIEnv *env, jstring string, jsize start, js
   DT_VOID_RETURN_MARK(GetStringRegion);
   oop s = JNIHandles::resolve_non_null(string);
   int s_len = java_lang_String::length(s);
-  if (start < 0 || len < 0 || start + len > s_len) {
+  if (start < 0 || len < 0 || start > s_len - len) {
     THROW(vmSymbols::java_lang_StringIndexOutOfBoundsException());
   } else {
     if (len > 0) {
@@ -4205,7 +4230,7 @@ JNI_ENTRY(void, jni_GetStringUTFRegion(JNIEnv *env, jstring string, jsize start,
   DT_VOID_RETURN_MARK(GetStringUTFRegion);
   oop s = JNIHandles::resolve_non_null(string);
   int s_len = java_lang_String::length(s);
-  if (start < 0 || len < 0 || start + len > s_len) {
+  if (start < 0 || len < 0 || start > s_len - len) {
     THROW(vmSymbols::java_lang_StringIndexOutOfBoundsException());
   } else {
     //%note jni_7
@@ -4993,6 +5018,24 @@ struct JNINativeInterface_* jni_functions_nocheck() {
   return &jni_NativeInterface;
 }
 
+static void post_thread_start_event(const JavaThread* jt) {
+  assert(jt != NULL, "invariant");
+  EventThreadStart event;
+  if (event.should_commit()) {
+    event.set_thread(JFR_THREAD_ID(jt));
+    event.set_parentThread((traceid)0);
+#if INCLUDE_JFR
+    if (EventThreadStart::is_stacktrace_enabled()) {
+      jt->jfr_thread_local()->set_cached_stack_trace_id((traceid)0);
+      event.commit();
+      jt->jfr_thread_local()->clear_cached_stack_trace();
+    } else
+#endif
+    {
+      event.commit();
+    }
+  }
+}
 
 // Invocation API
 
@@ -5069,11 +5112,13 @@ void TestReservedSpace_test();
 void TestReserveMemorySpecial_test();
 void TestVirtualSpace_test();
 void TestMetaspaceAux_test();
+void SpaceManager_test_adjust_initial_chunk_size();
 void TestMetachunk_test();
 void TestVirtualSpaceNode_test();
 void TestNewSize_test();
 void TestKlass_test();
 void Test_linked_list();
+void TestResourcehash_test();
 void TestChunkedList_test();
 #if INCLUDE_ALL_GCS
 void TestOldFreeSpaceCalculation_test();
@@ -5081,6 +5126,7 @@ void TestG1BiasedArray_test();
 void TestBufferingOopClosure_test();
 void TestCodeCacheRemSet_test();
 void FreeRegionList_test();
+void ChunkManager_test_list_index();
 #endif
 
 void execute_internal_vm_tests() {
@@ -5094,6 +5140,7 @@ void execute_internal_vm_tests() {
     run_unit_test(TestMetachunk_test());
     run_unit_test(TestVirtualSpaceNode_test());
     run_unit_test(GlobalDefinitions::test_globals());
+    run_unit_test(GlobalDefinitions::test_proper_unit());
     run_unit_test(GCTimerAllTest::all());
     run_unit_test(arrayOopDesc::test_max_array_length());
     run_unit_test(CollectedHeap::test_is_in());
@@ -5101,10 +5148,13 @@ void execute_internal_vm_tests() {
     run_unit_test(GuardedMemory::test_guarded_memory());
     run_unit_test(AltHashing::test_alt_hash());
     run_unit_test(test_loggc_filename());
+    run_unit_test(test_snprintf());
     run_unit_test(TestNewSize_test());
     run_unit_test(TestKlass_test());
+    run_unit_test(TestResourcehash_test());
     run_unit_test(Test_linked_list());
     run_unit_test(TestChunkedList_test());
+    run_unit_test(ObjectMonitor::sanity_checks());
 #if INCLUDE_VM_STRUCTS
     run_unit_test(VMStructs::test());
 #endif
@@ -5112,6 +5162,8 @@ void execute_internal_vm_tests() {
     run_unit_test(TestOldFreeSpaceCalculation_test());
     run_unit_test(TestG1BiasedArray_test());
     run_unit_test(HeapRegionRemSet::test_prt());
+    run_unit_test(SpaceManager_test_adjust_initial_chunk_size());
+    run_unit_test(ChunkManager_test_list_index());
     run_unit_test(TestBufferingOopClosure_test());
     run_unit_test(TestCodeCacheRemSet_test());
     if (UseG1GC) {
@@ -5208,11 +5260,7 @@ _JNI_IMPORT_OR_EXPORT_ jint JNICALL JNI_CreateJavaVM(JavaVM **vm, void **penv, v
        JvmtiExport::post_thread_start(thread);
     }
 
-    EventThreadStart event;
-    if (event.should_commit()) {
-      event.set_javalangthread(java_lang_Thread::thread_id(thread->threadObj()));
-      event.commit();
-    }
+    post_thread_start_event(thread);
 
 #ifndef PRODUCT
   #ifndef CALL_TEST_FUNC_WITH_WRAPPER_IF_NEEDED
@@ -5423,11 +5471,7 @@ static jint attach_current_thread(JavaVM *vm, void **penv, void *_args, bool dae
     JvmtiExport::post_thread_start(thread);
   }
 
-  EventThreadStart event;
-  if (event.should_commit()) {
-    event.set_javalangthread(java_lang_Thread::thread_id(thread->threadObj()));
-    event.commit();
-  }
+  post_thread_start_event(thread);
 
   *(JNIEnv**)penv = thread->jni_environment();
 

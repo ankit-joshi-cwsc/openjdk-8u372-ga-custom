@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -511,7 +511,7 @@ JvmtiEnvBase::is_thread_fully_suspended(JavaThread* thr, bool wait_for_suspend, 
 // mean much better out of memory handling
 unsigned char *
 JvmtiEnvBase::jvmtiMalloc(jlong size) {
-  unsigned char* mem;
+  unsigned char* mem = NULL;
   jvmtiError result = allocate(size, &mem);
   assert(result == JVMTI_ERROR_NONE, "Allocate failed");
   return mem;
@@ -1038,7 +1038,7 @@ JvmtiEnvBase::get_object_monitor_usage(JavaThread* calling_thread, jobject objec
     // implied else: entry_count == 0
   }
 
-  int nWant,nWait;
+  int nWant = 0, nWait = 0;
   if (mon != NULL) {
     // this object has a heavyweight monitor
     nWant = mon->contentions(); // # of threads contending for monitor
@@ -1092,7 +1092,7 @@ JvmtiEnvBase::get_object_monitor_usage(JavaThread* calling_thread, jobject objec
           // If the monitor has no owner, then a non-suspended contending
           // thread could potentially change the state of the monitor by
           // entering it. The JVM/TI spec doesn't allow this.
-          if (owning_thread == NULL && !at_safepoint &
+          if (owning_thread == NULL && !at_safepoint &&
               !JvmtiEnv::is_thread_fully_suspended(pending_thread, true, &debug_bits)) {
             if (ret.owner != NULL) {
               destroy_jni_reference(calling_thread, ret.owner);
@@ -1348,7 +1348,7 @@ JvmtiEnvBase::check_top_frame(JavaThread* current_thread, JavaThread* java_threa
   ResultTypeFinder rtf(signature);
   TosState fr_tos = as_TosState(rtf.type());
   if (fr_tos != tos) {
-    if (tos != itos || (fr_tos != btos && fr_tos != ctos && fr_tos != stos)) {
+    if (tos != itos || (fr_tos != btos && fr_tos != ztos && fr_tos != ctos && fr_tos != stos)) {
       return JVMTI_ERROR_TYPE_MISMATCH;
     }
   }

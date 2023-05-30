@@ -76,7 +76,7 @@ Instruction::Condition Instruction::negate(Condition cond) {
 
 void Instruction::update_exception_state(ValueStack* state) {
   if (state != NULL && (state->kind() == ValueStack::EmptyExceptionState || state->kind() == ValueStack::ExceptionState)) {
-    assert(state->kind() == ValueStack::EmptyExceptionState || Compilation::current()->env()->jvmti_can_access_local_variables(), "unexpected state kind");
+    assert(state->kind() == ValueStack::EmptyExceptionState || Compilation::current()->env()->should_retain_local_variables(), "unexpected state kind");
     _exception_state = state;
   } else {
     _exception_state = NULL;
@@ -360,7 +360,8 @@ void Invoke::state_values_do(ValueVisitor* f) {
 }
 
 ciType* Invoke::declared_type() const {
-  ciType *t = _target->signature()->return_type();
+  ciSignature* declared_signature = state()->scope()->method()->get_declared_signature_at_bci(state()->bci());
+  ciType *t = declared_signature->return_type();
   assert(t->basic_type() != T_VOID, "need return value of void method?");
   return t;
 }

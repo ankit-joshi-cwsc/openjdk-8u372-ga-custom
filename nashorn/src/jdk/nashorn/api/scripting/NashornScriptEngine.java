@@ -140,7 +140,7 @@ public final class NashornScriptEngine extends AbstractScriptEngine implements C
         this._global_per_engine = nashornContext.getEnv()._global_per_engine;
 
         // create new global object
-        this.global = createNashornGlobal(context);
+        this.global = createNashornGlobal();
         // set the default ENGINE_SCOPE object for the default context
         context.setBindings(new ScriptObjectMirror(global, global), ScriptContext.ENGINE_SCOPE);
     }
@@ -167,7 +167,7 @@ public final class NashornScriptEngine extends AbstractScriptEngine implements C
             // We use same 'global' for all Bindings.
             return new SimpleBindings();
         }
-        return createGlobalMirror(null);
+        return createGlobalMirror();
     }
 
     // Compilable methods
@@ -317,8 +317,11 @@ public final class NashornScriptEngine extends AbstractScriptEngine implements C
 
         // We didn't find associated nashorn global mirror in the Bindings given!
         // Create new global instance mirror and associate with the Bindings.
-        final ScriptObjectMirror mirror = createGlobalMirror(ctxt);
+        final ScriptObjectMirror mirror = createGlobalMirror();
         bindings.put(NASHORN_GLOBAL, mirror);
+        // Since we created this global explicitly for the non-default script context we set the
+        // current script context in global permanently so that invokes work as expected. See JDK-8150219
+        mirror.getHomeGlobal().setInitScriptContext(ctxt);
         return mirror.getHomeGlobal();
     }
 
@@ -333,13 +336,13 @@ public final class NashornScriptEngine extends AbstractScriptEngine implements C
     }
 
     // Create a new ScriptObjectMirror wrapping a newly created Nashorn Global object
-    private ScriptObjectMirror createGlobalMirror(final ScriptContext ctxt) {
-        final Global newGlobal = createNashornGlobal(ctxt);
+    private ScriptObjectMirror createGlobalMirror() {
+        final Global newGlobal = createNashornGlobal();
         return new ScriptObjectMirror(newGlobal, newGlobal);
     }
 
     // Create a new Nashorn Global object
-    private Global createNashornGlobal(final ScriptContext ctxt) {
+    private Global createNashornGlobal() {
         final Global newGlobal = AccessController.doPrivileged(new PrivilegedAction<Global>() {
             @Override
             public Global run() {
@@ -354,7 +357,7 @@ public final class NashornScriptEngine extends AbstractScriptEngine implements C
             }
         }, CREATE_GLOBAL_ACC_CTXT);
 
-        nashornContext.initGlobal(newGlobal, this, ctxt);
+        nashornContext.initGlobal(newGlobal, this);
 
         return newGlobal;
     }

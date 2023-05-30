@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -381,6 +381,7 @@ class Instruction: public CompilationResourceObj {
     UnorderedIsTrueFlag,
     NeedsPatchingFlag,
     ThrowIncompatibleClassChangeErrorFlag,
+    InvokeSpecialReceiverCheckFlag,
     ProfileMDOFlag,
     IsLinkedInBlockFlag,
     NeedsRangeCheckFlag,
@@ -976,11 +977,13 @@ LEAF(StoreIndexed, AccessIndexed)
 
   ciMethod* _profiled_method;
   int       _profiled_bci;
+  bool      _check_boolean;
+
  public:
   // creation
-  StoreIndexed(Value array, Value index, Value length, BasicType elt_type, Value value, ValueStack* state_before)
+  StoreIndexed(Value array, Value index, Value length, BasicType elt_type, Value value, ValueStack* state_before, bool check_boolean)
   : AccessIndexed(array, index, length, elt_type, state_before)
-  , _value(value), _profiled_method(NULL), _profiled_bci(0)
+  , _value(value), _profiled_method(NULL), _profiled_bci(0), _check_boolean(check_boolean)
   {
     set_flag(NeedsWriteBarrierFlag, (as_ValueType(elt_type)->is_object()));
     set_flag(NeedsStoreCheckFlag, (as_ValueType(elt_type)->is_object()));
@@ -992,6 +995,7 @@ LEAF(StoreIndexed, AccessIndexed)
   Value value() const                            { return _value; }
   bool needs_write_barrier() const               { return check_flag(NeedsWriteBarrierFlag); }
   bool needs_store_check() const                 { return check_flag(NeedsStoreCheckFlag); }
+  bool check_boolean() const                     { return _check_boolean; }
   // Helpers for MethodData* profiling
   void set_should_profile(bool value)                { set_flag(ProfileMDOFlag, value); }
   void set_profiled_method(ciMethod* method)         { _profiled_method = method;   }
@@ -1453,6 +1457,16 @@ LEAF(CheckCast, TypeCheck)
   bool is_incompatible_class_change_check() const {
     return check_flag(ThrowIncompatibleClassChangeErrorFlag);
   }
+  void set_invokespecial_receiver_check() {
+    set_flag(InvokeSpecialReceiverCheckFlag, true);
+  }
+  bool is_invokespecial_receiver_check() const {
+    return check_flag(InvokeSpecialReceiverCheckFlag);
+  }
+
+  virtual bool needs_exception_state() const {
+    return !is_invokespecial_receiver_check();
+  }
 
   ciType* declared_type() const;
 };
@@ -1554,7 +1568,7 @@ LEAF(Intrinsic, StateSplit)
     set_needs_null_check(has_receiver);
 
     // some intrinsics can't trap, so don't force them to be pinned
-    if (!can_trap()) {
+    if (!can_trap() && !vmIntrinsics::should_be_pinned(_id)) {
       unpin(PinStateSplitConstructor);
     }
   }
@@ -2110,11 +2124,11 @@ LEAF(TableSwitch, Switch)
   // creation
   TableSwitch(Value tag, BlockList* sux, int lo_key, ValueStack* state_before, bool is_safepoint)
     : Switch(tag, sux, state_before, is_safepoint)
-  , _lo_key(lo_key) {}
+  , _lo_key(lo_key) { assert(_lo_key <= hi_key(), "integer overflow"); }
 
   // accessors
   int lo_key() const                             { return _lo_key; }
-  int hi_key() const                             { return _lo_key + length() - 1; }
+  int hi_key() const                             { return _lo_key + (length() - 1); }
 };
 
 

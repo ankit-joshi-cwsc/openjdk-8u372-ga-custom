@@ -38,11 +38,13 @@
 #include "gc_implementation/g1/g1YCTypes.hpp"
 #include "gc_implementation/g1/heapRegionManager.hpp"
 #include "gc_implementation/g1/heapRegionSet.hpp"
+#include "gc_implementation/shared/gcHeapSummary.hpp"
 #include "gc_implementation/shared/hSpaceCounters.hpp"
 #include "gc_implementation/shared/parGCAllocBuffer.hpp"
 #include "memory/barrierSet.hpp"
 #include "memory/memRegion.hpp"
 #include "memory/sharedHeap.hpp"
+#include "utilities/macros.hpp"
 #include "utilities/stack.hpp"
 
 // A "G1CollectedHeap" is an implementation of a java heap for HotSpot.
@@ -75,7 +77,6 @@ class G1NewTracer;
 class G1OldTracer;
 class EvacuationFailedInfo;
 class nmethod;
-class Ticks;
 
 typedef OverflowTaskQueue<StarTask, mtGC>         RefToScanQueue;
 typedef GenericTaskQueueSet<RefToScanQueue, mtGC> RefToScanQueueSet;
@@ -375,6 +376,8 @@ private:
   static G1RegionToSpaceMapper* create_aux_memory_mapper(const char* description,
                                                          size_t size,
                                                          size_t translation_factor);
+
+  void trace_heap(GCWhen::Type when, GCTracer* tracer);
 
   double verify(bool guard, const char* msg);
   void verify_before_gc();
@@ -1148,21 +1151,11 @@ public:
   // Do sanity check on the contents of the in-cset fast test table.
   bool check_cset_fast_test() PRODUCT_RETURN_( return true; );
 
-  // verify_region_sets() performs verification over the region
-  // lists. It will be compiled in the product code to be used when
-  // necessary (i.e., during heap verification).
   void verify_region_sets();
 
   // verify_region_sets_optional() is planted in the code for
-  // list verification in non-product builds (and it can be enabled in
-  // product builds by defining HEAP_REGION_SET_FORCE_VERIFY to be 1).
-#if HEAP_REGION_SET_FORCE_VERIFY
-  void verify_region_sets_optional() {
-    verify_region_sets();
-  }
-#else // HEAP_REGION_SET_FORCE_VERIFY
-  void verify_region_sets_optional() { }
-#endif // HEAP_REGION_SET_FORCE_VERIFY
+  // list verification in debug builds.
+  void verify_region_sets_optional() { DEBUG_ONLY(verify_region_sets();) }
 
 #ifdef ASSERT
   bool is_on_master_free_list(HeapRegion* hr) {
@@ -1621,6 +1614,8 @@ public:
 
   bool is_obj_dead_cond(const oop obj,
                         const VerifyOption vo) const;
+
+  G1HeapSummary create_g1_heap_summary();
 
   // Printing
 

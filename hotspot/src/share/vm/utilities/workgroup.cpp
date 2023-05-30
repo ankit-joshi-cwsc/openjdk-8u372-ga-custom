@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2001, 2015, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -245,6 +245,7 @@ void GangWorker::run() {
 void GangWorker::initialize() {
   this->initialize_thread_local_storage();
   this->record_stack_base_and_size();
+  this->initialize_named_thread();
   assert(_gang != NULL, "No gang to run in");
   os::set_priority(this, NearMaxPriority);
   if (TraceWorkGang) {
@@ -464,7 +465,6 @@ bool SubTasksDone::is_task_claimed(uint t) {
   if (old == 0) {
     old = Atomic::cmpxchg(1, &_tasks[t], 0);
   }
-  assert(_tasks[t] == 1, "What else?");
   bool res = old != 0;
 #ifdef ASSERT
   if (!res) {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -43,8 +43,8 @@ import java.io.ObjectOutputStream;
 import java.io.ObjectInputStream;
 import java.io.IOException;
 import sun.net.util.IPAddressUtil;
-import sun.net.RegisteredDomain;
 import sun.net.PortConfig;
+import sun.security.util.RegisteredDomain;
 import sun.security.util.SecurityConstants;
 import sun.security.util.Debug;
 
@@ -461,7 +461,7 @@ public final class SocketPermission extends Permission
             if (host.length() > 0) {
                 // see if we are being initialized with an IP address.
                 char ch = host.charAt(0);
-                if (ch == ':' || Character.digit(ch, 16) != -1) {
+                if (ch == ':' || IPAddressUtil.digit(ch, 16) != -1) {
                     byte ip[] = IPAddressUtil.textToNumericFormatV4(host);
                     if (ip == null) {
                         ip = IPAddressUtil.textToNumericFormatV6(host);
@@ -677,13 +677,18 @@ public final class SocketPermission extends Permission
         String a = cname.toLowerCase();
         String b = hname.toLowerCase();
         if (a.startsWith(b)  &&
-            ((a.length() == b.length()) || (a.charAt(b.length()) == '.')))
+            ((a.length() == b.length()) || (a.charAt(b.length()) == '.'))) {
             return true;
+        }
         if (cdomain == null) {
-            cdomain = RegisteredDomain.getRegisteredDomain(a);
+            cdomain = RegisteredDomain.from(a)
+                                      .map(RegisteredDomain::name)
+                                      .orElse(a);
         }
         if (hdomain == null) {
-            hdomain = RegisteredDomain.getRegisteredDomain(b);
+            hdomain = RegisteredDomain.from(b)
+                                      .map(RegisteredDomain::name)
+                                      .orElse(b);
         }
 
         return cdomain.length() != 0 && hdomain.length() != 0

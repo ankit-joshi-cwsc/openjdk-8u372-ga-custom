@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -22,13 +22,11 @@
  */
 
 /* @test
-   @bug 8001633 8028271
+   @bug 8001633 8028271 8039888
    @summary Wrong alt processing during switching between windows
    @author mikhail.cherkasov@oracle.com
    @run main WrongAltProcessing
 */
-
-import sun.awt.SunToolkit;
 
 import javax.swing.*;
 import java.awt.*;
@@ -56,8 +54,8 @@ public class WrongAltProcessing {
                 createWindows();
             }
         });
-        sync();
         initRobot();
+        robot.waitForIdle();
         runScript();
         SwingUtilities.invokeLater(new Runnable() {
             @Override
@@ -73,11 +71,6 @@ public class WrongAltProcessing {
         if (!(c == mainFrameTf2)) {
             throw new RuntimeException("Wrong focus owner.");
         }
-    }
-
-    public static void sync() {
-        SunToolkit toolkit = (SunToolkit) Toolkit.getDefaultToolkit();
-        toolkit.realSync();
     }
 
     public static void initRobot() throws AWTException {
@@ -101,7 +94,7 @@ public class WrongAltProcessing {
         robot.keyPress(KeyEvent.VK_ALT);
         robot.keyRelease(KeyEvent.VK_ALT);
         clickWindowsTitle(firstFrame);
-        sync();
+        robot.waitForIdle();
     }
 
     private static void pressTab() {

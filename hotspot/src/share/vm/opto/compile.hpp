@@ -31,6 +31,7 @@
 #include "code/exceptionHandlerTable.hpp"
 #include "compiler/compilerOracle.hpp"
 #include "compiler/compileBroker.hpp"
+#include "jfr/jfrEvents.hpp"
 #include "libadt/dict.hpp"
 #include "libadt/port.hpp"
 #include "libadt/vectset.hpp"
@@ -41,7 +42,6 @@
 #include "opto/regmask.hpp"
 #include "runtime/deoptimization.hpp"
 #include "runtime/vmThread.hpp"
-#include "trace/tracing.hpp"
 #include "utilities/ticks.hpp"
 
 class Block;
@@ -75,6 +75,7 @@ class SafePointNode;
 class JVMState;
 class Type;
 class TypeData;
+class TypeInt;
 class TypePtr;
 class TypeOopPtr;
 class TypeFunc;
@@ -150,6 +151,8 @@ class Compile : public Phase {
       assert(_element == NULL, "");
       _element = e;
     }
+
+    BasicType basic_type() const;
 
     void print_on(outputStream* st) PRODUCT_RETURN;
   };
@@ -334,6 +337,7 @@ class Compile : public Phase {
   GrowableArray<Node*>* _macro_nodes;           // List of nodes which need to be expanded before matching.
   GrowableArray<Node*>* _predicate_opaqs;       // List of Opaque1 nodes for the loop predicates.
   GrowableArray<Node*>* _expensive_nodes;       // List of nodes that are expensive to compute and that we'd better not let the GVN freely common
+  GrowableArray<Node*>* _range_check_casts;     // List of CastII nodes with a range check dependency
   ConnectionGraph*      _congraph;
 #ifndef PRODUCT
   IdealGraphPrinter*    _printer;
@@ -633,7 +637,7 @@ class Compile : public Phase {
     if (event.should_commit()) {
       event.set_starttime(C->_latest_stage_start_counter);
       event.set_phase((u1) cpt);
-      event.set_compileID(C->_compile_id);
+      event.set_compileId(C->_compile_id);
       event.set_phaseLevel(level);
       event.commit();
     }
@@ -650,7 +654,7 @@ class Compile : public Phase {
     if (event.should_commit()) {
       event.set_starttime(C->_latest_stage_start_counter);
       event.set_phase((u1) PHASE_END);
-      event.set_compileID(C->_compile_id);
+      event.set_compileId(C->_compile_id);
       event.set_phaseLevel(level);
       event.commit();
     }
@@ -669,7 +673,7 @@ class Compile : public Phase {
   void set_congraph(ConnectionGraph* congraph)  { _congraph = congraph;}
   void add_macro_node(Node * n) {
     //assert(n->is_macro(), "must be a macro node");
-    assert(!_macro_nodes->contains(n), " duplicate entry in expand list");
+    assert(!_macro_nodes->contains(n), "duplicate entry in expand list");
     _macro_nodes->append(n);
   }
   void remove_macro_node(Node * n) {
@@ -689,10 +693,23 @@ class Compile : public Phase {
     }
   }
   void add_predicate_opaq(Node * n) {
-    assert(!_predicate_opaqs->contains(n), " duplicate entry in predicate opaque1");
+    assert(!_predicate_opaqs->contains(n), "duplicate entry in predicate opaque1");
     assert(_macro_nodes->contains(n), "should have already been in macro list");
     _predicate_opaqs->append(n);
   }
+
+  // Range check dependent CastII nodes that can be removed after loop optimizations
+  void add_range_check_cast(Node* n);
+  void remove_range_check_cast(Node* n) {
+    if (_range_check_casts->contains(n)) {
+      _range_check_casts->remove(n);
+    }
+  }
+  Node* range_check_cast_node(int idx) const { return _range_check_casts->at(idx);  }
+  int   range_check_cast_count()       const { return _range_check_casts->length(); }
+  // Remove all range check dependent CastIINodes.
+  void  remove_range_check_casts(PhaseIterGVN &igvn);
+
   // remove the opaque nodes that protect the predicates so that the unused checks and
   // uncommon traps will be eliminated from the graph.
   void cleanup_loop_predicates(PhaseIterGVN &igvn);
@@ -716,15 +733,11 @@ class Compile : public Phase {
   bool              failure_reason_is(const char* r) { return (r==_failure_reason) || (r!=NULL && _failure_reason!=NULL && strcmp(r, _failure_reason)==0); }
 
   void record_failure(const char* reason);
-  void record_method_not_compilable(const char* reason, bool all_tiers = false) {
-    // All bailouts cover "all_tiers" when TieredCompilation is off.
-    if (!TieredCompilation) all_tiers = true;
-    env()->record_method_not_compilable(reason, all_tiers);
+  void record_method_not_compilable(const char* reason) {
+    // Bailouts cover "all_tiers" when TieredCompilation is off.
+    env()->record_method_not_compilable(reason, !TieredCompilation);
     // Record failure reason.
     record_failure(reason);
-  }
-  void record_method_not_compilable_all_tiers(const char* reason) {
-    record_method_not_compilable(reason, true);
   }
   bool check_node_count(uint margin, const char* reason) {
     if (live_nodes() + margin > max_node_limit()) {
@@ -942,6 +955,7 @@ class Compile : public Phase {
   void inline_incrementally(PhaseIterGVN& igvn);
   void inline_string_calls(bool parse_time);
   void inline_boxing_calls(PhaseIterGVN& igvn);
+  void remove_root_to_sfpts_edges(PhaseIterGVN& igvn);
 
   // Matching, CFG layout, allocation, code generation
   PhaseCFG*         cfg()                       { return _cfg; }
@@ -1201,8 +1215,14 @@ class Compile : public Phase {
   // Definitions of pd methods
   static void pd_compiler2_init();
 
+  // Convert integer value to a narrowed long type dependent on ctrl (for example, a range check)
+  static Node* constrained_convI2L(PhaseGVN* phase, Node* value, const TypeInt* itype, Node* ctrl);
+
   // Auxiliary method for randomized fuzzing/stressing
   static bool randomized_select(int count);
+#ifdef ASSERT
+  bool _type_verify_symmetry;
+#endif
 };
 
 #endif // SHARE_VM_OPTO_COMPILE_HPP

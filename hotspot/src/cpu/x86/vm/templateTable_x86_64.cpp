@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -105,10 +105,6 @@ static inline Address at_tos_p1() {
 
 static inline Address at_tos_p2() {
   return Address(rsp,  Interpreter::expr_offset_in_bytes(2));
-}
-
-static inline Address at_tos_p3() {
-  return Address(rsp,  Interpreter::expr_offset_in_bytes(3));
 }
 
 // Condition conversion
@@ -219,6 +215,7 @@ void TemplateTable::patch_bytecode(Bytecodes::Code bc, Register bc_reg,
   switch (bc) {
   case Bytecodes::_fast_aputfield:
   case Bytecodes::_fast_bputfield:
+  case Bytecodes::_fast_zputfield:
   case Bytecodes::_fast_cputfield:
   case Bytecodes::_fast_dputfield:
   case Bytecodes::_fast_fputfield:
@@ -1018,6 +1015,16 @@ void TemplateTable::bastore() {
   // ebx: index
   // rdx: array
   index_check(rdx, rbx); // prefer index in ebx
+  // Need to check whether array is boolean or byte
+  // since both types share the bastore bytecode.
+  __ load_klass(rcx, rdx);
+  __ movl(rcx, Address(rcx, Klass::layout_helper_offset()));
+  int diffbit = Klass::layout_helper_boolean_diffbit();
+  __ testl(rcx, diffbit);
+  Label L_skip;
+  __ jccb(Assembler::zero, L_skip);
+  __ andl(rax, 1);  // if it is a T_BOOLEAN array, mask the stored value to 0/1
+  __ bind(L_skip);
   __ movb(Address(rdx, rbx,
                   Address::times_1,
                   arrayOopDesc::base_offset_in_bytes(T_BYTE)),
@@ -1654,15 +1661,16 @@ void TemplateTable::branch(bool is_jsr, bool is_wide) {
         // Increment the MDO backedge counter
         const Address mdo_backedge_counter(rbx, in_bytes(MethodData::backedge_counter_offset()) +
                                            in_bytes(InvocationCounter::counter_offset()));
-        __ increment_mask_and_jump(mdo_backedge_counter, increment, mask,
-                                   rax, false, Assembler::zero, &backedge_counter_overflow);
+        __ increment_mask_and_jump(mdo_backedge_counter, increment, mask, rax, false, Assembler::zero,
+                                   UseOnStackReplacement ? &backedge_counter_overflow : NULL);
         __ jmp(dispatch);
       }
       __ bind(no_mdo);
       // Increment backedge counter in MethodCounters*
       __ movptr(rcx, Address(rcx, Method::method_counters_offset()));
       __ increment_mask_and_jump(Address(rcx, be_offset), increment, mask,
-                                 rax, false, Assembler::zero, &backedge_counter_overflow);
+                                 rax, false, Assembler::zero,
+                                 UseOnStackReplacement ? &backedge_counter_overflow : NULL);
     } else {
       // increment counter
       __ movptr(rcx, Address(rcx, Method::method_counters_offset()));
@@ -2071,7 +2079,14 @@ void TemplateTable::_return(TosState state) {
     __ bind(skip_register_finalizer);
   }
 
+  // Narrow result if state is itos but result type is smaller.
+  // Need to narrow in the return bytecode rather than in generate_return_entry
+  // since compiled code callers expect the result to already be narrowed.
+  if (state == itos) {
+    __ narrow(rax);
+  }
   __ remove_activation(state, r13);
+
   __ jmp(r13);
 }
 
@@ -2289,7 +2304,7 @@ void TemplateTable::getfield_or_static(int byte_no, bool is_static) {
 
   const Address field(obj, off, Address::times_1);
 
-  Label Done, notByte, notInt, notShort, notChar,
+  Label Done, notByte, notBool, notInt, notShort, notChar,
               notLong, notFloat, notObj, notDouble;
 
   __ shrl(flags, ConstantPoolCacheEntry::tos_state_shift);
@@ -2308,6 +2323,20 @@ void TemplateTable::getfield_or_static(int byte_no, bool is_static) {
   __ jmp(Done);
 
   __ bind(notByte);
+  __ cmpl(flags, ztos);
+  __ jcc(Assembler::notEqual, notBool);
+
+  // ztos (same code as btos)
+  __ load_signed_byte(rax, field);
+  __ push(ztos);
+  // Rewrite bytecode to be faster
+  if (!is_static) {
+    // use btos rewriting, no truncating to t/f bit is needed for getfield.
+    patch_bytecode(Bytecodes::_fast_bgetfield, bc, rbx);
+  }
+  __ jmp(Done);
+
+  __ bind(notBool);
   __ cmpl(flags, atos);
   __ jcc(Assembler::notEqual, notObj);
   // atos
@@ -2497,7 +2526,7 @@ void TemplateTable::putfield_or_static(int byte_no, bool is_static) {
   // field address
   const Address field(obj, off, Address::times_1);
 
-  Label notByte, notInt, notShort, notChar,
+  Label notByte, notBool, notInt, notShort, notChar,
         notLong, notFloat, notObj, notDouble;
 
   __ shrl(flags, ConstantPoolCacheEntry::tos_state_shift);
@@ -2518,6 +2547,22 @@ void TemplateTable::putfield_or_static(int byte_no, bool is_static) {
   }
 
   __ bind(notByte);
+  __ cmpl(flags, ztos);
+  __ jcc(Assembler::notEqual, notBool);
+
+  // ztos
+  {
+    __ pop(ztos);
+    if (!is_static) pop_and_check_object(obj);
+    __ andl(rax, 0x1);
+    __ movb(field, rax);
+    if (!is_static) {
+      patch_bytecode(Bytecodes::_fast_zputfield, bc, rbx, true, byte_no);
+    }
+    __ jmp(Done);
+  }
+
+  __ bind(notBool);
   __ cmpl(flags, atos);
   __ jcc(Assembler::notEqual, notObj);
 
@@ -2666,6 +2711,7 @@ void TemplateTable::jvmti_post_fast_field_mod() {
     switch (bytecode()) {          // load values into the jvalue object
     case Bytecodes::_fast_aputfield: __ push_ptr(rax); break;
     case Bytecodes::_fast_bputfield: // fall through
+    case Bytecodes::_fast_zputfield: // fall through
     case Bytecodes::_fast_sputfield: // fall through
     case Bytecodes::_fast_cputfield: // fall through
     case Bytecodes::_fast_iputfield: __ push_i(rax); break;
@@ -2691,6 +2737,7 @@ void TemplateTable::jvmti_post_fast_field_mod() {
     switch (bytecode()) {             // restore tos values
     case Bytecodes::_fast_aputfield: __ pop_ptr(rax); break;
     case Bytecodes::_fast_bputfield: // fall through
+    case Bytecodes::_fast_zputfield: // fall through
     case Bytecodes::_fast_sputfield: // fall through
     case Bytecodes::_fast_cputfield: // fall through
     case Bytecodes::_fast_iputfield: __ pop_i(rax); break;
@@ -2746,6 +2793,9 @@ void TemplateTable::fast_storefield(TosState state) {
   case Bytecodes::_fast_iputfield:
     __ movl(field, rax);
     break;
+  case Bytecodes::_fast_zputfield:
+    __ andl(rax, 0x1);  // boolean is true if LSB is 1
+    // fall through to bputfield
   case Bytecodes::_fast_bputfield:
     __ movb(field, rax);
     break;
@@ -3097,11 +3147,11 @@ void TemplateTable::fast_invokevfinal(int byte_no) {
 void TemplateTable::invokeinterface(int byte_no) {
   transition(vtos, vtos);
   assert(byte_no == f1_byte, "use this argument");
-  prepare_invoke(byte_no, rax, rbx,  // get f1 Klass*, f2 itable index
+  prepare_invoke(byte_no, rax, rbx,  // get f1 Klass*, f2 Method*
                  rcx, rdx); // recv, flags
 
-  // rax: interface klass (from f1)
-  // rbx: itable index (from f2)
+  // rax: reference klass (from f1)
+  // rbx: method (from f2)
   // rcx: receiver
   // rdx: flags
 
@@ -3122,10 +3172,28 @@ void TemplateTable::invokeinterface(int byte_no) {
   __ null_check(rcx, oopDesc::klass_offset_in_bytes());
   __ load_klass(rdx, rcx);
 
+  Label no_such_interface, no_such_method;
+
+  // Receiver subtype check against REFC.
+  // Superklass in rax. Subklass in rdx. Blows rcx, rdi.
+  __ lookup_interface_method(// inputs: rec. class, interface, itable index
+                             rdx, rax, noreg,
+                             // outputs: scan temp. reg, scan temp. reg
+                             r13, r14,
+                             no_such_interface,
+                             /*return_method=*/false);
+
   // profile this call
+  __ restore_bcp(); // rbcp was destroyed by receiver type check
   __ profile_virtual_call(rdx, r13, r14);
 
-  Label no_such_interface, no_such_method;
+  // Get declaring interface class from method, and itable index
+  __ movptr(rax, Address(rbx, Method::const_offset()));
+  __ movptr(rax, Address(rax, ConstMethod::constants_offset()));
+  __ movptr(rax, Address(rax, ConstantPool::pool_holder_offset_in_bytes()));
+  __ movl(rbx, Address(rbx, Method::itable_index_offset()));
+  __ subl(rbx, Method::itable_index_max);
+  __ negl(rbx);
 
   __ lookup_interface_method(// inputs: rec. class, interface, itable index
                              rdx, rax, rbx,

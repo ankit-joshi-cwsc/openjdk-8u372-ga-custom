@@ -22,8 +22,9 @@
  */
 /* @test
    @bug 4202954
+   @library ../../../../lib/testlibrary
    @library ../../regtesthelpers
-   @build Util
+   @build Util jdk.testlibrary.OSInfo
    @author Michael C. Albers
    @run main bug4202954
 */
@@ -31,11 +32,10 @@
 import java.awt.*;
 import java.awt.event.InputEvent;
 import javax.swing.*;
-import sun.awt.*;
+import jdk.testlibrary.OSInfo;
 
 public class bug4202954 {
     static JScrollPane buttonScrollPane;
-    private static final SunToolkit toolkit = (SunToolkit) Toolkit.getDefaultToolkit();
     static Robot robot;
     public static void main(String[] args) throws Exception {
         if (OSInfo.getOSType() == OSInfo.OSType.MACOSX) {
@@ -53,8 +53,8 @@ public class bug4202954 {
 
         if (rightScrollButton == null || bottomScrollButton == null) {
             String errMessage = "Test can't be executed: ";
-            errMessage = errMessage + rightScrollButton == null ? "can't find right button for horizontal scroll bar; " : ""
-                    + bottomScrollButton == null ? "can't find bottom scroll button for vertical scroll bar" : "";
+            errMessage = errMessage + (rightScrollButton == null ? "can't find right button for horizontal scroll bar; " : ""
+                    + (bottomScrollButton == null ? "can't find bottom scroll button for vertical scroll bar" : ""));
             throw new RuntimeException(errMessage);
         }
 
@@ -105,15 +105,25 @@ public class bug4202954 {
         JButton button = Util.invokeOnEDT(new java.util.concurrent.Callable<JButton>() {
             @Override
             public JButton call() throws Exception {
-                for (Component c: scrollBar.getComponents()) {
-                    if (c instanceof JButton) {
-                        Point p = c.getLocationOnScreen();
-                        if (p.x > minX && p.y > minY) {
-                            return (JButton) c;
-                        }
-                    }
-                }
-                return null;
+                int currentXorY = 0;
+                JButton scrollButton = null;
+                 for (Component c: scrollBar.getComponents()) {
+                     if (c instanceof JButton) {
+                         Point p = c.getLocationOnScreen();
+                         if (scrollBar.getOrientation() == Adjustable.VERTICAL){
+                             if (currentXorY <= p.y){
+                                 currentXorY = p.y;
+                                 scrollButton = (JButton)c;
+                             }
+                         }else  if (scrollBar.getOrientation() == Adjustable.HORIZONTAL){
+                             if (currentXorY <= p.x){
+                                 currentXorY = p.x;
+                                 scrollButton = (JButton)c;
+                             }
+                         }
+                     }
+                 }
+                return scrollButton;
             }
         });
         return button;
@@ -138,13 +148,17 @@ public class bug4202954 {
             }
         };
         Integer oldHValue = Util.invokeOnEDT(horizontalValue);
+        robot.waitForIdle();
         Integer oldVValue = Util.invokeOnEDT(verticalValue);
+        robot.waitForIdle();
 
         clickMouseOnComponent(scrollButton, buttons);
-        toolkit.realSync();
+        robot.waitForIdle();
 
         int newHValue = Util.invokeOnEDT(horizontalValue);
+        robot.waitForIdle();
         int newVValue = Util.invokeOnEDT(verticalValue);
+        robot.waitForIdle();
 
         return (oldHValue != newHValue || oldVValue != newVValue) == expectScroll;
     }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -93,12 +93,6 @@ class ciMethod : public ciMetadata {
   ciMethod(methodHandle h_m, ciInstanceKlass* holder);
   ciMethod(ciInstanceKlass* holder, ciSymbol* name, ciSymbol* signature, ciInstanceKlass* accessor);
 
-  Method* get_Method() const {
-    Method* m = (Method*)_metadata;
-    assert(m != NULL, "illegal use of unloaded method");
-    return m;
-  }
-
   oop loader() const                             { return _holder->loader(); }
 
   const char* type_string()                      { return "ciMethod"; }
@@ -139,15 +133,19 @@ class ciMethod : public ciMetadata {
     check_is_loaded();
     return _signature->size() + (_flags.is_static() ? 0 : 1);
   }
-  // Report the number of elements on stack when invoking this method.
-  // This is different than the regular arg_size because invokedynamic
-  // has an implicit receiver.
+  // Report the number of elements on stack when invoking the current method.
+  // If the method is loaded, arg_size() gives precise information about the
+  // number of stack elements (using the method's signature and its flags).
+  // However, if the method is not loaded, the number of stack elements must
+  // be determined differently, as the method's flags are not yet available.
+  // The invoke_arg_size() method assumes in that case that all bytecodes except
+  // invokestatic and invokedynamic have a receiver that is also pushed onto the
+  // stack by the caller of the current method.
   int invoke_arg_size(Bytecodes::Code code) const {
     if (is_loaded()) {
       return arg_size();
     } else {
       int arg_size = _signature->size();
-      // Add a receiver argument, maybe:
       if (code != Bytecodes::_invokestatic &&
           code != Bytecodes::_invokedynamic) {
         arg_size++;
@@ -156,6 +154,11 @@ class ciMethod : public ciMetadata {
     }
   }
 
+  Method* get_Method() const {
+    Method* m = (Method*)_metadata;
+    assert(m != NULL, "illegal use of unloaded method");
+    return m;
+  }
 
   // Method code and related information.
   address code()                                 { if (_code == NULL) load_code(); return _code; }
@@ -243,6 +246,21 @@ class ciMethod : public ciMetadata {
 
   ciField*      get_field_at_bci( int bci, bool &will_link);
   ciMethod*     get_method_at_bci(int bci, bool &will_link, ciSignature* *declared_signature);
+
+  ciSignature*  get_declared_signature_at_bci(int bci) {
+    bool ignored_will_link;
+    ciSignature* declared_signature;
+    get_method_at_bci(bci, ignored_will_link, &declared_signature);
+    assert(declared_signature != NULL, "cannot be null");
+    return declared_signature;
+  }
+
+  ciMethod*     get_method_at_bci(int bci) {
+    bool ignored_will_link;
+    ciSignature* ignored_declared_signature;
+    return get_method_at_bci(bci, ignored_will_link, &ignored_declared_signature);
+  }
+
   // Given a certain calling environment, find the monomorphic target
   // for the call.  Return NULL if the call is not monomorphic in
   // its calling environment.
@@ -316,6 +334,7 @@ class ciMethod : public ciMetadata {
   bool can_be_statically_bound() const           { return _can_be_statically_bound; }
   bool is_boxing_method() const;
   bool is_unboxing_method() const;
+  bool is_object_initializer() const;
 
   // Replay data methods
   void dump_name_as_ascii(outputStream* st);

@@ -37,16 +37,20 @@ import javax.net.ssl.*;
  * @test
  * @bug 8025710
  * @summary Proxied https connection reuse by HttpClient can send CONNECT to the server
+ * @run main/othervm B8025710
  */
 public class B8025710 {
 
     private final static AtomicBoolean connectInServer = new AtomicBoolean();
     private static final String keystorefile =
             System.getProperty("test.src", "./")
-            + "/../../../../../sun/security/ssl/etc/keystore";
+            + "/../../../../../javax/net/ssl/etc/keystore";
     private static final String passphrase = "passphrase";
 
     public static void main(String[] args) throws Exception {
+        // test uses legacy MD5 based cert
+        Security.setProperty("jdk.certpath.disabledAlgorithms", "");
+        Security.setProperty("jdk.tls.disabledAlgorithms", "");
         new B8025710().runTest();
 
         if (connectInServer.get())

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1996, 2011, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1996, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -130,6 +130,9 @@ public class ContentInfo {
         DerValue[] contents;
 
         typeAndContent = derin.getSequence(2);
+        if (typeAndContent.length < 1 || typeAndContent.length > 2) {
+            throw new ParsingException("Invalid length for ContentInfo");
+        }
 
         // Parse the content type
         type = typeAndContent[0];
@@ -138,7 +141,9 @@ public class ContentInfo {
 
         if (oldStyle) {
             // JDK1.1.x-style encoding
-            content = typeAndContent[1];
+            if (typeAndContent.length > 1) { // content is OPTIONAL
+                content = typeAndContent[1];
+            }
         } else {
             // This is the correct, standards-compliant encoding.
             // Parse the content (OPTIONAL field).
@@ -149,6 +154,9 @@ public class ContentInfo {
                 disTaggedContent
                     = new DerInputStream(taggedContent.toByteArray());
                 contents = disTaggedContent.getSet(1, true);
+                if (contents.length != 1) {
+                    throw new ParsingException("ContentInfo encoding error");
+                }
                 content = contents[0];
             }
         }

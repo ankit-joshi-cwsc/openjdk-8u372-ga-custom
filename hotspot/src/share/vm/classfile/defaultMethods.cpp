@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -493,7 +493,7 @@ class MethodFamily : public ResourceObj {
 };
 
 Symbol* MethodFamily::generate_no_defaults_message(TRAPS) const {
-  return SymbolTable::new_symbol("No qualifying defaults found", CHECK_NULL);
+  return SymbolTable::new_symbol("No qualifying defaults found", THREAD);
 }
 
 Symbol* MethodFamily::generate_method_message(Symbol *klass_name, Method* method, TRAPS) const {
@@ -506,7 +506,7 @@ Symbol* MethodFamily::generate_method_message(Symbol *klass_name, Method* method
   ss.write((const char*)name->bytes(), name->utf8_length());
   ss.write((const char*)signature->bytes(), signature->utf8_length());
   ss.print(" is abstract");
-  return SymbolTable::new_symbol(ss.base(), (int)ss.size(), CHECK_NULL);
+  return SymbolTable::new_symbol(ss.base(), (int)ss.size(), THREAD);
 }
 
 Symbol* MethodFamily::generate_conflicts_message(GrowableArray<Method*>* methods, TRAPS) const {
@@ -521,7 +521,7 @@ Symbol* MethodFamily::generate_conflicts_message(GrowableArray<Method*>* methods
     ss.print(".");
     ss.write((const char*)name->bytes(), name->utf8_length());
   }
-  return SymbolTable::new_symbol(ss.base(), (int)ss.size(), CHECK_NULL);
+  return SymbolTable::new_symbol(ss.base(), (int)ss.size(), THREAD);
 }
 
 
@@ -892,10 +892,8 @@ static Method* new_method(
   m->set_constants(NULL); // This will get filled in later
   m->set_name_index(cp->utf8(name));
   m->set_signature_index(cp->utf8(sig));
-#ifdef CC_INTERP
   ResultTypeFinder rtf(sig);
-  m->set_result_index(rtf.type());
-#endif
+  m->constMethod()->set_result_type(rtf.type());
   m->set_size_of_parameters(params);
   m->set_max_stack(max_stack);
   m->set_max_locals(params);

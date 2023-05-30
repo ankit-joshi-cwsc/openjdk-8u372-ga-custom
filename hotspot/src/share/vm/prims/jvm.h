@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -145,10 +145,18 @@ JNIEXPORT void JNICALL
 JVM_OnExit(void (*func)(void));
 
 /*
+ * java.nio.Bits
+ */
+JNIEXPORT void JNICALL
+JVM_CopySwapMemory(JNIEnv *env, jobject srcObj, jlong srcOffset,
+                   jobject dstObj, jlong dstOffset, jlong size,
+                   jlong elemSize);
+
+/*
  * java.lang.Runtime
  */
 JNIEXPORT void JNICALL
-JVM_Exit(jint code);
+JVM_BeforeHalt();
 
 JNIEXPORT void JNICALL
 JVM_Halt(jint code);
@@ -190,6 +198,9 @@ JVM_MaxMemory(void);
 
 JNIEXPORT jint JNICALL
 JVM_ActiveProcessorCount(void);
+
+JNIEXPORT jboolean JNICALL
+JVM_IsUseContainerSupport(void);
 
 JNIEXPORT void * JNICALL
 JVM_LoadLibrary(const char *name);
@@ -1617,9 +1628,9 @@ typedef struct {
 } jvm_version_info;
 
 #define JVM_VERSION_MAJOR(version) ((version & 0xFF000000) >> 24)
-#define JVM_VERSION_MINOR(version) ((version & 0x00FF0000) >> 16)
+#define JVM_VERSION_MINOR(version) ((version & 0x00FFFF00) >> 8)
 // Micro version is 0 in HotSpot Express VM (set in jvm.cpp).
-#define JVM_VERSION_MICRO(version) ((version & 0x0000FF00) >> 8)
+#define JVM_VERSION_MICRO(version) 0
 /* Build number is available in all HotSpot Express VM builds.
  * It is defined in make/hotspot_version file.
  */
@@ -1632,9 +1643,9 @@ typedef struct {
     // Naming convention of RE build version string: n.n.n[_uu[c]][-<identifier>]-bxx
     unsigned int jdk_version;   /* Consists of major, minor, micro (n.n.n) */
                                 /* and build number (xx) */
-    unsigned int update_version : 8;         /* Update release version (uu) */
+    unsigned int update_version : 16;        /* Update release version (uu) */
     unsigned int special_update_version : 8; /* Special update release version (c)*/
-    unsigned int reserved1 : 16;
+    unsigned int reserved1 : 8;
     unsigned int reserved2;
 
     /* The following bits represents new JDK supports that VM has dependency on.

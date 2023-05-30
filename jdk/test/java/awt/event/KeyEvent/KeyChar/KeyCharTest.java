@@ -28,11 +28,10 @@ import java.awt.Toolkit;
 import java.awt.event.AWTEventListener;
 import java.awt.event.KeyEvent;
 import java.util.Locale;
-import sun.awt.SunToolkit;
 
 /*
  * @test
- * @bug 8022401
+ * @bug 8022401 8160623
  * @summary Wrong key char
  * @author Alexandr Scherbatiy
  * @run main KeyCharTest
@@ -59,18 +58,18 @@ public class KeyCharTest {
 
     public static void main(String[] args) throws Exception {
 
-        SunToolkit toolkit = (SunToolkit) Toolkit.getDefaultToolkit();
 
         Frame frame = new Frame();
         frame.setSize(300, 300);
         frame.setVisible(true);
-        toolkit.realSync();
-
         Robot robot = new Robot();
+        robot.setAutoDelay(50);
+        robot.waitForIdle();
+
 
         robot.keyPress(KeyEvent.VK_DELETE);
         robot.keyRelease(KeyEvent.VK_DELETE);
-        toolkit.realSync();
+        robot.waitForIdle();
 
         frame.dispose();
 

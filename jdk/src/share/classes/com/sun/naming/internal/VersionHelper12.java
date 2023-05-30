@@ -61,16 +61,44 @@ final class VersionHelper12 extends VersionHelper {
         return loadClass(className, getContextClassLoader());
     }
 
+    public Class<?> loadClassWithoutInit(String className) throws ClassNotFoundException {
+        return loadClass(className, false, getContextClassLoader());
+    }
+
+    /**
+     * Determines whether classes may be loaded from an arbitrary URL code base.
+     */
+    private static final String TRUST_URL_CODEBASE_PROPERTY =
+            "com.sun.jndi.ldap.object.trustURLCodebase";
+    private static final String trustURLCodebase =
+            AccessController.doPrivileged(
+                new PrivilegedAction<String>() {
+                    public String run() {
+                        try {
+                        return System.getProperty(TRUST_URL_CODEBASE_PROPERTY,
+                            "false");
+                        } catch (SecurityException e) {
+                        return "false";
+                        }
+                    }
+                }
+            );
+
     /**
      * Package private.
      *
      * This internal method is used with Thread Context Class Loader (TCCL),
      * please don't expose this method as public.
      */
+    Class<?> loadClass(String className, boolean initialize, ClassLoader cl)
+            throws ClassNotFoundException {
+        Class<?> cls = Class.forName(className, initialize, cl);
+        return cls;
+    }
+
     Class<?> loadClass(String className, ClassLoader cl)
         throws ClassNotFoundException {
-        Class<?> cls = Class.forName(className, true, cl);
-        return cls;
+        return loadClass(className, true, cl);
     }
 
     /**
@@ -79,12 +107,15 @@ final class VersionHelper12 extends VersionHelper {
      */
     public Class<?> loadClass(String className, String codebase)
             throws ClassNotFoundException, MalformedURLException {
+        if ("true".equalsIgnoreCase(trustURLCodebase)) {
+            ClassLoader parent = getContextClassLoader();
+            ClassLoader cl =
+                    URLClassLoader.newInstance(getUrlArray(codebase), parent);
 
-        ClassLoader parent = getContextClassLoader();
-        ClassLoader cl =
-                 URLClassLoader.newInstance(getUrlArray(codebase), parent);
-
-        return loadClass(className, cl);
+            return loadClass(className, cl);
+        } else {
+            return null;
+        }
     }
 
     String getJndiProperty(final int i) {

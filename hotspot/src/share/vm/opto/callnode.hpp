@@ -449,8 +449,8 @@ public:
   void delete_replaced_nodes() {
     _replaced_nodes.reset();
   }
-  void apply_replaced_nodes() {
-    _replaced_nodes.apply(this);
+  void apply_replaced_nodes(uint idx) {
+    _replaced_nodes.apply(this, idx);
   }
   void merge_replaced_nodes_with(SafePointNode* sfpt) {
     _replaced_nodes.merge_with(sfpt->_replaced_nodes);
@@ -458,6 +458,8 @@ public:
   bool has_replaced_nodes() const {
     return !_replaced_nodes.is_empty();
   }
+
+  void disconnect_from_root(PhaseIterGVN *igvn);
 
   // Standard Node stuff
   virtual int            Opcode() const;
@@ -894,6 +896,20 @@ public:
 
   // Convenience for initialization->maybe_set_complete(phase)
   bool maybe_set_complete(PhaseGVN* phase);
+
+#ifdef AARCH64
+  // Return true if allocation doesn't escape thread, its escape state
+  // needs be noEscape or ArgEscape. InitializeNode._does_not_escape
+  // is true when its allocation's escape state is noEscape or
+  // ArgEscape. In case allocation's InitializeNode is NULL, check
+  // AlllocateNode._is_non_escaping flag.
+  // AlllocateNode._is_non_escaping is true when its escape state is
+  // noEscape.
+  bool does_not_escape_thread() {
+    InitializeNode* init = NULL;
+    return _is_non_escaping || (((init = initialization()) != NULL) && init->does_not_escape());
+  }
+#endif
 };
 
 //------------------------------AllocateArray---------------------------------

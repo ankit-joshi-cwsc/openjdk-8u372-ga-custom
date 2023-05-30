@@ -49,6 +49,7 @@
 #include <malloc.h>
 #include <math.h>
 #include <windows.h>
+#include <strsafe.h>
 #include <winuser.h>
 
 #include <jni.h>
@@ -157,6 +158,9 @@ JNIEXPORT jboolean JNICALL
     if (hBitmap != 0) { \
         DeleteObject(hBitmap); \
     } \
+    if (tmpBitmap != 0) { \
+        DeleteObject(tmpBitmap); \
+    } \
     if (dibImage != NULL) { \
         free(dibImage); \
     } \
@@ -169,7 +173,8 @@ JNIEXPORT jboolean JNICALL
 JNIEXPORT jlong JNICALL
 Java_sun_font_FileFontStrike__1getGlyphImageFromWindows
 (JNIEnv *env, jobject unused,
- jstring fontFamily, jint style, jint size, jint glyphCode, jboolean fm) {
+ jstring fontFamily, jint style, jint size, jint glyphCode, jboolean fm,
+ jint fontDataSize) {
 
     GLYPHMETRICS glyphMetrics;
     LOGFONTW lf;
@@ -185,6 +190,7 @@ Java_sun_font_FileFontStrike__1getGlyphImageFromWindows
     LPWSTR name;
     HFONT oldFont, hFont;
     MAT2 mat2;
+    DWORD actualFontDataSize;
 
     unsigned short width;
     unsigned short height;
@@ -196,6 +202,7 @@ Java_sun_font_FileFontStrike__1getGlyphImageFromWindows
     int bmWidth, bmHeight;
     int x, y;
     HBITMAP hBitmap = NULL, hOrigBM;
+    HBITMAP tmpBitmap = NULL;
     int gamma, orient;
 
     HWND hWnd = NULL;
@@ -239,7 +246,7 @@ Java_sun_font_FileFontStrike__1getGlyphImageFromWindows
     name[nameLen] = '\0';
 
     if (nameLen < (sizeof(lf.lfFaceName) / sizeof(lf.lfFaceName[0]))) {
-        wcscpy(lf.lfFaceName, name);
+        StringCchCopyW(lf.lfFaceName, LF_FACESIZE, name);
     } else {
         FREE_AND_RETURN;
     }
@@ -249,6 +256,23 @@ Java_sun_font_FileFontStrike__1getGlyphImageFromWindows
         FREE_AND_RETURN;
     }
     oldFont = SelectObject(hMemoryDC, hFont);
+
+    if (fontDataSize > 0) {
+        // GDI doesn't allow to select a specific font file for drawing, we can
+        // only check that it picks the file we need by validating font size.
+        // If it doesn't match, we cannot proceed, as the same glyph code can
+        // correspond to a completely different glyph in the selected font.
+        actualFontDataSize = GetFontData(hMemoryDC, 0, 0, NULL, 0);
+        if (actualFontDataSize != fontDataSize) {
+            FREE_AND_RETURN;
+        }
+    }
+
+    tmpBitmap = CreateCompatibleBitmap(hDesktopDC, 1, 1);
+    if (tmpBitmap == NULL) {
+        FREE_AND_RETURN;
+    }
+    hOrigBM = (HBITMAP)SelectObject(hMemoryDC, tmpBitmap);
 
     memset(&textMetric, 0, sizeof(TEXTMETRIC));
     err = GetTextMetrics(hMemoryDC, &textMetric);
@@ -334,7 +358,7 @@ Java_sun_font_FileFontStrike__1getGlyphImageFromWindows
     if (hBitmap == NULL) {
         FREE_AND_RETURN;
     }
-    hOrigBM = (HBITMAP)SelectObject(hMemoryDC, hBitmap);
+    SelectObject(hMemoryDC, hBitmap);
 
     /* Fill in black */
     rect.left = 0;
@@ -478,6 +502,7 @@ Java_sun_font_FileFontStrike__1getGlyphImageFromWindows
     ReleaseDC(hWnd, hDesktopDC);
     DeleteObject(hMemoryDC);
     DeleteObject(hBitmap);
+    DeleteObject(tmpBitmap);
 
     return ptr_to_jlong(glyphInfo);
 }

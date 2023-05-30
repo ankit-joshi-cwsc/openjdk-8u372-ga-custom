@@ -66,7 +66,7 @@ AC_DEFUN([BASIC_MAKE_WINDOWS_SPACE_SAFE_CYGWIN],
       # Going to short mode and back again did indeed matter. Since short mode is
       # case insensitive, let's make it lowercase to improve readability.
       shortmode_path=`$ECHO "$shortmode_path" | $TR 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'`
-      # Now convert it back to Unix-stile (cygpath)
+      # Now convert it back to Unix-style (cygpath)
       input_path=`$CYGPATH -u "$shortmode_path"`
       new_path="$input_path"
     fi
@@ -113,6 +113,9 @@ AC_DEFUN([BASIC_FIXUP_PATH_CYGWIN],
   path="[$]$1"
   new_path=`$CYGPATH -u "$path"`
 
+  # preserve original basename
+  original_basename=`$BASENAME "${new_path}"`
+
   # Cygwin tries to hide some aspects of the Windows file system, such that binaries are
   # named .exe but called without that suffix. Therefore, "foo" and "foo.exe" are considered
   # the same file, most of the time (as in "test -f"). But not when running cygpath -s, then
@@ -129,6 +132,14 @@ AC_DEFUN([BASIC_FIXUP_PATH_CYGWIN],
   # Call helper function which possibly converts this using DOS-style short mode.
   # If so, the updated path is stored in $new_path.
   BASIC_MAKE_WINDOWS_SPACE_SAFE_CYGWIN([$new_path])
+
+  # get basename after fixup
+  fixed_basename=`$BASENAME "${new_path}"`
+
+  # if basename changed replace it with original value 
+  if test "x$original_basename" != "x$fixed_basename"; then
+    new_path=`echo "${new_path}" | sed "s/${fixed_basename}$/${original_basename}/g"`
+  fi
 
   if test "x$path" != "x$new_path"; then
     $1="$new_path"
@@ -266,6 +277,14 @@ AC_DEFUN([BASIC_FIXUP_EXECUTABLE_MSYS],
     BASIC_WINDOWS_REWRITE_AS_UNIX_PATH(new_path)
 
     new_path=`$WHICH "$new_path" 2> /dev/null`
+    # bat and cmd files are not always considered executable in MSYS causing which
+    # to not find them
+    if test "x$new_path" = x \
+        && test "x`$ECHO \"$path\" | $GREP -i -e \"\\.bat$\" -e \"\\.cmd$\"`" != x \
+        && test "x`$LS \"$path\" 2>/dev/null`" != x; then
+      new_path="$path"
+      BASIC_WINDOWS_REWRITE_AS_UNIX_PATH(new_path)
+    fi
 
     if test "x$new_path" = x; then
       # It's still not found. Now this is an unrecoverable error.
@@ -321,8 +340,8 @@ AC_DEFUN([BASIC_CHECK_PATHS_WINDOWS],
       AC_MSG_ERROR([Something is wrong with your cygwin installation since I cannot find cygpath.exe in your path])
     fi
     AC_MSG_CHECKING([cygwin root directory as unix-style path])
-    # The cmd output ends with Windows line endings (CR/LF), the grep command will strip that away
-    cygwin_winpath_root=`cd / ; cmd /c cd | grep ".*"`
+    # The cmd output ends with Windows line endings (CR/LF)
+    cygwin_winpath_root=`cd / ; cmd /c cd | $TR -d '\r\n'`
     # Force cygpath to report the proper root by including a trailing space, and then stripping it off again.
     CYGWIN_ROOT_PATH=`$CYGPATH -u "$cygwin_winpath_root " | $CUT -f 1 -d " "`
     AC_MSG_RESULT([$CYGWIN_ROOT_PATH])

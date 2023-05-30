@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
  * Copyright 2007, 2008, 2009, 2010 Red Hat, Inc.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -55,8 +55,8 @@
 #include "utilities/vmError.hpp"
 
 address os::current_stack_pointer() {
-  address dummy = (address) &dummy;
-  return dummy;
+  // return the address of the current function
+  return (address)__builtin_frame_address(0);
 }
 
 frame os::get_sender_for_C_frame(frame* fr) {
@@ -360,7 +360,7 @@ static void current_stack_region(address *bottom, size_t *size) {
   // The initial thread has a growable stack, and the size reported
   // by pthread_attr_getstack is the maximum size it could possibly
   // be given what currently mapped.  This can be huge, so we cap it.
-  if (os::Linux::is_initial_thread()) {
+  if (os::is_primordial_thread()) {
     stack_bytes = stack_top - stack_bottom;
 
     if (stack_bytes > JavaThread::stack_size_at_create())
@@ -408,6 +408,7 @@ void os::print_register_info(outputStream *st, void *context) {
 
 extern "C" {
   int SpinPause() {
+    return 0; // Shouldn't matter.
   }
 
 
@@ -487,6 +488,7 @@ extern "C" {
     long long unsigned int oldval,
     long long unsigned int newval) {
     ShouldNotCallThis();
+    return 0; // silence compiler warnings
   }
 };
 #endif // !_LP64

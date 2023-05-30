@@ -55,9 +55,6 @@ class ObjectWaiter : public StackObj {
   void wait_reenter_end(ObjectMonitor *mon);
 };
 
-// forward declaration to avoid include tracing.hpp
-class EventJavaMonitorWait;
-
 // WARNING:
 //   This is a very sensitive and fragile class. DO NOT make any
 // change unless you are fully aware of the underlying semantics.
@@ -189,6 +186,8 @@ public:
   bool      check(TRAPS);       // true if the thread owns the monitor.
   void      check_slow(TRAPS);
   void      clear();
+  static void sanity_checks();  // public for -XX:+ExecuteInternalVMTests
+                                // in PRODUCT for -XX:SyncKnobs=Verbose=1
 #ifndef PRODUCT
   void      verify();
   void      print();
@@ -222,10 +221,6 @@ public:
   void      ctAsserts () ;
   void      ExitEpilog (Thread * Self, ObjectWaiter * Wakee) ;
   bool      ExitSuspendEquivalent (JavaThread * Self) ;
-  void      post_monitor_wait_event(EventJavaMonitorWait * event,
-                                                   jlong notifier_tid,
-                                                   jlong timeout,
-                                                   bool timedout);
 
  private:
   friend class ObjectSynchronizer;
@@ -234,8 +229,6 @@ public:
 
   // WARNING: this must be the very first word of ObjectMonitor
   // This means this class can't use any virtual member functions.
-  // TODO-FIXME: assert that offsetof(_header) is 0 or get rid of the
-  // implicit 0 offset in emitted code.
 
   volatile markOop   _header;       // displaced object header word - mark
   void*     volatile _object;       // backward object pointer - strong root

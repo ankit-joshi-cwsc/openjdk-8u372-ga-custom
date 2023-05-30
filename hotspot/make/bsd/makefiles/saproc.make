@@ -78,8 +78,10 @@ else
     ifneq ($(SDKPATH),)
       SA_SYSROOT_FLAGS += -isysroot "$(SDKPATH)" -iframework"$(SDKPATH)/System/Library/Frameworks"
     endif
-    # always needed, even if SDKPATH is empty
-    SA_SYSROOT_FLAGS += -F"$(SDKPATH)/System/Library/Frameworks/JavaVM.framework/Frameworks"
+    ifneq ($(wildcard "$(SDKPATH)/System/Library/Frameworks/JavaVM.framework/Frameworks"), "")
+      # always needed, even if SDKPATH is empty
+      SA_SYSROOT_FLAGS += -F"$(SDKPATH)/System/Library/Frameworks/JavaVM.framework/Frameworks"
+    endif
   else
     SASRCFILES = $(SASRCDIR)/StubDebuggerLocal.c
     SALIBS = 
@@ -114,7 +116,7 @@ else
 # bring in minimum version argument or we'll fail on OSX 10.10
 SA_LFLAGS = $(LFLAGS)
 endif
-SA_LFLAGS += $(LDFLAGS_HASH_STYLE)
+SA_LFLAGS += $(LDFLAGS_HASH_STYLE) $(EXTRA_LDFLAGS)
 
 BOOT_JAVA_INCLUDES = -I$(BOOT_JAVA_HOME)/include \
   -I$(BOOT_JAVA_HOME)/include/$(shell uname -s | tr "[:upper:]" "[:lower:]")

@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2011, 2013, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2011, 2018, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -69,8 +69,8 @@ ISA_DIR=$(OPENJDK_TARGET_CPU_ISADIR)
 # Yet another name for arch used for an extra subdir below the jvm lib.
 # Uses i386 and amd64, instead of x86 and x86_64.
 LIBARCH=$(OPENJDK_TARGET_CPU_LEGACY_LIB)
-# Old name for OPENJDK_TARGET_CPU, uses i586 and amd64, instead of x86 and x86_64.
-ARCH=$(OPENJDK_TARGET_CPU_LEGACY)
+# Set the cpu architecture
+ARCH=$(OPENJDK_TARGET_CPU_ARCH)
 # Legacy setting for building for a 64 bit machine.
 # If yes then this expands to _LP64:=1
 @LP64@
@@ -102,6 +102,8 @@ HOTSPOT_BUILD_JOBS:=$(JOBS)
 # Control wether Hotspot runs Queens test after building
 TEST_IN_BUILD=@TEST_IN_BUILD@
 
+USE_CLANG := @USE_CLANG@
+
 # For hotspot, override compiler/tools definition to not include FIXPATH prefix.
 # Hotspot has its own handling on the Windows path situation.
 CXX:=@CCACHE@ @HOTSPOT_CXX@
@@ -109,11 +111,14 @@ LD:=@HOTSPOT_LD@
 MT:=@HOTSPOT_MT@
 RC:=@HOTSPOT_RC@
 
-EXTRA_CFLAGS=@LEGACY_EXTRA_CFLAGS@
+EXTRA_CFLAGS=@LEGACY_EXTRA_CFLAGS@ $(NO_DELETE_NULL_POINTER_CHECKS_CFLAG) \
+				   $(NO_LIFETIME_DSE_CFLAG) $(CXXSTD_CXXFLAG)
 EXTRA_CXXFLAGS=@LEGACY_EXTRA_CXXFLAGS@
 EXTRA_LDFLAGS=@LEGACY_EXTRA_LDFLAGS@
+EXTRA_ASFLAGS=@LEGACY_EXTRA_ASFLAGS@
 
 USE_PRECOMPILED_HEADER=@USE_PRECOMPILED_HEADER@
+USE_FORMAT_OVERFLOW=@USE_FORMAT_OVERFLOW@
 
 # Universal binaries on macosx, mirror MACOSX_UNIVERSAL
 ALT_MACOSX_UNIVERSAL=@MACOSX_UNIVERSAL@

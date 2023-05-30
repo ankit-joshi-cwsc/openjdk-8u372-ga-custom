@@ -53,12 +53,6 @@ G1StringDedupThread* G1StringDedupThread::thread() {
   return _thread;
 }
 
-void G1StringDedupThread::print_on(outputStream* st) const {
-  st->print("\"%s\" ", name());
-  Thread::print_on(st);
-  st->cr();
-}
-
 void G1StringDedupThread::run() {
   G1StringDedupStat total_stat;
 
@@ -100,14 +94,14 @@ void G1StringDedupThread::run() {
         }
       }
 
-      G1StringDedupTable::trim_entry_cache();
-
       stat.mark_done();
 
       // Print statistics
       total_stat.add(stat);
       print(gclog_or_tty, stat, total_stat);
     }
+
+    G1StringDedupTable::clean_entry_cache();
   }
 
   terminate();

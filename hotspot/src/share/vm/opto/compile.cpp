@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,6 +32,7 @@
 #include "compiler/compileLog.hpp"
 #include "compiler/disassembler.hpp"
 #include "compiler/oopMap.hpp"
+#include "jfr/jfrEvents.hpp"
 #include "opto/addnode.hpp"
 #include "opto/block.hpp"
 #include "opto/c2compiler.hpp"
@@ -65,7 +66,6 @@
 #include "runtime/signature.hpp"
 #include "runtime/stubRoutines.hpp"
 #include "runtime/timer.hpp"
-#include "trace/tracing.hpp"
 #include "utilities/copy.hpp"
 #if defined AD_MD_HPP
 # include AD_MD_HPP
@@ -73,6 +73,8 @@
 # include "adfiles/ad_x86_32.hpp"
 #elif defined TARGET_ARCH_MODEL_x86_64
 # include "adfiles/ad_x86_64.hpp"
+#elif defined TARGET_ARCH_MODEL_aarch64
+# include "adfiles/ad_aarch64.hpp"
 #elif defined TARGET_ARCH_MODEL_sparc
 # include "adfiles/ad_sparc.hpp"
 #elif defined TARGET_ARCH_MODEL_zero
@@ -80,7 +82,6 @@
 #elif defined TARGET_ARCH_MODEL_ppc_64
 # include "adfiles/ad_ppc_64.hpp"
 #endif
-
 
 // -------------------- Compile::mach_constant_base_node -----------------------
 // Constant table base node singleton.
@@ -327,7 +328,7 @@ static inline bool not_a_node(const Node* n) {
 // Use breadth-first pass that records state in a Unique_Node_List,
 // recursive traversal is slower.
 void Compile::identify_useful_nodes(Unique_Node_List &useful) {
-  int estimated_worklist_size = unique();
+  int estimated_worklist_size = live_nodes();
   useful.map( estimated_worklist_size, NULL );  // preallocate space
 
   // Initialize worklist
@@ -410,6 +411,13 @@ void Compile::remove_useless_nodes(Unique_Node_List &useful) {
     Node* n = C->macro_node(i);
     if (!useful.member(n)) {
       remove_macro_node(n);
+    }
+  }
+  // Remove useless CastII nodes with range check dependency
+  for (int i = range_check_cast_count() - 1; i >= 0; i--) {
+    Node* cast = range_check_cast_node(i);
+    if (!useful.member(cast)) {
+      remove_range_check_cast(cast);
     }
   }
   // Remove useless expensive node
@@ -601,6 +609,10 @@ uint Compile::scratch_emit_size(const Node* n) {
     n->as_MachBranch()->label_set(&fakeL, 0);
   }
   n->emit(buf, this->regalloc());
+
+  // Emitting into the scratch buffer should not fail
+  assert (!failing(), err_msg_res("Must not have pending failure. Reason is: %s", failure_reason()));
+
   if (is_branch) // Restore label.
     n->as_MachBranch()->label_set(saveL, save_bnum);
 
@@ -779,12 +791,14 @@ Compile::Compile( ciEnv* ci_env, C2Compiler* compiler, ciMethod* target, int osr
     }
     if (failing())  return;
     if (cg == NULL) {
-      record_method_not_compilable_all_tiers("cannot parse method");
+      record_method_not_compilable("cannot parse method");
       return;
     }
     JVMState* jvms = build_start_state(start(), tf());
     if ((jvms = cg->generate(jvms)) == NULL) {
-      record_method_not_compilable("method parse failed");
+      if (!failure_reason_is(C2Compiler::retry_class_loading_during_parsing())) {
+        record_method_not_compilable("method parse failed");
+      }
       return;
     }
     GraphKit kit(jvms);
@@ -1148,7 +1162,11 @@ void Compile::Init(int aliaslevel) {
   _macro_nodes = new(comp_arena()) GrowableArray<Node*>(comp_arena(), 8,  0, NULL);
   _predicate_opaqs = new(comp_arena()) GrowableArray<Node*>(comp_arena(), 8,  0, NULL);
   _expensive_nodes = new(comp_arena()) GrowableArray<Node*>(comp_arena(), 8,  0, NULL);
+  _range_check_casts = new(comp_arena()) GrowableArray<Node*>(comp_arena(), 8,  0, NULL);
   register_library_intrinsics();
+#ifdef ASSERT
+  _type_verify_symmetry = true;
+#endif
 }
 
 //---------------------------init_start----------------------------------------
@@ -1581,6 +1599,17 @@ void Compile::AliasType::Init(int i, const TypePtr* at) {
   }
 }
 
+BasicType Compile::AliasType::basic_type() const {
+  if (element() != NULL) {
+    const Type* element = adr_type()->is_aryptr()->elem();
+    return element->isa_narrowoop() ? T_OBJECT : element->array_element_basic_type();
+  } if (field() != NULL) {
+    return field()->layout_type();
+  } else {
+    return T_ILLEGAL; // unknown
+  }
+}
+
 //---------------------------------print_on------------------------------------
 #ifndef PRODUCT
 void Compile::AliasType::print_on(outputStream* st) {
@@ -1655,16 +1684,23 @@ Compile::AliasType* Compile::find_alias_type(const TypePtr* adr_type, bool no_cr
   const TypePtr* flat = flatten_alias_type(adr_type);
 
 #ifdef ASSERT
-  assert(flat == flatten_alias_type(flat), "idempotent");
-  assert(flat != TypePtr::BOTTOM,     "cannot alias-analyze an untyped ptr");
-  if (flat->isa_oopptr() && !flat->isa_klassptr()) {
-    const TypeOopPtr* foop = flat->is_oopptr();
-    // Scalarizable allocations have exact klass always.
-    bool exact = !foop->klass_is_exact() || foop->is_known_instance();
-    const TypePtr* xoop = foop->cast_to_exactness(exact)->is_ptr();
-    assert(foop == flatten_alias_type(xoop), "exactness must not affect alias type");
+  {
+    ResourceMark rm;
+    assert(flat == flatten_alias_type(flat),
+           err_msg("not idempotent: adr_type = %s; flat = %s => %s", Type::str(adr_type),
+                   Type::str(flat), Type::str(flatten_alias_type(flat))));
+    assert(flat != TypePtr::BOTTOM,
+           err_msg("cannot alias-analyze an untyped ptr: adr_type = %s", Type::str(adr_type)));
+    if (flat->isa_oopptr() && !flat->isa_klassptr()) {
+      const TypeOopPtr* foop = flat->is_oopptr();
+      // Scalarizable allocations have exact klass always.
+      bool exact = !foop->klass_is_exact() || foop->is_known_instance();
+      const TypePtr* xoop = foop->cast_to_exactness(exact)->is_ptr();
+      assert(foop == flatten_alias_type(xoop),
+             err_msg("exactness must not affect alias type: foop = %s; xoop = %s",
+                     Type::str(foop), Type::str(xoop)));
+    }
   }
-  assert(flat == flatten_alias_type(flat), "exact bit doesn't matter");
 #endif
 
   int idx = AliasIdxTop;
@@ -1876,6 +1912,22 @@ void Compile::cleanup_loop_predicates(PhaseIterGVN &igvn) {
   assert(predicate_count()==0, "should be clean!");
 }
 
+void Compile::add_range_check_cast(Node* n) {
+  assert(n->isa_CastII()->has_range_check(), "CastII should have range check dependency");
+  assert(!_range_check_casts->contains(n), "duplicate entry in range check casts");
+  _range_check_casts->append(n);
+}
+
+// Remove all range check dependent CastIINodes.
+void Compile::remove_range_check_casts(PhaseIterGVN &igvn) {
+  for (int i = range_check_cast_count(); i > 0; i--) {
+    Node* cast = range_check_cast_node(i-1);
+    assert(cast->isa_CastII()->has_range_check(), "CastII should have range check dependency");
+    igvn.replace_node(cast, cast->in(1));
+  }
+  assert(range_check_cast_count() == 0, "should be empty");
+}
+
 // StringOpts and late inlining of string methods
 void Compile::inline_string_calls(bool parse_time) {
   {
@@ -2028,6 +2080,26 @@ void Compile::inline_incrementally(PhaseIterGVN& igvn) {
 }
 
 
+// Remove edges from "root" to each SafePoint at a backward branch.
+// They were inserted during parsing (see add_safepoint()) to make
+// infinite loops without calls or exceptions visible to root, i.e.,
+// useful.
+void Compile::remove_root_to_sfpts_edges(PhaseIterGVN& igvn) {
+  Node *r = root();
+  if (r != NULL) {
+    for (uint i = r->req(); i < r->len(); ++i) {
+      Node *n = r->in(i);
+      if (n != NULL && n->is_SafePoint()) {
+        r->rm_prec(i);
+        if (n->outcnt() == 0) {
+          igvn.remove_dead_node(n);
+        }
+        --i;
+      }
+    }
+  }
+}
+
 //------------------------------Optimize---------------------------------------
 // Given a graph, optimize it.
 void Compile::Optimize() {
@@ -2083,6 +2155,10 @@ void Compile::Optimize() {
     if (failing())  return;
   }
 
+  // Now that all inlining is over, cut edge from root to loop
+  // safepoints
+  remove_root_to_sfpts_edges(igvn);
+
   // Remove the speculative part of types and clean up the graph from
   // the extra CastPP nodes whose only purpose is to carry them. Do
   // that early so that optimizations are not disrupted by the extra
@@ -2092,6 +2168,20 @@ void Compile::Optimize() {
   // No more new expensive nodes will be added to the list from here
   // so keep only the actual candidates for optimizations.
   cleanup_expensive_nodes(igvn);
+
+  if (!failing() && RenumberLiveNodes && live_nodes() + NodeLimitFudgeFactor < unique()) {
+    NOT_PRODUCT(Compile::TracePhase t2("", &_t_renumberLive, TimeCompiler);)
+    initial_gvn()->replace_with(&igvn);
+    for_igvn()->clear();
+    Unique_Node_List new_worklist(C->comp_arena());
+    {
+      ResourceMark rm;
+      PhaseRenumberLive prl = PhaseRenumberLive(initial_gvn(), for_igvn(), &new_worklist);
+    }
+    set_for_igvn(&new_worklist);
+    igvn = PhaseIterGVN(initial_gvn());
+    igvn.optimize();
+  }
 
   // Perform escape analysis
   if (_do_escape_analysis && ConnectionGraph::has_candidates(this)) {
@@ -2202,6 +2292,12 @@ void Compile::Optimize() {
     // at least to this point, even if no loop optimizations were done.
     NOT_PRODUCT( TracePhase t2("idealLoopVerify", &_t_idealLoopVerify, TimeCompiler); )
     PhaseIdealLoop::verify(igvn);
+  }
+
+  if (range_check_cast_count() > 0) {
+    // No more loop optimizations. Remove all range check dependent CastIINodes.
+    C->remove_range_check_casts(igvn);
+    igvn.optimize();
   }
 
   {
@@ -2331,8 +2427,8 @@ void Compile::Code_Gen() {
   print_method(PHASE_FINAL_CODE);
 
   // He's dead, Jim.
-  _cfg     = (PhaseCFG*)0xdeadbeef;
-  _regalloc = (PhaseChaitin*)0xdeadbeef;
+  _cfg     = (PhaseCFG*)((intptr_t)0xdeadbeef);
+  _regalloc = (PhaseChaitin*)((intptr_t)0xdeadbeef);
 }
 
 
@@ -2581,6 +2677,17 @@ void Compile::final_graph_reshaping_impl( Node *n, Final_Reshape_Counts &frc) {
             n->is_Load() && (n->as_Load()->bottom_type()->isa_oopptr() ||
                              LoadNode::is_immutable_value(n->in(MemNode::Address))),
             "raw memory operations should have control edge");
+  }
+  if (n->is_MemBar()) {
+    MemBarNode* mb = n->as_MemBar();
+    if (mb->trailing_store() || mb->trailing_load_store()) {
+      assert(mb->leading_membar()->trailing_membar() == mb, "bad membar pair");
+      Node* mem = mb->in(MemBarNode::Precedent);
+      assert((mb->trailing_store() && mem->is_Store() && mem->as_Store()->is_release()) ||
+             (mb->trailing_load_store() && mem->is_LoadStore()), "missing mem op");
+    } else if (mb->leading()) {
+      assert(mb->trailing_membar()->leading_membar() == mb, "bad membar pair");
+    }
   }
 #endif
   // Count FPU ops and common calls, implements item (3)
@@ -2945,8 +3052,10 @@ void Compile::final_graph_reshaping_impl( Node *n, Final_Reshape_Counts &frc) {
             break;
           }
         }
-        assert(proj != NULL, "must be found");
-        p->subsume_by(proj, this);
+        assert(proj != NULL || p->_con == TypeFunc::I_O, "io may be dropped at an infinite loop");
+        if (proj != NULL) {
+          p->subsume_by(proj, this);
+        }
       }
     }
     break;
@@ -2971,6 +3080,16 @@ void Compile::final_graph_reshaping_impl( Node *n, Final_Reshape_Counts &frc) {
     }
     break;
 
+#endif
+
+#ifdef ASSERT
+  case Op_CastII:
+    // Verify that all range check dependent CastII nodes were removed.
+    if (n->isa_CastII()->has_range_check()) {
+      n->dump(3);
+      assert(false, "Range check dependent CastII node was not removed");
+    }
+    break;
 #endif
 
   case Op_ModI:
@@ -3212,8 +3331,8 @@ bool Compile::final_graph_reshaping() {
   Final_Reshape_Counts frc;
 
   // Visit everybody reachable!
-  // Allocate stack of size C->unique()/2 to avoid frequent realloc
-  Node_Stack nstack(unique() >> 1);
+  // Allocate stack of size C->live_nodes()/2 to avoid frequent realloc
+  Node_Stack nstack(live_nodes() >> 1);
   final_graph_reshaping_walk(nstack, root(), frc);
 
   // Check for unreachable (from below) code (i.e., infinite loops).
@@ -3409,7 +3528,7 @@ void Compile::verify_graph_edges(bool no_dead_code) {
     _root->verify_edges(visited);
     if (no_dead_code) {
       // Now make sure that no visited node is used by an unvisited node.
-      bool dead_nodes = 0;
+      bool dead_nodes = false;
       Unique_Node_List checked(area);
       while (visited.size() > 0) {
         Node* n = visited.pop();
@@ -3420,14 +3539,16 @@ void Compile::verify_graph_edges(bool no_dead_code) {
           if (visited.member(use))  continue;  // already in the graph
           if (use->is_Con())        continue;  // a dead ConNode is OK
           // At this point, we have found a dead node which is DU-reachable.
-          if (dead_nodes++ == 0)
+          if (!dead_nodes) {
             tty->print_cr("*** Dead nodes reachable via DU edges:");
+            dead_nodes = true;
+          }
           use->dump(2);
           tty->print_cr("---");
           checked.push(use);  // No repeats; pretend it is now checked.
         }
       }
-      assert(dead_nodes == 0, "using nodes must be reachable from root");
+      assert(!dead_nodes, "using nodes must be reachable from root");
     }
   }
 }
@@ -3513,13 +3634,6 @@ void Compile::record_failure(const char* reason) {
   if (_failure_reason == NULL) {
     // Record the first failure reason.
     _failure_reason = reason;
-  }
-
-  EventCompilerFailure event;
-  if (event.should_commit()) {
-    event.set_compileID(Compile::compile_id());
-    event.set_failure(reason);
-    event.commit();
   }
 
   if (!C->failure_reason_is(C2Compiler::retry_no_subsuming_loads())) {
@@ -3658,7 +3772,7 @@ void Compile::ConstantTable::emit(CodeBuffer& cb) {
   MacroAssembler _masm(&cb);
   for (int i = 0; i < _constants.length(); i++) {
     Constant con = _constants.at(i);
-    address constant_addr;
+    address constant_addr = NULL;
     switch (con.type()) {
     case T_LONG:   constant_addr = _masm.long_constant(  con.get_jlong()  ); break;
     case T_FLOAT:  constant_addr = _masm.float_constant( con.get_jfloat() ); break;
@@ -4008,6 +4122,24 @@ void Compile::remove_speculative_types(PhaseIterGVN &igvn) {
     igvn.check_no_speculative_types();
 #endif
   }
+}
+
+// Convert integer value to a narrowed long type dependent on ctrl (for example, a range check)
+Node* Compile::constrained_convI2L(PhaseGVN* phase, Node* value, const TypeInt* itype, Node* ctrl) {
+  if (ctrl != NULL) {
+    // Express control dependency by a CastII node with a narrow type.
+    value = new (phase->C) CastIINode(value, itype, false, true /* range check dependency */);
+    // Make the CastII node dependent on the control input to prevent the narrowed ConvI2L
+    // node from floating above the range check during loop optimizations. Otherwise, the
+    // ConvI2L node may be eliminated independently of the range check, causing the data path
+    // to become TOP while the control path is still there (although it's unreachable).
+    value->set_req(0, ctrl);
+    // Save CastII node to remove it after loop optimizations.
+    phase->C->add_range_check_cast(value);
+    value = phase->transform(value);
+  }
+  const TypeLong* ltype = TypeLong::make(itype->_lo, itype->_hi, itype->_widen);
+  return phase->transform(new (phase->C) ConvI2LNode(value, ltype));
 }
 
 // Auxiliary method to support randomized stressing/fuzzing.

@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 1999, 2014, Oracle and/or its affiliates. All rights reserved.
+* Copyright (c) 1999, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -166,6 +166,16 @@ char* os::reserve_memory_aligned(size_t size, size_t alignment) {
   return aligned_base;
 }
 
+int os::vsnprintf(char* buf, size_t len, const char* fmt, va_list args) {
+  int result = ::vsnprintf(buf, len, fmt, args);
+  // If an encoding error occurred (result < 0) then it's not clear
+  // whether the buffer is NUL terminated, so ensure it is.
+  if ((result < 0) && (len > 0)) {
+    buf[len - 1] = '\0';
+  }
+  return result;
+}
+
 void os::Posix::print_load_average(outputStream* st) {
   st->print("load average:");
   double loadavg[3];
@@ -290,6 +300,21 @@ const char* os::get_current_directory(char *buf, size_t buflen) {
 
 FILE* os::open(int fd, const char* mode) {
   return ::fdopen(fd, mode);
+}
+
+DIR* os::opendir(const char* dirname) {
+  assert(dirname != NULL, "just checking");
+  return ::opendir(dirname);
+}
+
+struct dirent* os::readdir(DIR* dirp) {
+  assert(dirp != NULL, "just checking");
+  return ::readdir(dirp);
+}
+
+int os::closedir(DIR *dirp) {
+  assert(dirp != NULL, "just checking");
+  return ::closedir(dirp);
 }
 
 // Builds a platform dependent Agent_OnLoad_<lib_name> function name
@@ -594,7 +619,11 @@ const char* os::Posix::describe_sa_flags(int flags, char* buffer, size_t size) {
   strncpy(buffer, "none", size);
 
   const struct {
-    int i;
+    // NB: i is an unsigned int here because SA_RESETHAND is on some
+    // systems 0x80000000, which is implicitly unsigned.  Assignining
+    // it to an int field would be an overflow in unsigned-to-signed
+    // conversion.
+    unsigned int i;
     const char* s;
   } flaginfo [] = {
     { SA_NOCLDSTOP, "SA_NOCLDSTOP" },
@@ -678,6 +707,21 @@ static bool get_signal_code_description(const siginfo_t* si, enum_sigcode_desc_t
 #if defined(IA64) && !defined(AIX)
     { SIGSEGV, SEGV_PSTKOVF, "SEGV_PSTKOVF", "Paragraph stack overflow" },
 #endif
+#if defined(__sparc) && defined(SOLARIS)
+// define Solaris Sparc M7 ADI SEGV signals
+#if !defined(SEGV_ACCADI)
+#define SEGV_ACCADI 3
+#endif
+    { SIGSEGV, SEGV_ACCADI,  "SEGV_ACCADI",  "ADI not enabled for mapped object." },
+#if !defined(SEGV_ACCDERR)
+#define SEGV_ACCDERR 4
+#endif
+    { SIGSEGV, SEGV_ACCDERR, "SEGV_ACCDERR", "ADI disrupting exception." },
+#if !defined(SEGV_ACCPERR)
+#define SEGV_ACCPERR 5
+#endif
+    { SIGSEGV, SEGV_ACCPERR, "SEGV_ACCPERR", "ADI precise exception." },
+#endif // defined(__sparc) && defined(SOLARIS)
     { SIGBUS,  BUS_ADRALN,   "BUS_ADRALN",   "Invalid address alignment." },
     { SIGBUS,  BUS_ADRERR,   "BUS_ADRERR",   "Nonexistent physical address." },
     { SIGBUS,  BUS_OBJERR,   "BUS_OBJERR",   "Object-specific hardware error." },
@@ -814,8 +858,11 @@ void os::Posix::print_siginfo_brief(outputStream* os, const siginfo_t* si) {
   }
 }
 
-os::WatcherThreadCrashProtection::WatcherThreadCrashProtection() {
-  assert(Thread::current()->is_Watcher_thread(), "Must be WatcherThread");
+Thread* os::ThreadCrashProtection::_protected_thread = NULL;
+os::ThreadCrashProtection* os::ThreadCrashProtection::_crash_protection = NULL;
+volatile intptr_t os::ThreadCrashProtection::_crash_mux = 0;
+
+os::ThreadCrashProtection::ThreadCrashProtection() {
 }
 
 /*
@@ -824,12 +871,13 @@ os::WatcherThreadCrashProtection::WatcherThreadCrashProtection() {
  * method and returns false. If none of the signals are raised, returns true.
  * The callback is supposed to provide the method that should be protected.
  */
-bool os::WatcherThreadCrashProtection::call(os::CrashProtectionCallback& cb) {
+bool os::ThreadCrashProtection::call(os::CrashProtectionCallback& cb) {
   sigset_t saved_sig_mask;
 
-  assert(Thread::current()->is_Watcher_thread(), "Only for WatcherThread");
-  assert(!WatcherThread::watcher_thread()->has_crash_protection(),
-      "crash_protection already set?");
+  Thread::muxAcquire(&_crash_mux, "CrashProtection");
+
+  _protected_thread = ThreadLocalStorage::thread();
+  assert(_protected_thread != NULL, "Cannot crash protect a NULL thread");
 
   // we cannot rely on sigsetjmp/siglongjmp to save/restore the signal mask
   // since on at least some systems (OS X) siglongjmp will restore the mask
@@ -838,34 +886,36 @@ bool os::WatcherThreadCrashProtection::call(os::CrashProtectionCallback& cb) {
   if (sigsetjmp(_jmpbuf, 0) == 0) {
     // make sure we can see in the signal handler that we have crash protection
     // installed
-    WatcherThread::watcher_thread()->set_crash_protection(this);
+    _crash_protection = this;
     cb.call();
     // and clear the crash protection
-    WatcherThread::watcher_thread()->set_crash_protection(NULL);
+    _crash_protection = NULL;
+    _protected_thread = NULL;
+    Thread::muxRelease(&_crash_mux);
     return true;
   }
   // this happens when we siglongjmp() back
   pthread_sigmask(SIG_SETMASK, &saved_sig_mask, NULL);
-  WatcherThread::watcher_thread()->set_crash_protection(NULL);
+  _crash_protection = NULL;
+  _protected_thread = NULL;
+  Thread::muxRelease(&_crash_mux);
   return false;
 }
 
-void os::WatcherThreadCrashProtection::restore() {
-  assert(WatcherThread::watcher_thread()->has_crash_protection(),
-      "must have crash protection");
-
+void os::ThreadCrashProtection::restore() {
+  assert(_crash_protection != NULL, "must have crash protection");
   siglongjmp(_jmpbuf, 1);
 }
 
-void os::WatcherThreadCrashProtection::check_crash_protection(int sig,
+void os::ThreadCrashProtection::check_crash_protection(int sig,
     Thread* thread) {
 
   if (thread != NULL &&
-      thread->is_Watcher_thread() &&
-      WatcherThread::watcher_thread()->has_crash_protection()) {
+      thread == _protected_thread &&
+      _crash_protection != NULL) {
 
     if (sig == SIGSEGV || sig == SIGBUS) {
-      WatcherThread::watcher_thread()->crash_protection()->restore();
+      _crash_protection->restore();
     }
   }
 }

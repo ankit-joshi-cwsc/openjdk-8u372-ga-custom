@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -30,6 +30,7 @@
 #include "compiler/compileLog.hpp"
 #include "compiler/compilerOracle.hpp"
 #include "interpreter/linkResolver.hpp"
+#include "jfr/jfrEvents.hpp"
 #include "memory/allocation.inline.hpp"
 #include "oops/methodData.hpp"
 #include "oops/method.hpp"
@@ -43,7 +44,6 @@
 #include "runtime/os.hpp"
 #include "runtime/sharedRuntime.hpp"
 #include "runtime/sweeper.hpp"
-#include "trace/tracing.hpp"
 #include "utilities/dtrace.hpp"
 #include "utilities/events.hpp"
 #ifdef COMPILER1
@@ -203,7 +203,7 @@ class CompilationLog : public StringEventLog {
   }
 
   void log_nmethod(JavaThread* thread, nmethod* nm) {
-    log(thread, "nmethod %d%s " INTPTR_FORMAT " code ["INTPTR_FORMAT ", " INTPTR_FORMAT "]",
+    log(thread, "nmethod %d%s " INTPTR_FORMAT " code [" INTPTR_FORMAT ", " INTPTR_FORMAT "]",
         nm->compile_id(), nm->is_osr_method() ? "%" : "",
         p2i(nm), p2i(nm->code_begin()), p2i(nm->code_end()));
   }
@@ -751,7 +751,9 @@ CompileTask* CompileQueue::get() {
     No_Safepoint_Verifier nsv;
     task = CompilationPolicy::policy()->select_task(this);
   }
-  remove(task);
+  if (task != NULL) {
+    remove(task);
+  }
   purge_stale_tasks(); // may temporarily release MCQ lock
   return task;
 }
@@ -1851,6 +1853,10 @@ void CompileBroker::init_compiler_thread_log() {
           tty->print_cr("Opening compilation log %s", file_name);
         }
         CompileLog* log = new(ResourceObj::C_HEAP, mtCompiler) CompileLog(file_name, fp, thread_id);
+        if (log == NULL) {
+          fclose(fp);
+          return;
+        }
         thread->init_log(log);
 
         if (xtty != NULL) {
@@ -1905,6 +1911,19 @@ static void codecache_print(bool detailed)
   }
   ttyLocker ttyl;
   tty->print("%s", s.as_string());
+}
+
+static void post_compilation_event(EventCompilation* event, CompileTask* task) {
+  assert(event != NULL, "invariant");
+  assert(event->should_commit(), "invariant");
+  event->set_method(task->method());
+  event->set_compileId(task->compile_id());
+  event->set_compileLevel(task->comp_level());
+  event->set_succeded(task->is_success());
+  event->set_isOsr(task->osr_bci() != CompileBroker::standard_entry_bci);
+  event->set_codeSize((task->code() == NULL) ? 0 : task->code()->total_size());
+  event->set_inlinedBytes(task->num_inlined_bytecodes());
+  event->commit();
 }
 
 // ------------------------------------------------------------------
@@ -2004,8 +2023,9 @@ void CompileBroker::invoke_compiler_on_method(CompileTask* task) {
     compilable = ci_env.compilable();
 
     if (ci_env.failing()) {
-      task->set_failure_reason(ci_env.failure_reason());
+      const char* failure_reason = ci_env.failure_reason();
       const char* retry_message = ci_env.retry_message();
+      task->set_failure_reason(failure_reason);
       if (_compilation_log != NULL) {
         _compilation_log->log_failure(thread, task, ci_env.failure_reason(), retry_message);
       }
@@ -2014,6 +2034,22 @@ void CompileBroker::invoke_compiler_on_method(CompileTask* task) {
             err_msg_res("COMPILE SKIPPED: %s (%s)", ci_env.failure_reason(), retry_message) :
             err_msg_res("COMPILE SKIPPED: %s",      ci_env.failure_reason());
         task->print_compilation(tty, msg);
+      }
+
+      EventCompilationFailure event;
+      if (event.should_commit()) {
+        event.set_compileId(compile_id);
+        event.set_failureMessage(failure_reason);
+        event.commit();
+      }
+
+      if (AbortVMOnCompilationFailure) {
+        if (compilable == ciEnv::MethodCompilable_not_at_tier) {
+          fatal(err_msg("Not compilable at tier %d: %s", task_level, failure_reason));
+        }
+        if (compilable == ciEnv::MethodCompilable_never) {
+          fatal(err_msg("Never compilable: %s", failure_reason));
+        }
       }
     } else {
       task->mark_success();
@@ -2028,14 +2064,7 @@ void CompileBroker::invoke_compiler_on_method(CompileTask* task) {
     // simulate crash during compilation
     assert(task->compile_id() != CICrashAt, "just as planned");
     if (event.should_commit()) {
-      event.set_method(target->get_Method());
-      event.set_compileID(compile_id);
-      event.set_compileLevel(task->comp_level());
-      event.set_succeded(task->is_success());
-      event.set_isOsr(is_osr);
-      event.set_codeSize((task->code() == NULL) ? 0 : task->code()->total_size());
-      event.set_inlinedBytes(task->num_inlined_bytecodes());
-      event.commit();
+      post_compilation_event(&event, task);
     }
   }
   pop_jni_handle_block();

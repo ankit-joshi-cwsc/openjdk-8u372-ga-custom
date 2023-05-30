@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -37,7 +37,7 @@
 #include "services/diagnosticCommand.hpp"
 #include "services/heapDumper.hpp"
 
-volatile bool AttachListener::_initialized;
+volatile jlong AttachListener::_state = AL_NOT_INITIALIZED;
 
 // Implementation of "properties" command.
 //
@@ -271,13 +271,17 @@ static jint set_intx_flag(const char* name, AttachOperation* op, outputStream* o
 // set a uintx global flag using value from AttachOperation
 static jint set_uintx_flag(const char* name, AttachOperation* op, outputStream* out) {
   uintx value;
-  const char* arg1;
-  if ((arg1 = op->arg(1)) != NULL) {
-    int n = sscanf(arg1, UINTX_FORMAT, &value);
-    if (n != 1) {
-      out->print_cr("flag value must be an unsigned integer");
-      return JNI_ERR;
-    }
+
+  const char* arg1 = op->arg(1);
+  if (arg1 == NULL) {
+    out->print_cr("flag value must be specified");
+    return JNI_ERR;
+  }
+
+  int n = sscanf(arg1, UINTX_FORMAT, &value);
+  if (n != 1) {
+    out->print_cr("flag value must be an unsigned integer");
+    return JNI_ERR;
   }
 
   if (strncmp(name, "MaxHeapFreeRatio", 17) == 0) {
@@ -414,6 +418,7 @@ static void attach_listener_thread_entry(JavaThread* thread, TRAPS) {
   thread->record_stack_base_and_size();
 
   if (AttachListener::pd_init() != 0) {
+    AttachListener::set_state(AL_NOT_INITIALIZED);
     return;
   }
   AttachListener::set_initialized();
@@ -421,6 +426,7 @@ static void attach_listener_thread_entry(JavaThread* thread, TRAPS) {
   for (;;) {
     AttachOperation* op = AttachListener::dequeue();
     if (op == NULL) {
+      AttachListener::set_state(AL_NOT_INITIALIZED);
       return;   // dequeue failed or shutdown
     }
 
@@ -460,17 +466,44 @@ static void attach_listener_thread_entry(JavaThread* thread, TRAPS) {
     // operation complete - send result and output to client
     op->complete(res, &st);
   }
+
+  ShouldNotReachHere();
+}
+
+bool AttachListener::has_init_error(TRAPS) {
+  if (HAS_PENDING_EXCEPTION) {
+    tty->print_cr("Exception in VM (AttachListener::init) : ");
+    java_lang_Throwable::print(PENDING_EXCEPTION, tty);
+    tty->cr();
+
+    CLEAR_PENDING_EXCEPTION;
+
+    return true;
+  } else {
+    return false;
+  }
 }
 
 // Starts the Attach Listener thread
 void AttachListener::init() {
   EXCEPTION_MARK;
-  Klass* k = SystemDictionary::resolve_or_fail(vmSymbols::java_lang_Thread(), true, CHECK);
+  Klass* k = SystemDictionary::resolve_or_fail(vmSymbols::java_lang_Thread(), true, THREAD);
+  if (has_init_error(THREAD)) {
+    return;
+  }
+
   instanceKlassHandle klass (THREAD, k);
-  instanceHandle thread_oop = klass->allocate_instance_handle(CHECK);
+  instanceHandle thread_oop = klass->allocate_instance_handle(THREAD);
+  if (has_init_error(THREAD)) {
+    return;
+  }
 
   const char thread_name[] = "Attach Listener";
-  Handle string = java_lang_String::create_from_str(thread_name, CHECK);
+  Handle string = java_lang_String::create_from_str(thread_name, THREAD);
+  if (has_init_error(THREAD)) {
+    set_state(AL_NOT_INITIALIZED);
+    return;
+  }
 
   // Initialize thread_oop to put it into the system threadGroup
   Handle thread_group (THREAD, Universe::system_thread_group());
@@ -483,13 +516,8 @@ void AttachListener::init() {
                        string,
                        THREAD);
 
-  if (HAS_PENDING_EXCEPTION) {
-    tty->print_cr("Exception in VM (AttachListener::init) : ");
-    java_lang_Throwable::print(PENDING_EXCEPTION, tty);
-    tty->cr();
-
-    CLEAR_PENDING_EXCEPTION;
-
+  if (has_init_error(THREAD)) {
+    set_state(AL_NOT_INITIALIZED);
     return;
   }
 
@@ -501,14 +529,8 @@ void AttachListener::init() {
                         vmSymbols::thread_void_signature(),
                         thread_oop,             // ARG 1
                         THREAD);
-
-  if (HAS_PENDING_EXCEPTION) {
-    tty->print_cr("Exception in VM (AttachListener::init) : ");
-    java_lang_Throwable::print(PENDING_EXCEPTION, tty);
-    tty->cr();
-
-    CLEAR_PENDING_EXCEPTION;
-
+  if (has_init_error(THREAD)) {
+    set_state(AL_NOT_INITIALIZED);
     return;
   }
 

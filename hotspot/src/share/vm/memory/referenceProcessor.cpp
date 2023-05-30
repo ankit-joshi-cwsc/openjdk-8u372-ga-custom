@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2001, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -34,6 +34,9 @@
 #include "oops/oop.inline.hpp"
 #include "runtime/java.hpp"
 #include "runtime/jniHandles.hpp"
+#if INCLUDE_JFR
+#include "jfr/jfr.hpp"
+#endif // INCLUDE_JFR
 
 PRAGMA_FORMAT_MUTE_WARNINGS_FOR_GCC
 
@@ -118,7 +121,6 @@ ReferenceProcessor::ReferenceProcessor(MemRegion span,
   _discoveredWeakRefs    = &_discoveredSoftRefs[_max_num_q];
   _discoveredFinalRefs   = &_discoveredWeakRefs[_max_num_q];
   _discoveredPhantomRefs = &_discoveredFinalRefs[_max_num_q];
-  _discoveredCleanerRefs = &_discoveredPhantomRefs[_max_num_q];
 
   // Initialize all entries to NULL
   for (uint i = 0; i < _max_num_q * number_of_subclasses_of_ref(); i++) {
@@ -245,14 +247,7 @@ ReferenceProcessorStats ReferenceProcessor::process_discovered_references(
   {
     GCTraceTime tt("PhantomReference", trace_time, false, gc_timer, gc_id);
     phantom_count =
-      process_discovered_reflist(_discoveredPhantomRefs, NULL, false,
-                                 is_alive, keep_alive, complete_gc, task_executor);
-
-    // Process cleaners, but include them in phantom statistics.  We expect
-    // Cleaner references to be temporary, and don't want to deal with
-    // possible incompatibilities arising from making it more visible.
-    phantom_count +=
-      process_discovered_reflist(_discoveredCleanerRefs, NULL, true,
+      process_discovered_reflist(_discoveredPhantomRefs, NULL, true,
                                  is_alive, keep_alive, complete_gc, task_executor);
   }
 
@@ -275,11 +270,6 @@ ReferenceProcessorStats ReferenceProcessor::process_discovered_references(
 #ifndef PRODUCT
 // Calculate the number of jni handles.
 uint ReferenceProcessor::count_jni_refs() {
-  class AlwaysAliveClosure: public BoolObjectClosure {
-  public:
-    virtual bool do_object_b(oop obj) { return true; }
-  };
-
   class CountHandleClosure: public OopClosure {
   private:
     int _count;
@@ -290,8 +280,7 @@ uint ReferenceProcessor::count_jni_refs() {
     int count() { return _count; }
   };
   CountHandleClosure global_handle_count;
-  AlwaysAliveClosure always_alive;
-  JNIHandles::weak_oops_do(&always_alive, &global_handle_count);
+  JNIHandles::weak_oops_do(&global_handle_count);
   return global_handle_count.count();
 }
 #endif
@@ -306,6 +295,7 @@ void ReferenceProcessor::process_phaseJNI(BoolObjectClosure* is_alive,
   }
 #endif
   JNIHandles::weak_oops_do(is_alive, keep_alive);
+  JFR_ONLY(Jfr::weak_oops_do(is_alive, keep_alive));
   complete_gc->do_void();
 }
 
@@ -891,7 +881,6 @@ void ReferenceProcessor::balance_all_queues() {
   balance_queues(_discoveredWeakRefs);
   balance_queues(_discoveredFinalRefs);
   balance_queues(_discoveredPhantomRefs);
-  balance_queues(_discoveredCleanerRefs);
 }
 
 size_t
@@ -1050,9 +1039,6 @@ inline DiscoveredList* ReferenceProcessor::get_discovered_list(ReferenceType rt)
       break;
     case REF_PHANTOM:
       list = &_discoveredPhantomRefs[id];
-      break;
-    case REF_CLEANER:
-      list = &_discoveredCleanerRefs[id];
       break;
     case REF_NONE:
       // we should not reach here if we are an InstanceRefKlass
@@ -1319,17 +1305,6 @@ void ReferenceProcessor::preclean_discovered_references(
       preclean_discovered_reflist(_discoveredPhantomRefs[i], is_alive,
                                   keep_alive, complete_gc, yield);
     }
-
-    // Cleaner references.  Included in timing for phantom references.  We
-    // expect Cleaner references to be temporary, and don't want to deal with
-    // possible incompatibilities arising from making it more visible.
-    for (uint i = 0; i < _max_num_q; i++) {
-      if (yield->should_return()) {
-        return;
-      }
-      preclean_discovered_reflist(_discoveredCleanerRefs[i], is_alive,
-                                  keep_alive, complete_gc, yield);
-    }
   }
 }
 
@@ -1398,7 +1373,6 @@ const char* ReferenceProcessor::list_name(uint i) {
      case 1: return "WeakRef";
      case 2: return "FinalRef";
      case 3: return "PhantomRef";
-     case 4: return "CleanerRef";
    }
    ShouldNotReachHere();
    return NULL;

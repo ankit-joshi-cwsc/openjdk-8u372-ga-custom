@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -275,7 +275,7 @@ void ClassFileParser::parse_constant_pool_entries(int length, TRAPS) {
             char* str = java_lang_String::as_utf8_string(patch());
             // (could use java_lang_String::as_symbol instead, but might as well batch them)
             utf8_buffer = (u1*) str;
-            utf8_length = (int) strlen(str);
+            utf8_length = (u2) strlen(str);
           }
 
           unsigned int hash;
@@ -537,6 +537,9 @@ constantPoolHandle ClassFileParser::parse_constant_pool(TRAPS) {
           int name_index = cp->name_ref_index_at(index);
           Symbol*  name = cp->symbol_at(name_index);
           Symbol*  sig = cp->symbol_at(sig_index);
+          guarantee_property(sig->utf8_length() != 0,
+            "Illegal zero length constant pool entry at %d in class %s",
+            sig_index, CHECK_(nullHandle));
           if (sig->byte_at(0) == JVM_SIGNATURE_FUNC) {
             verify_legal_method_signature(name, sig, CHECK_(nullHandle));
           } else {
@@ -560,8 +563,9 @@ constantPoolHandle ClassFileParser::parse_constant_pool(TRAPS) {
           verify_legal_field_name(name, CHECK_(nullHandle));
           if (_need_verify && _major_version >= JAVA_7_VERSION) {
             // Signature is verified above, when iterating NameAndType_info.
-            // Need only to be sure it's the right type.
-            if (signature->byte_at(0) == JVM_SIGNATURE_FUNC) {
+            // Need only to be sure it's non-zero length and the right type.
+            if (signature->utf8_length() == 0 ||
+                signature->byte_at(0) == JVM_SIGNATURE_FUNC) {
               throwIllegalSignature(
                   "Field", name, signature, CHECK_(nullHandle));
             }
@@ -572,8 +576,9 @@ constantPoolHandle ClassFileParser::parse_constant_pool(TRAPS) {
           verify_legal_method_name(name, CHECK_(nullHandle));
           if (_need_verify && _major_version >= JAVA_7_VERSION) {
             // Signature is verified above, when iterating NameAndType_info.
-            // Need only to be sure it's the right type.
-            if (signature->byte_at(0) != JVM_SIGNATURE_FUNC) {
+            // Need only to be sure it's non-zero length and the right type.
+            if (signature->utf8_length() == 0 ||
+                signature->byte_at(0) != JVM_SIGNATURE_FUNC) {
               throwIllegalSignature(
                   "Method", name, signature, CHECK_(nullHandle));
             }
@@ -584,8 +589,7 @@ constantPoolHandle ClassFileParser::parse_constant_pool(TRAPS) {
             // 4509014: If a class method name begins with '<', it must be "<init>".
             assert(name != NULL, "method name in constant pool is null");
             unsigned int name_len = name->utf8_length();
-            assert(name_len > 0, "bad method name");  // already verified as legal name
-            if (name->byte_at(0) == '<') {
+            if (name_len != 0 && name->byte_at(0) == '<') {
               if (name != vmSymbols::object_initializer_name()) {
                 classfile_parse_error(
                   "Bad method name at constant pool index %u in class file %s",
@@ -817,11 +821,12 @@ Array<Klass*>* ClassFileParser::parse_interfaces(int length,
       THREAD, NameSigHash*, HASH_ROW_SIZE);
     initialize_hashtable(interface_names);
     bool dup = false;
+    Symbol* name = NULL;
     {
       debug_only(No_Safepoint_Verifier nsv;)
       for (index = 0; index < length; index++) {
         Klass* k = _local_interfaces->at(index);
-        Symbol* name = InstanceKlass::cast(k)->name();
+        name = InstanceKlass::cast(k)->name();
         // If no duplicates, add (name, NULL) in hashtable interface_names.
         if (!put_after_lookup(name, NULL, interface_names)) {
           dup = true;
@@ -830,7 +835,8 @@ Array<Klass*>* ClassFileParser::parse_interfaces(int length,
       }
     }
     if (dup) {
-      classfile_parse_error("Duplicate interface name in class file %s", CHECK_NULL);
+      classfile_parse_error("Duplicate interface name \"%s\" in class file %s",
+               name->as_C_string(), CHECK_NULL);
     }
   }
   return _local_interfaces;
@@ -940,11 +946,12 @@ void ClassFileParser::parse_field_attributes(u2 attributes_count,
         runtime_visible_annotations_length = attribute_length;
         runtime_visible_annotations = cfs->get_u1_buffer();
         assert(runtime_visible_annotations != NULL, "null visible annotations");
+        cfs->guarantee_more(runtime_visible_annotations_length, CHECK);
         parse_annotations(runtime_visible_annotations,
                           runtime_visible_annotations_length,
                           parsed_annotations,
                           CHECK);
-        cfs->skip_u1(runtime_visible_annotations_length, CHECK);
+        cfs->skip_u1_fast(runtime_visible_annotations_length);
       } else if (PreserveAllAnnotations && attribute_name == vmSymbols::tag_runtime_invisible_annotations()) {
         runtime_invisible_annotations_length = attribute_length;
         runtime_invisible_annotations = cfs->get_u1_buffer();
@@ -1274,11 +1281,13 @@ Array<u2>* ClassFileParser::parse_fields(Symbol* class_name,
       THREAD, NameSigHash*, HASH_ROW_SIZE);
     initialize_hashtable(names_and_sigs);
     bool dup = false;
+    Symbol* name = NULL;
+    Symbol* sig = NULL;
     {
       debug_only(No_Safepoint_Verifier nsv;)
       for (AllFieldStream fs(fields, _cp); !fs.done(); fs.next()) {
-        Symbol* name = fs.name();
-        Symbol* sig = fs.signature();
+        name = fs.name();
+        sig = fs.signature();
         // If no duplicates, add name/signature in hashtable names_and_sigs.
         if (!put_after_lookup(name, sig, names_and_sigs)) {
           dup = true;
@@ -1287,8 +1296,8 @@ Array<u2>* ClassFileParser::parse_fields(Symbol* class_name,
       }
     }
     if (dup) {
-      classfile_parse_error("Duplicate field name&signature in class file %s",
-                            CHECK_NULL);
+      classfile_parse_error("Duplicate field name \"%s\" with signature \"%s\" in class file %s",
+                             name->as_C_string(), sig->as_klass_external_name(), CHECK_NULL);
     }
   }
 
@@ -1651,6 +1660,11 @@ int ClassFileParser::skip_annotation(u1* buffer, int limit, int index) {
   return index;
 }
 
+// Safely increment index by val if does not pass limit
+#define SAFE_ADD(index, limit, val) \
+if (index >= limit - val) return limit; \
+index += val;
+
 // Skip an annotation value.  Return >=limit if there is any problem.
 int ClassFileParser::skip_annotation_value(u1* buffer, int limit, int index) {
   // value := switch (tag:u1) {
@@ -1661,19 +1675,19 @@ int ClassFileParser::skip_annotation_value(u1* buffer, int limit, int index) {
   //   case @: annotation;
   //   case s: s_con:u2;
   // }
-  if ((index += 1) >= limit)  return limit;  // read tag
+  SAFE_ADD(index, limit, 1); // read tag
   u1 tag = buffer[index-1];
   switch (tag) {
   case 'B': case 'C': case 'I': case 'S': case 'Z':
   case 'D': case 'F': case 'J': case 'c': case 's':
-    index += 2;  // skip con or s_con
+    SAFE_ADD(index, limit, 2);  // skip con or s_con
     break;
   case 'e':
-    index += 4;  // skip e_class, e_name
+    SAFE_ADD(index, limit, 4);  // skip e_class, e_name
     break;
   case '[':
     {
-      if ((index += 2) >= limit)  return limit;  // read nval
+      SAFE_ADD(index, limit, 2);  // read nval
       int nval = Bytes::get_Java_u2(buffer+index-2);
       while (--nval >= 0 && index < limit) {
         index = skip_annotation_value(buffer, limit, index);
@@ -1695,8 +1709,8 @@ void ClassFileParser::parse_annotations(u1* buffer, int limit,
                                         ClassFileParser::AnnotationCollector* coll,
                                         TRAPS) {
   // annotations := do(nann:u2) {annotation}
-  int index = 0;
-  if ((index += 2) >= limit)  return;  // read nann
+  int index = 2;
+  if (index >= limit)  return;  // read nann
   int nann = Bytes::get_Java_u2(buffer+index-2);
   enum {  // initial annotation layout
     atype_off = 0,      // utf8 such as 'Ljava/lang/annotation/Retention;'
@@ -1715,7 +1729,8 @@ void ClassFileParser::parse_annotations(u1* buffer, int limit,
       s_size = 9,
     min_size = 6        // smallest possible size (zero members)
   };
-  while ((--nann) >= 0 && (index-2 + min_size <= limit)) {
+  // Cannot add min_size to index in case of overflow MAX_INT
+  while ((--nann) >= 0 && (index-2 <= limit - min_size)) {
     int index0 = index;
     index = skip_annotation(buffer, limit, index);
     u1* abase = buffer + index0;
@@ -2320,10 +2335,11 @@ methodHandle ClassFileParser::parse_method(bool is_interface,
         runtime_visible_annotations_length = method_attribute_length;
         runtime_visible_annotations = cfs->get_u1_buffer();
         assert(runtime_visible_annotations != NULL, "null visible annotations");
+        cfs->guarantee_more(runtime_visible_annotations_length, CHECK_(nullHandle));
         parse_annotations(runtime_visible_annotations,
             runtime_visible_annotations_length, &parsed_annotations,
             CHECK_(nullHandle));
-        cfs->skip_u1(runtime_visible_annotations_length, CHECK_(nullHandle));
+        cfs->skip_u1_fast(runtime_visible_annotations_length);
       } else if (PreserveAllAnnotations && method_attribute_name == vmSymbols::tag_runtime_invisible_annotations()) {
         runtime_invisible_annotations_length = method_attribute_length;
         runtime_invisible_annotations = cfs->get_u1_buffer();
@@ -2417,11 +2433,9 @@ methodHandle ClassFileParser::parse_method(bool is_interface,
   m->set_constants(_cp);
   m->set_name_index(name_index);
   m->set_signature_index(signature_index);
-#ifdef CC_INTERP
-  // hmm is there a gc issue here??
+
   ResultTypeFinder rtf(_cp->symbol_at(signature_index));
-  m->set_result_index(rtf.type());
-#endif
+  m->constMethod()->set_result_type(rtf.type());
 
   if (args_size >= 0) {
     m->set_size_of_parameters(args_size);
@@ -2570,20 +2584,24 @@ Array<Method*>* ClassFileParser::parse_methods(bool is_interface,
         THREAD, NameSigHash*, HASH_ROW_SIZE);
       initialize_hashtable(names_and_sigs);
       bool dup = false;
+      Symbol* name = NULL;
+      Symbol* sig = NULL;
       {
         debug_only(No_Safepoint_Verifier nsv;)
         for (int i = 0; i < length; i++) {
           Method* m = _methods->at(i);
+          name = m->name();
+          sig = m->signature();
           // If no duplicates, add name/signature in hashtable names_and_sigs.
-          if (!put_after_lookup(m->name(), m->signature(), names_and_sigs)) {
+          if (!put_after_lookup(name, sig, names_and_sigs)) {
             dup = true;
             break;
           }
         }
       }
       if (dup) {
-        classfile_parse_error("Duplicate method name&signature in class file %s",
-                              CHECK_NULL);
+        classfile_parse_error("Duplicate method name \"%s\" with signature \"%s\" in class file %s",
+                              name->as_C_string(), sig->as_klass_external_name(), CHECK_NULL);
       }
     }
   }
@@ -2673,8 +2691,85 @@ void ClassFileParser::parse_classfile_source_debug_extension_attribute(int lengt
 // Inner classes can be static, private or protected (classic VM does this)
 #define RECOGNIZED_INNER_CLASS_MODIFIERS (JVM_RECOGNIZED_CLASS_MODIFIERS | JVM_ACC_PRIVATE | JVM_ACC_PROTECTED | JVM_ACC_STATIC)
 
+// Find index of the InnerClasses entry for the specified inner_class_info_index.
+// Return -1 if none is found.
+static int inner_classes_find_index(const Array<u2>* inner_classes, int inner, const ConstantPool* cp, int length) {
+  Symbol* cp_klass_name =  cp->klass_name_at(inner);
+  for (int idx = 0; idx < length; idx += InstanceKlass::inner_class_next_offset) {
+    int idx_inner = inner_classes->at(idx + InstanceKlass::inner_class_inner_class_info_offset);
+    if (cp->klass_name_at(idx_inner) == cp_klass_name) {
+      return idx;
+    }
+  }
+  return -1;
+}
+
+// Return the outer_class_info_index for the InnerClasses entry containing the
+// specified inner_class_info_index.  Return -1 if no InnerClasses entry is found.
+static int inner_classes_jump_to_outer(const Array<u2>* inner_classes, int inner, const ConstantPool* cp, int length) {
+  if (inner == 0) return -1;
+  int idx = inner_classes_find_index(inner_classes, inner, cp, length);
+  if (idx == -1) return -1;
+  int result = inner_classes->at(idx + InstanceKlass::inner_class_outer_class_info_offset);
+  return result;
+}
+
+// Return true if circularity is found, false if no circularity is found.
+// Use Floyd's cycle finding algorithm.
+static bool inner_classes_check_loop_through_outer(const Array<u2>* inner_classes, int idx, const ConstantPool* cp, int length) {
+  int slow = inner_classes->at(idx + InstanceKlass::inner_class_inner_class_info_offset);
+  int fast = inner_classes->at(idx + InstanceKlass::inner_class_outer_class_info_offset);
+
+  while (fast != -1 && fast != 0) {
+    if (slow != 0 && (cp->klass_name_at(slow) == cp->klass_name_at(fast))) {
+      return true;  // found a circularity
+    }
+    fast = inner_classes_jump_to_outer(inner_classes, fast, cp, length);
+    if (fast == -1) return false;
+    fast = inner_classes_jump_to_outer(inner_classes, fast, cp, length);
+    if (fast == -1) return false;
+    slow = inner_classes_jump_to_outer(inner_classes, slow, cp, length);
+    assert(slow != -1, "sanity check");
+  }
+  return false;
+}
+
+// Loop through each InnerClasses entry checking for circularities and duplications
+// with other entries.  If duplicate entries are found then throw CFE.  Otherwise,
+// return true if a circularity or entries with duplicate inner_class_info_indexes
+// are found.
+bool ClassFileParser::check_inner_classes_circularity(const ConstantPool* cp, int length, TRAPS) {
+  // Loop through each InnerClasses entry.
+  for (int idx = 0; idx < length; idx += InstanceKlass::inner_class_next_offset) {
+    // Return true if there are circular entries.
+    if (inner_classes_check_loop_through_outer(_inner_classes, idx, cp, length)) {
+      return true;
+    }
+    // Check if there are duplicate entries or entries with the same inner_class_info_index.
+    for (int y = idx + InstanceKlass::inner_class_next_offset; y < length;
+         y += InstanceKlass::inner_class_next_offset) {
+
+      // 4347400: make sure there's no duplicate entry in the classes array
+      if (_major_version >= JAVA_1_5_VERSION) {
+        guarantee_property((_inner_classes->at(idx) != _inner_classes->at(y) ||
+                            _inner_classes->at(idx+1) != _inner_classes->at(y+1) ||
+                            _inner_classes->at(idx+2) != _inner_classes->at(y+2) ||
+                            _inner_classes->at(idx+3) != _inner_classes->at(y+3)),
+                           "Duplicate entry in InnerClasses attribute in class file %s",
+                           CHECK_(true));
+      }
+      // Return true if there are two entries with the same inner_class_info_index.
+      if (_inner_classes->at(y) == _inner_classes->at(idx)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 // Return number of classes in the inner classes attribute table
-u2 ClassFileParser::parse_classfile_inner_classes_attribute(u1* inner_classes_attribute_start,
+u2 ClassFileParser::parse_classfile_inner_classes_attribute(const ConstantPool* cp,
+                                                            u1* inner_classes_attribute_start,
                                                             bool parsed_enclosingmethod_attribute,
                                                             u2 enclosing_method_class_index,
                                                             u2 enclosing_method_method_index,
@@ -2708,8 +2803,7 @@ u2 ClassFileParser::parse_classfile_inner_classes_attribute(u1* inner_classes_at
     // Inner class index
     u2 inner_class_info_index = cfs->get_u2_fast();
     check_property(
-      inner_class_info_index == 0 ||
-        valid_klass_reference_at(inner_class_info_index),
+      valid_klass_reference_at(inner_class_info_index),
       "inner_class_info_index %u has bad constant type in class file %s",
       inner_class_info_index, CHECK_0);
     // Outer class index
@@ -2719,6 +2813,13 @@ u2 ClassFileParser::parse_classfile_inner_classes_attribute(u1* inner_classes_at
         valid_klass_reference_at(outer_class_info_index),
       "outer_class_info_index %u has bad constant type in class file %s",
       outer_class_info_index, CHECK_0);
+
+    if (outer_class_info_index != 0) {
+      const Symbol* const outer_class_name = cp->klass_name_at(outer_class_info_index);
+      char* bytes = (char*)outer_class_name->bytes();
+      guarantee_property(bytes[0] != JVM_SIGNATURE_ARRAY,
+                         "Outer class is an array class in class file %s", CHECK_0);
+    }
     // Inner class name
     u2 inner_name_index = cfs->get_u2_fast();
     check_property(
@@ -2745,26 +2846,28 @@ u2 ClassFileParser::parse_classfile_inner_classes_attribute(u1* inner_classes_at
     inner_classes->at_put(index++, inner_access_flags.as_short());
   }
 
-  // 4347400: make sure there's no duplicate entry in the classes array
-  if (_need_verify && _major_version >= JAVA_1_5_VERSION) {
-    for(int i = 0; i < length * 4; i += 4) {
-      for(int j = i + 4; j < length * 4; j += 4) {
-        guarantee_property((inner_classes->at(i)   != inner_classes->at(j) ||
-                            inner_classes->at(i+1) != inner_classes->at(j+1) ||
-                            inner_classes->at(i+2) != inner_classes->at(j+2) ||
-                            inner_classes->at(i+3) != inner_classes->at(j+3)),
-                            "Duplicate entry in InnerClasses in class file %s",
-                            CHECK_0);
+  // Check for circular and duplicate entries.
+  bool has_circularity = false;
+  if (_need_verify) {
+    has_circularity = check_inner_classes_circularity(cp, length * 4, CHECK_0);
+    if (has_circularity) {
+      // If circularity check failed then ignore InnerClasses attribute.
+      MetadataFactory::free_array<u2>(_loader_data, _inner_classes);
+      index = 0;
+      if (parsed_enclosingmethod_attribute) {
+        inner_classes = MetadataFactory::new_array<u2>(_loader_data, 2, CHECK_0);
+        _inner_classes = inner_classes;
+      } else {
+        _inner_classes = Universe::the_empty_short_array();
       }
     }
   }
-
   // Set EnclosingMethod class and method indexes.
   if (parsed_enclosingmethod_attribute) {
     inner_classes->at_put(index++, enclosing_method_class_index);
     inner_classes->at_put(index++, enclosing_method_method_index);
   }
-  assert(index == size, "wrong size");
+  assert(index == size || has_circularity, "wrong size");
 
   // Restore buffer's current position.
   cfs->set_current(current_mark);
@@ -2951,11 +3054,12 @@ void ClassFileParser::parse_classfile_attributes(ClassFileParser::ClassAnnotatio
         runtime_visible_annotations_length = attribute_length;
         runtime_visible_annotations = cfs->get_u1_buffer();
         assert(runtime_visible_annotations != NULL, "null visible annotations");
+        cfs->guarantee_more(runtime_visible_annotations_length, CHECK);
         parse_annotations(runtime_visible_annotations,
                           runtime_visible_annotations_length,
                           parsed_annotations,
                           CHECK);
-        cfs->skip_u1(runtime_visible_annotations_length, CHECK);
+        cfs->skip_u1_fast(runtime_visible_annotations_length);
       } else if (PreserveAllAnnotations && tag == vmSymbols::tag_runtime_invisible_annotations()) {
         runtime_invisible_annotations_length = attribute_length;
         runtime_invisible_annotations = cfs->get_u1_buffer();
@@ -3032,6 +3136,7 @@ void ClassFileParser::parse_classfile_attributes(ClassFileParser::ClassAnnotatio
 
   if (parsed_innerclasses_attribute || parsed_enclosingmethod_attribute) {
     u2 num_of_classes = parse_classfile_inner_classes_attribute(
+                            _cp,
                             inner_classes_attribute_start,
                             parsed_innerclasses_attribute,
                             enclosing_method_class_index,
@@ -3190,19 +3295,19 @@ void ClassFileParser::layout_fields(Handle class_loader,
 
   // Field size and offset computation
   int nonstatic_field_size = _super_klass() == NULL ? 0 : _super_klass()->nonstatic_field_size();
-  int next_static_oop_offset;
-  int next_static_double_offset;
-  int next_static_word_offset;
-  int next_static_short_offset;
-  int next_static_byte_offset;
-  int next_nonstatic_oop_offset;
-  int next_nonstatic_double_offset;
-  int next_nonstatic_word_offset;
-  int next_nonstatic_short_offset;
-  int next_nonstatic_byte_offset;
-  int first_nonstatic_oop_offset;
-  int next_nonstatic_field_offset;
-  int next_nonstatic_padded_offset;
+  int next_static_oop_offset = 0;
+  int next_static_double_offset = 0;
+  int next_static_word_offset = 0;
+  int next_static_short_offset = 0;
+  int next_static_byte_offset = 0;
+  int next_nonstatic_oop_offset = 0;
+  int next_nonstatic_double_offset = 0;
+  int next_nonstatic_word_offset = 0;
+  int next_nonstatic_short_offset = 0;
+  int next_nonstatic_byte_offset = 0;
+  int first_nonstatic_oop_offset = 0;
+  int next_nonstatic_field_offset = 0;
+  int next_nonstatic_padded_offset = 0;
 
   // Count the contended fields by type.
   //
@@ -3355,14 +3460,14 @@ void ClassFileParser::layout_fields(Handle class_loader,
     ShouldNotReachHere();
   }
 
-  int nonstatic_oop_space_count   = 0;
-  int nonstatic_word_space_count  = 0;
-  int nonstatic_short_space_count = 0;
-  int nonstatic_byte_space_count  = 0;
-  int nonstatic_oop_space_offset;
-  int nonstatic_word_space_offset;
-  int nonstatic_short_space_offset;
-  int nonstatic_byte_space_offset;
+  int nonstatic_oop_space_count    = 0;
+  int nonstatic_word_space_count   = 0;
+  int nonstatic_short_space_count  = 0;
+  int nonstatic_byte_space_count   = 0;
+  int nonstatic_oop_space_offset   = 0;
+  int nonstatic_word_space_offset  = 0;
+  int nonstatic_short_space_offset = 0;
+  int nonstatic_byte_space_offset  = 0;
 
   // Try to squeeze some of the fields into the gaps due to
   // long/double alignment.
@@ -3434,7 +3539,7 @@ void ClassFileParser::layout_fields(Handle class_loader,
     // contended instance fields are handled below
     if (fs.is_contended() && !fs.access_flags().is_static()) continue;
 
-    int real_offset;
+    int real_offset = 0;
     FieldAllocationType atype = (FieldAllocationType) fs.allocation_type();
 
     // pack the rest of the fields
@@ -3567,7 +3672,7 @@ void ClassFileParser::layout_fields(Handle class_loader,
         // handle statics below
         if (fs.access_flags().is_static()) continue;
 
-        int real_offset;
+        int real_offset = 0;
         FieldAllocationType atype = (FieldAllocationType) fs.allocation_type();
 
         switch (atype) {
@@ -3698,6 +3803,16 @@ void ClassFileParser::layout_fields(Handle class_loader,
   info->has_nonstatic_fields = has_nonstatic_fields;
 }
 
+static bool relax_format_check_for(ClassLoaderData* loader_data) {
+  bool trusted = (loader_data->is_the_null_class_loader_data() ||
+                  SystemDictionary::is_ext_class_loader(loader_data->class_loader()));
+  bool need_verify =
+    // verifyAll
+    (BytecodeVerificationLocal && BytecodeVerificationRemote) ||
+    // verifyRemote
+    (!BytecodeVerificationLocal && BytecodeVerificationRemote && !trusted);
+  return !need_verify;
+}
 
 instanceKlassHandle ClassFileParser::parseClassFile(Symbol* name,
                                                     ClassLoaderData* loader_data,
@@ -3717,7 +3832,13 @@ instanceKlassHandle ClassFileParser::parseClassFile(Symbol* name,
   Handle class_loader(THREAD, loader_data->class_loader());
   bool has_default_methods = false;
   bool declares_default_methods = false;
-  ResourceMark rm(THREAD);
+  // JDK-8252904:
+  // The stream (resource) attached to the instance klass may
+  // be reallocated by this method. When JFR is included the
+  // stream may need to survive beyond the end of the call. So,
+  // the caller is expected to declare the ResourceMark that
+  // determines the lifetime of resources allocated under this
+  // call.
 
   ClassFileStream* cfs = stream();
   // Timing
@@ -3844,7 +3965,7 @@ instanceKlassHandle ClassFileParser::parseClassFile(Symbol* name,
 
   // Check if verification needs to be relaxed for this class file
   // Do not restrict it to jdk1.0 or jdk1.1 to maintain backward compatibility (4982376)
-  _relax_verify = Verifier::relax_verify_for(class_loader());
+  _relax_verify = relax_format_check_for(_loader_data);
 
   // Constant pool
   constantPoolHandle cp = parse_constant_pool(CHECK_(nullHandle));
@@ -3865,14 +3986,14 @@ instanceKlassHandle ClassFileParser::parseClassFile(Symbol* name,
   access_flags.set_flags(flags);
 
   // This class and superclass
-  u2 this_class_index = cfs->get_u2_fast();
+  _this_class_index = cfs->get_u2_fast();
   check_property(
-    valid_cp_range(this_class_index, cp_size) &&
-      cp->tag_at(this_class_index).is_unresolved_klass(),
+    valid_cp_range(_this_class_index, cp_size) &&
+      cp->tag_at(_this_class_index).is_unresolved_klass(),
     "Invalid this class index %u in constant pool in class file %s",
-    this_class_index, CHECK_(nullHandle));
+    _this_class_index, CHECK_(nullHandle));
 
-  Symbol*  class_name  = cp->unresolved_klass_at(this_class_index);
+  Symbol*  class_name  = cp->unresolved_klass_at(_this_class_index);
   assert(class_name != NULL, "class_name can't be null");
 
   // It's important to set parsed_name *before* resolving the super class.
@@ -3971,6 +4092,11 @@ instanceKlassHandle ClassFileParser::parseClassFile(Symbol* name,
     // Make sure this is the end of class file stream
     guarantee_property(cfs->at_eos(), "Extra bytes at the end of class file %s", CHECK_(nullHandle));
 
+    if (_class_name == vmSymbols::java_lang_Object()) {
+      check_property(_local_interfaces == Universe::the_empty_klass_array(),
+                     "java.lang.Object cannot implement an interface in class file %s",
+                     CHECK_(nullHandle));
+    }
     // We check super class after class file is parsed and format is checked
     if (super_class_index > 0 && super_klass.is_null()) {
       Symbol*  sk  = cp->klass_name_at(super_class_index);
@@ -4098,9 +4224,9 @@ instanceKlassHandle ClassFileParser::parseClassFile(Symbol* name,
     // that changes, then InstanceKlass::idnum_can_increment()
     // has to be changed accordingly.
     this_klass->set_initial_method_idnum(methods->length());
-    this_klass->set_name(cp->klass_name_at(this_class_index));
+    this_klass->set_name(cp->klass_name_at(_this_class_index));
     if (is_anonymous())  // I am well known to myself
-      cp->klass_at_put(this_class_index, this_klass()); // eagerly resolve
+      cp->klass_at_put(_this_class_index, this_klass()); // eagerly resolve
 
     this_klass->set_minor_version(minor_version);
     this_klass->set_major_version(major_version);
@@ -4186,9 +4312,6 @@ instanceKlassHandle ClassFileParser::parseClassFile(Symbol* name,
           this_klass(), &all_mirandas, CHECK_(nullHandle));
     }
 
-    // Update the loader_data graph.
-    record_defined_class_dependencies(this_klass, CHECK_NULL);
-
     ClassLoadingService::notify_class_loaded(InstanceKlass::cast(this_klass()),
                                              false /* not shared class */);
 
@@ -4240,6 +4363,8 @@ instanceKlassHandle ClassFileParser::parseClassFile(Symbol* name,
     // preserve result across HandleMark
     preserve_this_klass = this_klass();
   }
+
+  JFR_ONLY(INIT_ID(preserve_this_klass);)
 
   // Create new handle outside HandleMark (might be needed for
   // Extended Class Redefinition)
@@ -4421,9 +4546,15 @@ void ClassFileParser::set_precomputed_flags(instanceKlassHandle k) {
   Method* m = k->lookup_method(vmSymbols::finalize_method_name(),
                                  vmSymbols::void_method_signature());
   if (m != NULL && !m->is_empty_method()) {
-    f = true;
+      f = true;
   }
-  assert(f == k->has_finalizer(), "inconsistent has_finalizer");
+
+  // Spec doesn't prevent agent from redefinition of empty finalizer.
+  // Despite the fact that it's generally bad idea and redefined finalizer
+  // will not work as expected we shouldn't abort vm in this case
+  if (!k->has_redefined_this_or_super()) {
+    assert(f == k->has_finalizer(), "inconsistent has_finalizer");
+  }
 #endif
 
   // Check if this klass supports the java.lang.Cloneable interface
@@ -4465,30 +4596,6 @@ void ClassFileParser::set_precomputed_flags(instanceKlassHandle k) {
     // Forbid fast-path allocation.
     jint lh = Klass::instance_layout_helper(k->size_helper(), true);
     k->set_layout_helper(lh);
-  }
-}
-
-// Attach super classes and interface classes to class loader data
-void ClassFileParser::record_defined_class_dependencies(instanceKlassHandle defined_klass, TRAPS) {
-  ClassLoaderData * defining_loader_data = defined_klass->class_loader_data();
-  if (defining_loader_data->is_the_null_class_loader_data()) {
-      // Dependencies to null class loader data are implicit.
-      return;
-  } else {
-    // add super class dependency
-    Klass* super = defined_klass->super();
-    if (super != NULL) {
-      defining_loader_data->record_dependency(super, CHECK);
-    }
-
-    // add super interface dependencies
-    Array<Klass*>* local_interfaces = defined_klass->local_interfaces();
-    if (local_interfaces != NULL) {
-      int length = local_interfaces->length();
-      for (int i = 0; i < length; i++) {
-        defining_loader_data->record_dependency(local_interfaces->at(i), CHECK);
-      }
-    }
   }
 }
 
@@ -5270,3 +5377,25 @@ char* ClassFileParser::skip_over_field_signature(char* signature,
   }
   return NULL;
 }
+
+#if INCLUDE_JFR
+
+// Caller responsible for ResourceMark
+// clone stream with rewound position
+ClassFileStream* ClassFileParser::clone_stream() const {
+  assert(_stream != NULL, "invariant");
+
+  return _stream->clone();
+}
+
+void ClassFileParser::set_klass_to_deallocate(InstanceKlass* klass) {
+#ifdef ASSERT
+  if (klass != NULL) {
+    assert(NULL == _klass, "leaking?");
+  }
+#endif
+
+  _klass = klass;
+}
+
+#endif // INCLUDE_JFR

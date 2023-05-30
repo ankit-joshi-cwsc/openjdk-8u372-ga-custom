@@ -235,11 +235,15 @@ class fdStream : public outputStream {
   void flush() {};
 };
 
+class Mutex;
 class gcLogFileStream : public fileStream {
  protected:
   const char*  _file_name;
   jlong  _bytes_written;
   uintx  _cur_file_num;             // current logfile rotation number, from 0 to NumberOfGCLogFiles-1
+ private:
+  Mutex* _file_lock;
+  void rotate_log_impl(bool force, outputStream* out);
  public:
   gcLogFileStream(const char* file_name);
   ~gcLogFileStream();
@@ -258,6 +262,7 @@ class gcLogFileStream : public fileStream {
 #ifndef PRODUCT
 // unit test for checking -Xloggc:<filename> parsing result
 void test_loggc_filename();
+void test_snprintf();
 #endif
 
 void ostream_init();

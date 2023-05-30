@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,6 +32,7 @@
 #include "interpreter/interpreter.hpp"
 #include "interpreter/linkResolver.hpp"
 #include "interpreter/oopMapCache.hpp"
+#include "jfr/jfrEvents.hpp"
 #include "jvmtifiles/jvmtiEnv.hpp"
 #include "memory/gcLocker.inline.hpp"
 #include "memory/metaspaceShared.hpp"
@@ -77,8 +78,6 @@
 #include "services/management.hpp"
 #include "services/memTracker.hpp"
 #include "services/threadService.hpp"
-#include "trace/tracing.hpp"
-#include "trace/traceMacros.hpp"
 #include "utilities/defaultStream.hpp"
 #include "utilities/dtrace.hpp"
 #include "utilities/events.hpp"
@@ -111,6 +110,9 @@
 #if INCLUDE_RTM_OPT
 #include "runtime/rtmLocking.hpp"
 #endif
+#if INCLUDE_JFR
+#include "jfr/jfr.hpp"
+#endif
 
 PRAGMA_FORMAT_MUTE_WARNINGS_FOR_GCC
 
@@ -141,8 +143,8 @@ HS_DTRACE_PROBE_DECL5(hotspot, thread__stop, char*, intptr_t,
 
 #else /* USDT2 */
 
-#define HOTSPOT_THREAD_PROBE_start HOTSPOT_THREAD_PROBE_START
-#define HOTSPOT_THREAD_PROBE_stop HOTSPOT_THREAD_PROBE_STOP
+#define HOTSPOT_THREAD_PROBE_start HOTSPOT_THREAD_START
+#define HOTSPOT_THREAD_PROBE_stop HOTSPOT_THREAD_STOP
 
 #define DTRACE_THREAD_PROBE(probe, javathread)                             \
   {                                                                        \
@@ -341,8 +343,6 @@ void Thread::record_stack_base_and_size() {
 Thread::~Thread() {
   // Reclaim the objectmonitors from the omFreeList of the moribund thread.
   ObjectSynchronizer::omFlush (this) ;
-
-  EVENT_THREAD_DESTRUCT(this);
 
   // stack_base can be NULL if the thread is never started or exited before
   // record_stack_base_and_size called. Although, we would like to ensure
@@ -836,7 +836,9 @@ bool Thread::claim_oops_do_par_case(int strong_roots_parity) {
 }
 
 void Thread::oops_do(OopClosure* f, CLDClosure* cld_f, CodeBlobClosure* cf) {
-  active_handles()->oops_do(f);
+  if (active_handles() != NULL) {
+    active_handles()->oops_do(f);
+  }
   // Do oop for ThreadShadow
   f->do_oop((oop*)&_pending_exception);
   handle_area()->oops_do(f);
@@ -960,7 +962,7 @@ bool Thread::is_in_stack(address adr) const {
   address end = os::current_stack_pointer();
   // Allow non Java threads to call this without stack_base
   if (_stack_base == NULL) return true;
-  if (stack_base() >= adr && adr >= end) return true;
+  if (stack_base() > adr && adr >= end) return true;
 
   return false;
 }
@@ -1212,6 +1214,7 @@ NamedThread::NamedThread() : Thread() {
 }
 
 NamedThread::~NamedThread() {
+  JFR_ONLY(Jfr::on_thread_exit(this);)
   if (_name != NULL) {
     FREE_C_HEAP_ARRAY(char, _name, mtThread);
     _name = NULL;
@@ -1228,6 +1231,17 @@ void NamedThread::set_name(const char* format, ...) {
   va_end(ap);
 }
 
+void NamedThread::initialize_named_thread() {
+  set_native_thread_name(name());
+}
+
+void NamedThread::print_on(outputStream* st) const {
+  st->print("\"%s\" ", name());
+  Thread::print_on(st);
+  st->cr();
+}
+
+
 // ======= WatcherThread ========
 
 // The watcher thread exists to simulate timer interrupts.  It should
@@ -1238,7 +1252,7 @@ WatcherThread* WatcherThread::_watcher_thread   = NULL;
 bool WatcherThread::_startable = false;
 volatile bool  WatcherThread::_should_terminate = false;
 
-WatcherThread::WatcherThread() : Thread(), _crash_protection(NULL) {
+WatcherThread::WatcherThread() : Thread() {
   assert(watcher_thread() == NULL, "we can only allocate one WatcherThread");
   if (os::create_thread(this, os::watcher_thread)) {
     _watcher_thread = this;
@@ -1310,6 +1324,7 @@ void WatcherThread::run() {
 
   this->record_stack_base_and_size();
   this->initialize_thread_local_storage();
+  this->set_native_thread_name(this->name());
   this->set_active_handles(JNIHandleBlock::allocate_block());
   while(!_should_terminate) {
     assert(watcher_thread() == Thread::current(),  "thread consistency check");
@@ -1444,6 +1459,7 @@ void JavaThread::initialize() {
   set_monitor_chunks(NULL);
   set_next(NULL);
   set_thread_state(_thread_new);
+  _in_asgct = false;
   _terminated = _not_terminated;
   _privileged_stack_top = NULL;
   _array_for_gc = NULL;
@@ -1451,7 +1467,7 @@ void JavaThread::initialize() {
   _in_deopt_handler = 0;
   _doing_unsafe_access = false;
   _stack_guard_state = stack_guard_unused;
-  (void)const_cast<oop&>(_exception_oop = NULL);
+  (void)const_cast<oop&>(_exception_oop = oop(NULL));
   _exception_pc  = 0;
   _exception_handler_pc = 0;
   _is_method_handle_return = 0;
@@ -1668,11 +1684,7 @@ void JavaThread::run() {
     JvmtiExport::post_thread_start(this);
   }
 
-  EventThreadStart event;
-  if (event.should_commit()) {
-     event.set_javalangthread(java_lang_Thread::thread_id(this->threadObj()));
-     event.commit();
-  }
+  JFR_ONLY(Jfr::on_thread_start(this);)
 
   // We call another function to do the rest so we are sure that the stack addresses used
   // from there will be lower than the stack base just computed
@@ -1799,17 +1811,7 @@ void JavaThread::exit(bool destroy_vm, ExitType exit_type) {
         }
       }
     }
-
-    // Called before the java thread exit since we want to read info
-    // from java_lang_Thread object
-    EventThreadEnd event;
-    if (event.should_commit()) {
-        event.set_javalangthread(java_lang_Thread::thread_id(this->threadObj()));
-        event.commit();
-    }
-
-    // Call after last event on thread
-    EVENT_THREAD_EXIT(this);
+    JFR_ONLY(Jfr::on_java_thread_dismantle(this);)
 
     // Call Thread.exit(). We try 3 times in case we got another Thread.stop during
     // the execution of the method. If that is not enough, then we don't really care. Thread.stop
@@ -1886,6 +1888,7 @@ void JavaThread::exit(bool destroy_vm, ExitType exit_type) {
   // These things needs to be done while we are still a Java Thread. Make sure that thread
   // is in a consistent state, in case GC happens
   assert(_privileged_stack_top == NULL, "must be NULL when we get here");
+  JFR_ONLY(Jfr::on_thread_exit(this);)
 
   if (active_handles() != NULL) {
     JNIHandleBlock* block = active_handles();
@@ -2185,6 +2188,8 @@ void JavaThread::handle_special_runtime_exit_condition(bool check_asyncs) {
   if (check_asyncs) {
     check_and_handle_async_exceptions();
   }
+
+  JFR_ONLY(SUSPEND_THREAD_CONDITIONAL(this);)
 }
 
 void JavaThread::send_thread_stop(oop java_throwable)  {
@@ -2423,6 +2428,8 @@ void JavaThread::check_safepoint_and_suspend_for_native_trans(JavaThread *thread
       fatal("missed deoptimization!");
     }
   }
+
+  JFR_ONLY(SUSPEND_THREAD_CONDITIONAL(thread);)
 }
 
 // Slow path when the native==>VM/Java barriers detect a safepoint is in
@@ -2485,7 +2492,15 @@ void JavaThread::java_resume() {
 }
 
 void JavaThread::create_stack_guard_pages() {
-  if (! os::uses_stack_guard_pages() || _stack_guard_state != stack_guard_unused) return;
+  if (!os::uses_stack_guard_pages() ||
+      _stack_guard_state != stack_guard_unused ||
+      (DisablePrimordialThreadGuardPages && os::is_primordial_thread())) {
+      if (TraceThreadEvents) {
+        tty->print_cr("Stack guard page creation for thread "
+                      UINTX_FORMAT " disabled", os::current_thread_id());
+      }
+    return;
+  }
   address low_addr = stack_base() - stack_size();
   size_t len = (StackYellowPages + StackRedPages) * os::vm_page_size();
 
@@ -2926,13 +2941,13 @@ const char* JavaThread::get_thread_name_string(char* buf, int buflen) const {
   const char* name_str;
   oop thread_obj = threadObj();
   if (thread_obj != NULL) {
-    typeArrayOop name = java_lang_Thread::name(thread_obj);
+    oop name = java_lang_Thread::name(thread_obj);
     if (name != NULL) {
       if (buf == NULL) {
-        name_str = UNICODE::as_utf8((jchar*) name->base(T_CHAR), name->length());
+        name_str = java_lang_String::as_utf8_string(name);
       }
       else {
-        name_str = UNICODE::as_utf8((jchar*) name->base(T_CHAR), name->length(), buf, buflen);
+        name_str = java_lang_String::as_utf8_string(name, buf, buflen);
       }
     }
     else if (is_attaching_via_jni()) { // workaround for 6412693 - see 6404306
@@ -3242,6 +3257,9 @@ CompilerThread::CompilerThread(CompileQueue* queue, CompilerCounters* counters)
   _scanned_nmethod = NULL;
   _compiler = NULL;
 
+  // Compiler uses resource area for compilation, let's bias it to mtCompiler
+  resource_area()->bias_to(mtCompiler);
+
 #ifndef PRODUCT
   _ideal_graph_printer = NULL;
 #endif
@@ -3300,12 +3318,23 @@ void Threads::threads_do(ThreadClosure* tc) {
   if (wt != NULL)
     tc->do_thread(wt);
 
+#if INCLUDE_JFR
+  Thread* sampler_thread = Jfr::sampler_thread();
+  if (sampler_thread != NULL) {
+    tc->do_thread(sampler_thread);
+  }
+
+#endif
+
   // If CompilerThreads ever become non-JavaThreads, add them here
 }
 
 jint Threads::create_vm(JavaVMInitArgs* args, bool* canTryAgain) {
 
   extern void JDK_Version_init();
+
+  // Preinitialize version info.
+  VM_Version::early_initialize();
 
   // Check version
   if (!is_supported_jni_version(args->version)) return JNI_EVERSION;
@@ -3329,6 +3358,7 @@ jint Threads::create_vm(JavaVMInitArgs* args, bool* canTryAgain) {
   Arguments::init_version_specific_system_properties();
 
   // Parse arguments
+  // Note: this internally calls os::init_container_support()
   jint parse_result = Arguments::parse(args);
   if (parse_result != JNI_OK) return parse_result;
 
@@ -3421,6 +3451,8 @@ jint Threads::create_vm(JavaVMInitArgs* args, bool* canTryAgain) {
     *canTryAgain = false; // don't let caller call JNI_CreateJavaVM again
     return status;
   }
+
+  JFR_ONLY(Jfr::on_vm_init();)
 
   // Should be done after the heap is fully created
   main_thread->cache_global_variables();
@@ -3549,11 +3581,6 @@ jint Threads::create_vm(JavaVMInitArgs* args, bool* canTryAgain) {
 
   quicken_jni_functions();
 
-  // Must be run after init_ft which initializes ft_enabled
-  if (TRACE_INITIALIZE() != JNI_OK) {
-    vm_exit_during_initialization("Failed to initialize tracing backend");
-  }
-
   // Set flag that basic initialization has completed. Used by exceptions and various
   // debug stuff, that does not work until all basic classes have been initialized.
   set_init_completed();
@@ -3622,9 +3649,7 @@ jint Threads::create_vm(JavaVMInitArgs* args, bool* canTryAgain) {
   // Notify JVMTI agents that VM initialization is complete - nop if no agents.
   JvmtiExport::post_vm_initialized();
 
-  if (TRACE_START() != JNI_OK) {
-    vm_exit_during_initialization("Failed to start tracing backend.");
-  }
+  JFR_ONLY(Jfr::on_vm_start();)
 
   if (CleanChunkPoolAsync) {
     Chunk::start_chunk_pool_cleaner_task();
@@ -3914,10 +3939,9 @@ void JavaThread::invoke_shutdown_hooks() {
     // SystemDictionary::resolve_or_null will return null if there was
     // an exception.  If we cannot load the Shutdown class, just don't
     // call Shutdown.shutdown() at all.  This will mean the shutdown hooks
-    // and finalizers (if runFinalizersOnExit is set) won't be run.
-    // Note that if a shutdown hook was registered or runFinalizersOnExit
-    // was called, the Shutdown class would have already been loaded
-    // (Runtime.addShutdownHook and runFinalizersOnExit will load it).
+    // won't be run. Note that if a shutdown hook was registered,
+    // the Shutdown class would have already been loaded
+    // (Runtime.addShutdownHook will load it).
     instanceKlassHandle shutdown_klass (THREAD, k);
     JavaValue result(T_VOID);
     JavaCalls::call_static(&result,
@@ -3941,7 +3965,7 @@ void JavaThread::invoke_shutdown_hooks() {
 //   + Wait until we are the last non-daemon thread to execute
 //     <-- every thing is still working at this moment -->
 //   + Call java.lang.Shutdown.shutdown(), which will invoke Java level
-//        shutdown hooks, run finalizers if finalization-on-exit
+//        shutdown hooks
 //   + Call before_exit(), prepare for VM exit
 //      > run VM level shutdown hooks (they are registered through JVM_OnExit(),
 //        currently the only user of this mechanism is File.deleteOnExit())
@@ -3986,21 +4010,20 @@ bool Threads::destroy_vm() {
                          Mutex::_as_suspend_equivalent_flag);
   }
 
+  EventShutdown e;
+  if (e.should_commit()) {
+    e.set_reason("No remaining non-daemon Java threads");
+    e.commit();
+  }
+
   // Hang forever on exit if we are reporting an error.
   if (ShowMessageBoxOnError && is_error_reported()) {
     os::infinite_sleep();
   }
   os::wait_for_keypress_at_exit();
 
-  if (JDK_Version::is_jdk12x_version()) {
-    // We are the last thread running, so check if finalizers should be run.
-    // For 1.3 or later this is done in thread->invoke_shutdown_hooks()
-    HandleMark rm(thread);
-    Universe::run_finalizers_on_exit();
-  } else {
-    // run Java level shutdown hooks
-    thread->invoke_shutdown_hooks();
-  }
+  // run Java level shutdown hooks
+  thread->invoke_shutdown_hooks();
 
   before_exit(thread);
 

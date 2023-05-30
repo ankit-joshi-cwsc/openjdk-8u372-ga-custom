@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2002, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2002, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -143,17 +143,14 @@ JNIEXPORT jlong JNICALL Java_sun_awt_X11_XToolkit_getDefaultXColormap
     return (jlong) defaultConfig->awt_cmap;
 }
 
-JNIEXPORT jlong JNICALL Java_sun_awt_X11_XToolkit_getDefaultScreenData
-  (JNIEnv *env, jclass clazz)
-{
-    return ptr_to_jlong(getDefaultConfig(DefaultScreen(awt_display)));
-}
-
-
 JNIEXPORT jint JNICALL
 JNI_OnLoad(JavaVM *vm, void *reserved)
 {
     jvm = vm;
+
+    //Set the gtk backend to x11 on all the systems
+    putenv("GDK_BACKEND=x11");
+
     return JNI_VERSION_1_2;
 }
 
@@ -579,7 +576,7 @@ static void update_poll_timeout(int timeout_control) {
  */
 static uint32_t get_poll_timeout(jlong nextTaskTime)
 {
-    uint32_t ret_timeout;
+    uint32_t ret_timeout = 0;
     uint32_t timeout;
     uint32_t taskTimeout;
     uint32_t flushTimeout;
@@ -719,7 +716,7 @@ performPoll(JNIEnv *env, jlong nextTaskTime) {
     if (pollFds[0].revents) {
         // Events in X pipe
         update_poll_timeout(TIMEOUT_EVENTS);
-        PRINT2("performPoll(): TIMEOUT_EVENTS curPollTimeout = %ld \n", curPollTimeout);
+        PRINT2("performPoll(): TIMEOUT_EVENTS curPollTimeout = %d \n", curPollTimeout);
     }
     return TRUE;
 
@@ -1020,9 +1017,9 @@ int32_t getNumButtons() {
      * before calling XTestFakeButtonEvent().
      */
     xinputAvailable = XQueryExtension(awt_display, INAME, &major_opcode, &first_event, &first_error);
-    DTRACE_PRINTLN3("RobotPeer: XQueryExtension(XINPUT) returns major_opcode = %d, first_event = %d, first_error = %d",
-                    major_opcode, first_event, first_error);
     if (xinputAvailable) {
+        DTRACE_PRINTLN3("RobotPeer: XQueryExtension(XINPUT) returns major_opcode = %d, first_event = %d, first_error = %d",
+                        major_opcode, first_event, first_error);
         devices = XListInputDevices(awt_display, &numDevices);
         for (devIdx = 0; devIdx < numDevices; devIdx++) {
             aDevice = &(devices[devIdx]);

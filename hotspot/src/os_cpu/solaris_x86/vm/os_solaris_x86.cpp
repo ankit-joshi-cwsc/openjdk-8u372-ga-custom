@@ -369,7 +369,7 @@ JVM_handle_solaris_signal(int sig, siginfo_t* info, void* ucVoid,
 
   // Must do this before SignalHandlerMark, if crash protection installed we will longjmp away
   // (no destructors can be run)
-  os::WatcherThreadCrashProtection::check_crash_protection(sig, t);
+  os::ThreadCrashProtection::check_crash_protection(sig, t);
 
   SignalHandlerMark shm(t);
 
@@ -433,7 +433,7 @@ JVM_handle_solaris_signal(int sig, siginfo_t* info, void* ucVoid,
     // factor me: getPCfromContext
     pc = (address) uc->uc_mcontext.gregs[REG_PC];
 
-    if (StubRoutines::is_safefetch_fault(pc)) {
+    if ((sig == SIGSEGV || sig == SIGBUS) && StubRoutines::is_safefetch_fault(pc)) {
       uc->uc_mcontext.gregs[REG_PC] = intptr_t(StubRoutines::continuation_for_safefetch_fault(pc));
       return true;
     }

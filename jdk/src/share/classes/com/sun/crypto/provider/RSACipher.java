@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,6 +25,7 @@
 
 package com.sun.crypto.provider;
 
+import java.util.Arrays;
 import java.util.Locale;
 
 import java.security.*;
@@ -44,13 +45,15 @@ import sun.security.util.KeyUtil;
 
 /**
  * RSA cipher implementation. Supports RSA en/decryption and signing/verifying
- * using PKCS#1 v1.5 padding and without padding (raw RSA). Note that raw RSA
- * is supported mostly for completeness and should only be used in rare cases.
+ * using both PKCS#1 v1.5 and OAEP (v2.2) paddings and without padding (raw RSA).
+ * Note that raw RSA is supported mostly for completeness and should only be
+ * used in rare cases.
  *
  * Objects should be instantiated by calling Cipher.getInstance() using the
  * following algorithm names:
- *  . "RSA/ECB/PKCS1Padding" (or "RSA") for PKCS#1 padding. The mode (blocktype)
- *    is selected based on the en/decryption mode and public/private key used
+ *  . "RSA/ECB/PKCS1Padding" (or "RSA") for PKCS#1 v1.5 padding.
+ *  . "RSA/ECB/OAEPwith<hash>andMGF1Padding" (or "RSA/ECB/OAEPPadding") for
+ *    PKCS#1 v2.2 padding.
  *  . "RSA/ECB/NoPadding" for rsa RSA.
  *
  * We only do one RSA operation per doFinal() call. If the application passes
@@ -81,7 +84,7 @@ public final class RSACipher extends CipherSpi {
     private final static String PAD_NONE  = "NoPadding";
     // constant for PKCS#1 v1.5 RSA
     private final static String PAD_PKCS1 = "PKCS1Padding";
-    // constant for PKCS#2 v2.0 OAEP with MGF1
+    // constant for PKCS#2 v2.2 OAEP with MGF1
     private final static String PAD_OAEP_MGF1  = "OAEP";
 
     // current mode, one of MODE_* above. Set when init() is called
@@ -329,7 +332,7 @@ public final class RSACipher extends CipherSpi {
         if ((inLen == 0) || (in == null)) {
             return;
         }
-        if (bufOfs + inLen > buffer.length) {
+        if (inLen > (buffer.length - bufOfs)) {
             bufOfs = buffer.length + 1;
             return;
         }
@@ -344,28 +347,40 @@ public final class RSACipher extends CipherSpi {
             throw new IllegalBlockSizeException("Data must not be longer "
                 + "than " + buffer.length + " bytes");
         }
+        byte[] paddingCopy = null;
+        byte[] result = null;
         try {
-            byte[] data;
             switch (mode) {
             case MODE_SIGN:
-                data = padding.pad(buffer, 0, bufOfs);
-                return RSACore.rsa(data, privateKey, true);
+                paddingCopy = padding.pad(buffer, 0, bufOfs);
+                result = RSACore.rsa(paddingCopy, privateKey, true);
+                break;
             case MODE_VERIFY:
                 byte[] verifyBuffer = RSACore.convert(buffer, 0, bufOfs);
-                data = RSACore.rsa(verifyBuffer, publicKey);
-                return padding.unpad(data);
+                paddingCopy = RSACore.rsa(verifyBuffer, publicKey);
+                result = padding.unpad(paddingCopy);
+                break;
             case MODE_ENCRYPT:
-                data = padding.pad(buffer, 0, bufOfs);
-                return RSACore.rsa(data, publicKey);
+                paddingCopy = padding.pad(buffer, 0, bufOfs);
+                result = RSACore.rsa(paddingCopy, publicKey);
+                break;
             case MODE_DECRYPT:
                 byte[] decryptBuffer = RSACore.convert(buffer, 0, bufOfs);
-                data = RSACore.rsa(decryptBuffer, privateKey, false);
-                return padding.unpad(data);
+                paddingCopy = RSACore.rsa(decryptBuffer, privateKey, false);
+                result = padding.unpad(paddingCopy);
+                break;
             default:
                 throw new AssertionError("Internal error");
             }
+            return result;
         } finally {
+            Arrays.fill(buffer, 0, bufOfs, (byte)0);
             bufOfs = 0;
+            if (paddingCopy != null             // will not happen
+                    && paddingCopy != buffer    // already cleaned
+                    && paddingCopy != result) { // DO NOT CLEAN, THIS IS RESULT!
+                Arrays.fill(paddingCopy, (byte)0);
+            }
         }
     }
 
@@ -401,6 +416,7 @@ public final class RSACipher extends CipherSpi {
         byte[] result = doFinal();
         int n = result.length;
         System.arraycopy(result, 0, out, outOfs, n);
+        Arrays.fill(result, (byte)0);
         return n;
     }
 
@@ -411,15 +427,19 @@ public final class RSACipher extends CipherSpi {
         if ((encoded == null) || (encoded.length == 0)) {
             throw new InvalidKeyException("Could not obtain encoded key");
         }
-        if (encoded.length > buffer.length) {
-            throw new InvalidKeyException("Key is too long for wrapping");
-        }
-        update(encoded, 0, encoded.length);
         try {
-            return doFinal();
-        } catch (BadPaddingException e) {
-            // should not occur
-            throw new InvalidKeyException("Wrapping failed", e);
+            if (encoded.length > buffer.length) {
+                throw new InvalidKeyException("Key is too long for wrapping");
+            }
+            update(encoded, 0, encoded.length);
+            try {
+                return doFinal();
+            } catch (BadPaddingException e) {
+                // should not occur
+                throw new InvalidKeyException("Wrapping failed", e);
+            }
+        } finally {
+            Arrays.fill(encoded, (byte)0);
         }
     }
 
@@ -449,20 +469,26 @@ public final class RSACipher extends CipherSpi {
             throw new InvalidKeyException("Unwrapping failed", e);
         }
 
-        if (isTlsRsaPremasterSecret) {
-            if (!(spec instanceof TlsRsaPremasterSecretParameterSpec)) {
-                throw new IllegalStateException(
-                        "No TlsRsaPremasterSecretParameterSpec specified");
+        try {
+            if (isTlsRsaPremasterSecret) {
+                if (!(spec instanceof TlsRsaPremasterSecretParameterSpec)) {
+                    throw new IllegalStateException(
+                            "No TlsRsaPremasterSecretParameterSpec specified");
+                }
+
+                // polish the TLS premaster secret
+                encoded = KeyUtil.checkTlsPreMasterSecretKey(
+                        ((TlsRsaPremasterSecretParameterSpec) spec).getClientVersion(),
+                        ((TlsRsaPremasterSecretParameterSpec) spec).getServerVersion(),
+                        random, encoded, (failover != null));
             }
 
-            // polish the TLS premaster secret
-            encoded = KeyUtil.checkTlsPreMasterSecretKey(
-                ((TlsRsaPremasterSecretParameterSpec)spec).getClientVersion(),
-                ((TlsRsaPremasterSecretParameterSpec)spec).getServerVersion(),
-                random, encoded, (failover != null));
+            return ConstructKeys.constructKey(encoded, algorithm, type);
+        } finally {
+            if (encoded != null) {
+                Arrays.fill(encoded, (byte) 0);
+            }
         }
-
-        return ConstructKeys.constructKey(encoded, algorithm, type);
     }
 
     // see JCE spec

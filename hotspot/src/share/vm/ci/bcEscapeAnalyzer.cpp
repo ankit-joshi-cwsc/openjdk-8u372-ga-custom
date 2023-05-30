@@ -894,8 +894,32 @@ void BCEscapeAnalyzer::iterate_one_block(ciBlock *blk, StateInfo &state, Growabl
           ciMethod* target = s.get_method(ignored_will_link, &declared_signature);
           ciKlass*  holder = s.get_declared_method_holder();
           assert(declared_signature != NULL, "cannot be null");
-          // Push appendix argument, if one.
-          if (s.has_appendix()) {
+          // If the current bytecode has an attached appendix argument,
+          // push an unknown object to represent that argument. (Analysis
+          // of dynamic call sites, especially invokehandle calls, needs
+          // the appendix argument on the stack, in addition to "regular" arguments
+          // pushed onto the stack by bytecode instructions preceding the call.)
+          //
+          // The escape analyzer does _not_ use the ciBytecodeStream::has_appendix(s)
+          // method to determine whether the current bytecode has an appendix argument.
+          // The has_appendix() method obtains the appendix from the
+          // ConstantPoolCacheEntry::_f1 field, which can happen concurrently with
+          // resolution of dynamic call sites. Callees in the
+          // ciBytecodeStream::get_method() call above also access the _f1 field;
+          // interleaving the get_method() and has_appendix() calls in the current
+          // method with call site resolution can lead to an inconsistent view of
+          // the current method's argument count. In particular, some interleaving(s)
+          // can cause the method's argument count to not include the appendix, which
+          // then leads to stack over-/underflow in the escape analyzer.
+          //
+          // Instead of pushing the argument if has_appendix() is true, the escape analyzer
+          // pushes an appendix for all call sites targeted by invokedynamic and invokehandle
+          // instructions, except if the call site is the _invokeBasic intrinsic
+          // (that intrinsic is always targeted by an invokehandle instruction but does
+          // not have an appendix argument).
+          if (target->is_loaded() &&
+              Bytecodes::has_optional_appendix(s.cur_bc_raw()) &&
+              target->intrinsic_id() != vmIntrinsics::_invokeBasic) {
             state.apush(unknown_obj);
           }
           // Pass in raw bytecode because we need to see invokehandle instructions.
@@ -1170,45 +1194,43 @@ void BCEscapeAnalyzer::iterate_blocks(Arena *arena) {
   }
 }
 
-bool BCEscapeAnalyzer::do_analysis() {
+void BCEscapeAnalyzer::do_analysis() {
   Arena* arena = CURRENT_ENV->arena();
   // identify basic blocks
   _methodBlocks = _method->get_method_blocks();
 
   iterate_blocks(arena);
-  // TEMPORARY
-  return true;
 }
 
 vmIntrinsics::ID BCEscapeAnalyzer::known_intrinsic() {
   vmIntrinsics::ID iid = method()->intrinsic_id();
-
   if (iid == vmIntrinsics::_getClass ||
       iid ==  vmIntrinsics::_fillInStackTrace ||
-      iid == vmIntrinsics::_hashCode)
+      iid == vmIntrinsics::_hashCode) {
     return iid;
-  else
+  } else {
     return vmIntrinsics::_none;
+  }
 }
 
-bool BCEscapeAnalyzer::compute_escape_for_intrinsic(vmIntrinsics::ID iid) {
+void BCEscapeAnalyzer::compute_escape_for_intrinsic(vmIntrinsics::ID iid) {
   ArgumentMap arg;
   arg.clear();
   switch (iid) {
-  case vmIntrinsics::_getClass:
-    _return_local = false;
-    break;
-  case vmIntrinsics::_fillInStackTrace:
-    arg.set(0); // 'this'
-    set_returned(arg);
-    break;
-  case vmIntrinsics::_hashCode:
-    // initialized state is correct
-    break;
+    case vmIntrinsics::_getClass:
+      _return_local = false;
+      _return_allocated = false;
+      break;
+    case vmIntrinsics::_fillInStackTrace:
+      arg.set(0); // 'this'
+      set_returned(arg);
+      break;
+    case vmIntrinsics::_hashCode:
+      // initialized state is correct
+      break;
   default:
     assert(false, "unexpected intrinsic");
   }
-  return true;
 }
 
 void BCEscapeAnalyzer::initialize() {
@@ -1279,7 +1301,7 @@ void BCEscapeAnalyzer::compute_escape_info() {
   vmIntrinsics::ID iid = known_intrinsic();
 
   // check if method can be analyzed
-  if (iid ==  vmIntrinsics::_none && (method()->is_abstract() || method()->is_native() || !method()->holder()->is_initialized()
+  if (iid == vmIntrinsics::_none && (method()->is_abstract() || method()->is_native() || !method()->holder()->is_initialized()
       || _level > MaxBCEAEstimateLevel
       || method()->code_size() > MaxBCEAEstimateSize)) {
     if (BCEATraceLevel >= 1) {
@@ -1312,8 +1334,6 @@ void BCEscapeAnalyzer::compute_escape_info() {
     tty->print_cr(" (%d bytes)", method()->code_size());
   }
 
-  bool success;
-
   initialize();
 
   // Do not scan method if it has no object parameters and
@@ -1329,9 +1349,9 @@ void BCEscapeAnalyzer::compute_escape_info() {
   }
 
   if (iid != vmIntrinsics::_none)
-    success = compute_escape_for_intrinsic(iid);
+    compute_escape_for_intrinsic(iid);
   else {
-    success = do_analysis();
+    do_analysis();
   }
 
   // don't store interprocedural escape information if it introduces

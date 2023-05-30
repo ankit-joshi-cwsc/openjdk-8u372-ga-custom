@@ -29,6 +29,9 @@
 #ifdef TARGET_ARCH_x86
 # include "c2_globals_x86.hpp"
 #endif
+#ifdef TARGET_ARCH_aarch64
+# include "c2_globals_aarch64.hpp"
+#endif
 #ifdef TARGET_ARCH_sparc
 # include "c2_globals_sparc.hpp"
 #endif
@@ -60,10 +63,10 @@
 
 #define C2_FLAGS(develop, develop_pd, product, product_pd, diagnostic, experimental, notproduct) \
                                                                             \
-  develop(bool, StressLCM, false,                                           \
+  diagnostic(bool, StressLCM, false,                                        \
           "Randomize instruction scheduling in LCM")                        \
                                                                             \
-  develop(bool, StressGCM, false,                                           \
+  diagnostic(bool, StressGCM, false,                                        \
           "Randomize instruction scheduling in GCM")                        \
                                                                             \
   notproduct(intx, CompileZapFirst, 0,                                      \
@@ -204,6 +207,9 @@
                                                                             \
   notproduct(bool, TraceProfileTripCount, false,                            \
           "Trace profile loop trip count information")                      \
+                                                                            \
+  product(bool, UseCountedLoopSafepoints, false,                            \
+          "Force counted loops to keep a safepoint")                        \
                                                                             \
   product(bool, UseLoopPredicate, true,                                     \
           "Generate a predicate to select fast/slow loop versions")         \
@@ -356,9 +362,6 @@
   notproduct(ccstr, PrintIdealGraphFile, NULL,                              \
           "File to dump ideal graph to.  If set overrides the "             \
           "use of the network")                                             \
-                                                                            \
-  product(bool, UseOldInlining, true,                                       \
-          "Enable the 1.3 inlining strategy")                               \
                                                                             \
   product(bool, UseBimorphicInlining, true,                                 \
           "Profiling based inlining for two receivers")                     \
@@ -659,6 +662,18 @@
   product(bool, UseMultiplyToLenIntrinsic, false,                           \
           "Enables intrinsification of BigInteger.multiplyToLen()")         \
                                                                             \
+  product(bool, UseSquareToLenIntrinsic, false,                             \
+          "Enables intrinsification of BigInteger.squareToLen()")           \
+                                                                            \
+  product(bool, UseMulAddIntrinsic, false,                                  \
+          "Enables intrinsification of BigInteger.mulAdd()")                \
+                                                                            \
+  product(bool, UseMontgomeryMultiplyIntrinsic, false,                      \
+          "Enables intrinsification of BigInteger.montgomeryMultiply()")    \
+                                                                            \
+  product(bool, UseMontgomerySquareIntrinsic, false,                        \
+          "Enables intrinsification of BigInteger.montgomerySquare()")      \
+                                                                            \
   product(bool, UseTypeSpeculation, true,                                   \
           "Speculatively propagate types from profiles")                    \
                                                                             \
@@ -669,6 +684,9 @@
   product_pd(bool, TrapBasedRangeChecks,                                    \
           "Generate code for range checks that uses a cmp and trap "        \
           "instruction raising SIGTRAP. Used on PPC64.")                    \
+                                                                            \
+  develop(bool, RenumberLiveNodes, true,                                    \
+          "Renumber live nodes")                                            \
 
 C2_FLAGS(DECLARE_DEVELOPER_FLAG, DECLARE_PD_DEVELOPER_FLAG, DECLARE_PRODUCT_FLAG, DECLARE_PD_PRODUCT_FLAG, DECLARE_DIAGNOSTIC_FLAG, DECLARE_EXPERIMENTAL_FLAG, DECLARE_NOTPRODUCT_FLAG)
 

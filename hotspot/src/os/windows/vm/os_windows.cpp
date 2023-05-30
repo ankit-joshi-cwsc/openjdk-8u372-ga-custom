@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -716,6 +716,16 @@ typedef UINT_PTR DWORD_PTR;
 #endif
 
 int os::active_processor_count() {
+  // User has overridden the number of active processors
+  if (ActiveProcessorCount > 0) {
+    if (PrintActiveCpus) {
+      tty->print_cr("active_processor_count: "
+                    "active processor count set by user : %d",
+                     ActiveProcessorCount);
+    }
+    return ActiveProcessorCount;
+  }
+
   DWORD_PTR lpProcessAffinityMask = 0;
   DWORD_PTR lpSystemAffinityMask = 0;
   int proc_count = processor_count();
@@ -734,8 +744,29 @@ int os::active_processor_count() {
 }
 
 void os::set_native_thread_name(const char *name) {
-  // Not yet implemented.
-  return;
+
+  // See: http://msdn.microsoft.com/en-us/library/xcb2z8hs.aspx
+  //
+  // Note that unfortunately this only works if the process
+  // is already attached to a debugger; debugger must observe
+  // the exception below to show the correct name.
+
+  const DWORD MS_VC_EXCEPTION = 0x406D1388;
+  struct {
+    DWORD dwType;     // must be 0x1000
+    LPCSTR szName;    // pointer to name (in user addr space)
+    DWORD dwThreadID; // thread ID (-1=caller thread)
+    DWORD dwFlags;    // reserved for future use, must be zero
+  } info;
+
+  info.dwType = 0x1000;
+  info.szName = name;
+  info.dwThreadID = -1;
+  info.dwFlags = 0;
+
+  __try {
+    RaiseException (MS_VC_EXCEPTION, 0, sizeof(info)/sizeof(DWORD), (const ULONG_PTR*)&info );
+  } __except(EXCEPTION_CONTINUE_EXECUTION) {}
 }
 
 bool os::distribute_processes(uint length, uint* distribution) {
@@ -1141,14 +1172,12 @@ os::opendir(const char *dirname)
     return dirp;
 }
 
-/* parameter dbuf unused on Windows */
-
 struct dirent *
-os::readdir(DIR *dirp, dirent *dbuf)
+os::readdir(DIR *dirp)
 {
     assert(dirp != NULL, "just checking");      // hotspot change
     if (dirp->handle == INVALID_HANDLE_VALUE) {
-        return 0;
+        return NULL;
     }
 
     strcpy(dirp->dirent.d_name, dirp->find_data.cFileName);
@@ -1156,7 +1185,7 @@ os::readdir(DIR *dirp, dirent *dbuf)
     if (!FindNextFile(dirp->handle, &dirp->find_data)) {
         if (GetLastError() == ERROR_INVALID_HANDLE) {
             errno = EBADF;
-            return 0;
+            return NULL;
         }
         FindClose(dirp->handle);
         dirp->handle = INVALID_HANDLE_VALUE;
@@ -1640,6 +1669,50 @@ void os::print_dll_info(outputStream *st) {
    enumerate_modules(pid, _print_module, (void *)st);
 }
 
+int os::get_loaded_modules_info(os::LoadedModulesCallbackFunc callback, void *param) {
+  HANDLE   hProcess;
+
+# define MAX_NUM_MODULES 128
+  HMODULE     modules[MAX_NUM_MODULES];
+  static char filename[MAX_PATH];
+  int         result = 0;
+
+  int pid = os::current_process_id();
+  hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+                         FALSE, pid);
+  if (hProcess == NULL) return 0;
+
+  DWORD size_needed;
+  if (!EnumProcessModules(hProcess, modules, sizeof(modules), &size_needed)) {
+    CloseHandle(hProcess);
+    return 0;
+  }
+
+  // number of modules that are currently loaded
+  int num_modules = size_needed / sizeof(HMODULE);
+
+  for (int i = 0; i < MIN2(num_modules, MAX_NUM_MODULES); i++) {
+    // Get Full pathname:
+    if (!GetModuleFileNameEx(hProcess, modules[i], filename, sizeof(filename))) {
+      filename[0] = '\0';
+    }
+
+    MODULEINFO modinfo;
+    if (!GetModuleInformation(hProcess, modules[i], &modinfo, sizeof(modinfo))) {
+      modinfo.lpBaseOfDll = NULL;
+      modinfo.SizeOfImage = 0;
+    }
+
+    // Invoke callback function
+    result = callback(filename, (address)modinfo.lpBaseOfDll,
+                      (address)((u8)modinfo.lpBaseOfDll + (u8)modinfo.SizeOfImage), param);
+    if (result) break;
+  }
+
+  CloseHandle(hProcess);
+  return result;
+}
+
 void os::print_os_info_brief(outputStream* st) {
   os::print_os_info(st);
 }
@@ -1743,12 +1816,25 @@ void os::win32::print_windows_version(outputStream* st) {
     }
     break;
 
-  case 6004:
+  case 10000:
     if (is_workstation) {
-      st->print("10");
+      if (build_number >= 22000) {
+        st->print("11");
+      } else {
+        st->print("10");
+      }
     } else {
-      // The server version name of Windows 10 is not known at this time
-      st->print("%d.%d", major_version, minor_version);
+      // distinguish Windows Server by build number
+      // - 2016 GA 10/2016 build: 14393
+      // - 2019 GA 11/2018 build: 17763
+      // - 2022 GA 08/2021 build: 20348
+      if (build_number > 20347) {
+        st->print("Server 2022");
+      } else if (build_number > 17762) {
+        st->print("Server 2019");
+      } else {
+        st->print("Server 2016");
+      }
     }
     break;
 
@@ -1826,6 +1912,42 @@ void os::print_siginfo(outputStream *st, void *siginfo) {
     }
   }
   st->cr();
+}
+
+
+int os::vsnprintf(char* buf, size_t len, const char* fmt, va_list args) {
+#if _MSC_VER >= 1900
+  // Starting with Visual Studio 2015, vsnprint is C99 compliant.
+  int result = ::vsnprintf(buf, len, fmt, args);
+  // If an encoding error occurred (result < 0) then it's not clear
+  // whether the buffer is NUL terminated, so ensure it is.
+  if ((result < 0) && (len > 0)) {
+    buf[len - 1] = '\0';
+  }
+  return result;
+#else
+  // Before Visual Studio 2015, vsnprintf is not C99 compliant, so use
+  // _vsnprintf, whose behavior seems to be *mostly* consistent across
+  // versions.  However, when len == 0, avoid _vsnprintf too, and just
+  // go straight to _vscprintf.  The output is going to be truncated in
+  // that case, except in the unusual case of empty output.  More
+  // importantly, the documentation for various versions of Visual Studio
+  // are inconsistent about the behavior of _vsnprintf when len == 0,
+  // including it possibly being an error.
+  int result = -1;
+  if (len > 0) {
+    result = _vsnprintf(buf, len, fmt, args);
+    // If output (including NUL terminator) is truncated, the buffer
+    // won't be NUL terminated.  Add the trailing NUL specified by C99.
+    if ((result < 0) || (result >= (int) len)) {
+      buf[len - 1] = '\0';
+    }
+  }
+  if (result < 0) {
+    result = _vscprintf(fmt, args);
+  }
+  return result;
+#endif // _MSC_VER dispatch
 }
 
 void os::print_signal_handlers(outputStream* st, char* buf, size_t buflen) {
@@ -2188,13 +2310,6 @@ extern "C" void events();
 // Windows Vista/2008 heap corruption check
 #define EXCEPTION_HEAP_CORRUPTION        0xC0000374
 
-#define def_excpt(val) #val, val
-
-struct siglabel {
-  char *name;
-  int   number;
-};
-
 // All Visual C++ exceptions thrown from code generated by the Microsoft Visual
 // C++ compiler contain this error code. Because this is a compiler-generated
 // error, the code is not listed in the Win32 API header files.
@@ -2204,8 +2319,9 @@ struct siglabel {
 
 #define EXCEPTION_UNCAUGHT_CXX_EXCEPTION    0xE06D7363
 
+#define def_excpt(val) { #val, (val) }
 
-struct siglabel exceptlabels[] = {
+static const struct { char* name; uint number; } exceptlabels[] = {
     def_excpt(EXCEPTION_ACCESS_VIOLATION),
     def_excpt(EXCEPTION_DATATYPE_MISALIGNMENT),
     def_excpt(EXCEPTION_BREAKPOINT),
@@ -2230,16 +2346,16 @@ struct siglabel exceptlabels[] = {
     def_excpt(EXCEPTION_GUARD_PAGE),
     def_excpt(EXCEPTION_INVALID_HANDLE),
     def_excpt(EXCEPTION_UNCAUGHT_CXX_EXCEPTION),
-    def_excpt(EXCEPTION_HEAP_CORRUPTION),
+    def_excpt(EXCEPTION_HEAP_CORRUPTION)
 #ifdef _M_IA64
-    def_excpt(EXCEPTION_REG_NAT_CONSUMPTION),
+    , def_excpt(EXCEPTION_REG_NAT_CONSUMPTION)
 #endif
-    NULL, 0
 };
 
 const char* os::exception_name(int exception_code, char *buf, size_t size) {
-  for (int i = 0; exceptlabels[i].name != NULL; i++) {
-    if (exceptlabels[i].number == exception_code) {
+  uint code = static_cast<uint>(exception_code);
+  for (uint i = 0; i < ARRAY_SIZE(exceptlabels); ++i) {
+    if (exceptlabels[i].number == code) {
        jio_snprintf(buf, size, "%s", exceptlabels[i].name);
        return buf;
     }
@@ -2262,9 +2378,9 @@ LONG Handle_IDiv_Exception(struct _EXCEPTION_POINTERS* exceptionInfo) {
   assert((pc[1] & ~0x7) == 0xF8, "cannot handle non-register operands");
   assert(ctx->Rax == min_jint, "unexpected idiv exception");
   // set correct result values and continue after idiv instruction
-  ctx->Rip = (DWORD)pc + 2;        // idiv reg, reg  is 2 bytes
-  ctx->Rax = (DWORD)min_jint;      // result
-  ctx->Rdx = (DWORD)0;             // remainder
+  ctx->Rip = (DWORD64)pc + 2;        // idiv reg, reg  is 2 bytes
+  ctx->Rax = (DWORD64)min_jint;      // result
+  ctx->Rdx = (DWORD64)0;             // remainder
   // Continue the execution
   #else
   PCONTEXT ctx = exceptionInfo->ContextRecord;
@@ -4288,6 +4404,22 @@ jlong os::lseek(int fd, jlong offset, int whence) {
   return (jlong) ::_lseeki64(fd, offset, whence);
 }
 
+size_t os::read_at(int fd, void *buf, unsigned int nBytes, jlong offset) {
+  OVERLAPPED ov;
+  DWORD nread;
+  BOOL result;
+
+  ZeroMemory(&ov, sizeof(ov));
+  ov.Offset = (DWORD)offset;
+  ov.OffsetHigh = (DWORD)(offset >> 32);
+
+  HANDLE h = (HANDLE)::_get_osfhandle(fd);
+
+  result = ReadFile(h, (LPVOID)buf, nBytes, &nread, &ov);
+
+  return result ? nread : 0;
+}
+
 // This method is a slightly reworked copy of JDK's sysNativePath
 // from src/windows/hpi/src/path_md.c
 
@@ -4747,31 +4879,37 @@ void os::pause() {
   }
 }
 
-os::WatcherThreadCrashProtection::WatcherThreadCrashProtection() {
-  assert(Thread::current()->is_Watcher_thread(), "Must be WatcherThread");
+Thread* os::ThreadCrashProtection::_protected_thread = NULL;
+os::ThreadCrashProtection* os::ThreadCrashProtection::_crash_protection = NULL;
+volatile intptr_t os::ThreadCrashProtection::_crash_mux = 0;
+
+os::ThreadCrashProtection::ThreadCrashProtection() {
 }
 
-/*
- * See the caveats for this class in os_windows.hpp
- * Protects the callback call so that raised OS EXCEPTIONS causes a jump back
- * into this method and returns false. If no OS EXCEPTION was raised, returns
- * true.
- * The callback is supposed to provide the method that should be protected.
- */
-bool os::WatcherThreadCrashProtection::call(os::CrashProtectionCallback& cb) {
-  assert(Thread::current()->is_Watcher_thread(), "Only for WatcherThread");
-  assert(!WatcherThread::watcher_thread()->has_crash_protection(),
-      "crash_protection already set?");
+// See the caveats for this class in os_windows.hpp
+// Protects the callback call so that raised OS EXCEPTIONS causes a jump back
+// into this method and returns false. If no OS EXCEPTION was raised, returns
+// true.
+// The callback is supposed to provide the method that should be protected.
+//
+bool os::ThreadCrashProtection::call(os::CrashProtectionCallback& cb) {
+
+  Thread::muxAcquire(&_crash_mux, "CrashProtection");
+
+  _protected_thread = ThreadLocalStorage::thread();
+  assert(_protected_thread != NULL, "Cannot crash protect a NULL thread");
 
   bool success = true;
   __try {
-    WatcherThread::watcher_thread()->set_crash_protection(this);
+    _crash_protection = this;
     cb.call();
   } __except(EXCEPTION_EXECUTE_HANDLER) {
     // only for protection, nothing to do
     success = false;
   }
-  WatcherThread::watcher_thread()->set_crash_protection(NULL);
+  _crash_protection = NULL;
+  _protected_thread = NULL;
+  Thread::muxRelease(&_crash_mux);
   return success;
 }
 
@@ -4995,7 +5133,7 @@ void Parker::unpark() {
 
 // Run the specified command in a separate process. Return its exit value,
 // or -1 on failure (e.g. can't create a new process).
-int os::fork_and_exec(char* cmd) {
+int os::fork_and_exec(char* cmd, bool use_vfork_if_available) {
   STARTUPINFO si;
   PROCESS_INFORMATION pi;
 
@@ -5783,7 +5921,7 @@ void TestReserveMemorySpecial_test() {
   char* result = os::reserve_memory_special(large_allocation_size, os::large_page_size(), NULL, false);
   if (result == NULL) {
     if (VerboseInternalVMTests) {
-      gclog_or_tty->print("Failed to allocate control block with size "SIZE_FORMAT". Skipping remainder of test.",
+      gclog_or_tty->print("Failed to allocate control block with size " SIZE_FORMAT ". Skipping remainder of test.",
         large_allocation_size);
     }
   } else {
@@ -5796,7 +5934,7 @@ void TestReserveMemorySpecial_test() {
     char* actual_location = os::reserve_memory_special(expected_allocation_size, os::large_page_size(), expected_location, false);
     if (actual_location == NULL) {
       if (VerboseInternalVMTests) {
-        gclog_or_tty->print("Failed to allocate any memory at "PTR_FORMAT" size "SIZE_FORMAT". Skipping remainder of test.",
+        gclog_or_tty->print("Failed to allocate any memory at " PTR_FORMAT " size " SIZE_FORMAT ". Skipping remainder of test.",
           expected_location, large_allocation_size);
       }
     } else {
@@ -5804,7 +5942,7 @@ void TestReserveMemorySpecial_test() {
       os::release_memory_special(actual_location, expected_allocation_size);
       // only now check, after releasing any memory to avoid any leaks.
       assert(actual_location == expected_location,
-        err_msg("Failed to allocate memory at requested location "PTR_FORMAT" of size "SIZE_FORMAT", is "PTR_FORMAT" instead",
+        err_msg("Failed to allocate memory at requested location " PTR_FORMAT " of size " SIZE_FORMAT ", is " PTR_FORMAT " instead",
           expected_location, expected_allocation_size, actual_location));
     }
   }

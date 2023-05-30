@@ -36,6 +36,10 @@
 
 #include <sys/ptrace.h>
 
+#if defined(aarch64)
+#include "asm/ptrace.h"
+#endif
+
 /************************************************************************************
 
 0. This is very minimal subset of Solaris libproc just enough for current application.
@@ -69,7 +73,11 @@ combination of ptrace and /proc calls.
 
 
 #if defined(sparc) || defined(sparcv9) || defined(ppc64)
+#include <asm/ptrace.h>
 #define user_regs_struct  pt_regs
+#endif
+#if defined(aarch64)
+#define user_regs_struct user_pt_regs
 #endif
 
 // This C bool type must be int for compatibility with Linux calls and
@@ -82,7 +90,7 @@ typedef int bool;
 struct ps_prochandle;
 
 // attach to a process
-struct ps_prochandle* Pgrab(pid_t pid);
+struct ps_prochandle* Pgrab(pid_t pid, char* err_buf, size_t err_buf_len);
 
 // attach to a core dump
 struct ps_prochandle* Pgrab_core(const char* execfile, const char* corefile);

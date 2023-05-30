@@ -864,7 +864,7 @@ void GraphKit::add_safepoint_edges(SafePointNode* call, bool must_throw) {
     }
   }
 
-  if (env()->jvmti_can_access_local_variables()) {
+  if (env()->should_retain_local_variables()) {
     // At any safepoint, this method can get breakpointed, which would
     // then require an immediate deoptimization.
     can_prune_locals = false;  // do not prune locals
@@ -1452,7 +1452,11 @@ void GraphKit::set_all_memory_call(Node* call, bool separate_io_proj) {
 // factory methods in "int adr_idx"
 Node* GraphKit::make_load(Node* ctl, Node* adr, const Type* t, BasicType bt,
                           int adr_idx,
-                          MemNode::MemOrd mo, LoadNode::ControlDependency control_dependency, bool require_atomic_access) {
+                          MemNode::MemOrd mo,
+                          LoadNode::ControlDependency control_dependency,
+                          bool require_atomic_access,
+                          bool unaligned,
+                          bool mismatched) {
   assert(adr_idx != Compile::AliasIdxTop, "use other make_load factory" );
   const TypePtr* adr_type = NULL; // debug-mode-only argument
   debug_only(adr_type = C->get_adr_type(adr_idx));
@@ -1465,6 +1469,12 @@ Node* GraphKit::make_load(Node* ctl, Node* adr, const Type* t, BasicType bt,
   } else {
     ld = LoadNode::make(_gvn, ctl, mem, adr, adr_type, t, bt, mo, control_dependency);
   }
+  if (unaligned) {
+    ld->as_Load()->set_unaligned_access();
+  }
+  if (mismatched) {
+    ld->as_Load()->set_mismatched_access();
+  }
   ld = _gvn.transform(ld);
   if ((bt == T_OBJECT) && C->do_escape_analysis() || C->eliminate_boxing()) {
     // Improve graph before escape analysis and boxing elimination.
@@ -1476,7 +1486,9 @@ Node* GraphKit::make_load(Node* ctl, Node* adr, const Type* t, BasicType bt,
 Node* GraphKit::store_to_memory(Node* ctl, Node* adr, Node *val, BasicType bt,
                                 int adr_idx,
                                 MemNode::MemOrd mo,
-                                bool require_atomic_access) {
+                                bool require_atomic_access,
+                                bool unaligned,
+                                bool mismatched) {
   assert(adr_idx != Compile::AliasIdxTop, "use other store_to_memory factory" );
   const TypePtr* adr_type = NULL;
   debug_only(adr_type = C->get_adr_type(adr_idx));
@@ -1488,6 +1500,12 @@ Node* GraphKit::store_to_memory(Node* ctl, Node* adr, Node *val, BasicType bt,
     st = StoreDNode::make_atomic(C, ctl, mem, adr, adr_type, val, mo);
   } else {
     st = StoreNode::make(_gvn, ctl, mem, adr, adr_type, val, bt, mo);
+  }
+  if (unaligned) {
+    st->as_Store()->set_unaligned_access();
+  }
+  if (mismatched) {
+    st->as_Store()->set_mismatched_access();
   }
   st = _gvn.transform(st);
   set_memory(st, adr_idx);
@@ -1588,7 +1606,8 @@ Node* GraphKit::store_oop(Node* ctl,
                           const TypeOopPtr* val_type,
                           BasicType bt,
                           bool use_precise,
-                          MemNode::MemOrd mo) {
+                          MemNode::MemOrd mo,
+                          bool mismatched) {
   // Transformation of a value which could be NULL pointer (CastPP #NULL)
   // could be delayed during Parse (for example, in adjust_map_after_if()).
   // Execute transformation here to avoid barrier generation in such case.
@@ -1608,7 +1627,7 @@ Node* GraphKit::store_oop(Node* ctl,
               NULL /* pre_val */,
               bt);
 
-  Node* store = store_to_memory(control(), adr, val, bt, adr_idx, mo);
+  Node* store = store_to_memory(control(), adr, val, bt, adr_idx, mo, mismatched);
   post_barrier(control(), store, obj, adr, adr_idx, val, bt, use_precise);
   return store;
 }
@@ -1620,7 +1639,8 @@ Node* GraphKit::store_oop_to_unknown(Node* ctl,
                              const TypePtr* adr_type,
                              Node* val,
                              BasicType bt,
-                             MemNode::MemOrd mo) {
+                             MemNode::MemOrd mo,
+                             bool mismatched) {
   Compile::AliasType* at = C->alias_type(adr_type);
   const TypeOopPtr* val_type = NULL;
   if (adr_type->isa_instptr()) {
@@ -1639,13 +1659,13 @@ Node* GraphKit::store_oop_to_unknown(Node* ctl,
   if (val_type == NULL) {
     val_type = TypeInstPtr::BOTTOM;
   }
-  return store_oop(ctl, obj, adr, adr_type, val, val_type, bt, true, mo);
+  return store_oop(ctl, obj, adr, adr_type, val, val_type, bt, true, mo, mismatched);
 }
 
 
 //-------------------------array_element_address-------------------------
 Node* GraphKit::array_element_address(Node* ary, Node* idx, BasicType elembt,
-                                      const TypeInt* sizetype) {
+                                      const TypeInt* sizetype, Node* ctrl) {
   uint shift  = exact_log2(type2aelembytes(elembt));
   uint header = arrayOopDesc::base_offset_in_bytes(elembt);
 
@@ -1670,9 +1690,9 @@ Node* GraphKit::array_element_address(Node* ary, Node* idx, BasicType elembt,
   // number.  (The prior range check has ensured this.)
   // This assertion is used by ConvI2LNode::Ideal.
   int index_max = max_jint - 1;  // array size is max_jint, index is one less
-  if (sizetype != NULL)  index_max = sizetype->_hi - 1;
-  const TypeLong* lidxtype = TypeLong::make(CONST64(0), index_max, Type::WidenMax);
-  idx = _gvn.transform( new (C) ConvI2LNode(idx, lidxtype) );
+  if (sizetype != NULL) index_max = sizetype->_hi - 1;
+  const TypeInt* iidxtype = TypeInt::make(0, index_max, Type::WidenMax);
+  idx = C->constrained_convI2L(&_gvn, idx, iidxtype, ctrl);
 #endif
   Node* scale = _gvn.transform( new (C) LShiftXNode(idx, intcon(shift)) );
   return basic_plus_adr(ary, base, scale);
@@ -1683,6 +1703,9 @@ Node* GraphKit::load_array_element(Node* ctl, Node* ary, Node* idx, const TypeAr
   const Type* elemtype = arytype->elem();
   BasicType elembt = elemtype->array_element_basic_type();
   Node* adr = array_element_address(ary, idx, elembt, arytype->size());
+  if (elembt == T_NARROWOOP) {
+    elembt = T_OBJECT; // To satisfy switch in LoadNode::make()
+  }
   Node* ld = make_load(ctl, adr, elemtype, elembt, arytype, MemNode::unordered);
   return ld;
 }
@@ -1764,12 +1787,13 @@ Node* GraphKit::set_results_for_java_call(CallJavaNode* call, bool separate_io_p
 // A better answer would be to separate out card marks from other memory.
 // For now, return the input memory state, so that it can be reused
 // after the call, if this call has restricted memory effects.
-Node* GraphKit::set_predefined_input_for_runtime_call(SafePointNode* call) {
+Node* GraphKit::set_predefined_input_for_runtime_call(SafePointNode* call, Node* narrow_mem) {
   // Set fixed predefined input arguments
   Node* memory = reset_memory();
+  Node* m = narrow_mem == NULL ? memory : narrow_mem;
   call->init_req( TypeFunc::Control,   control()  );
   call->init_req( TypeFunc::I_O,       top()      ); // does no i/o
-  call->init_req( TypeFunc::Memory,    memory     ); // may gc ptrs
+  call->init_req( TypeFunc::Memory,    m          ); // may gc ptrs
   call->init_req( TypeFunc::FramePtr,  frameptr() );
   call->init_req( TypeFunc::ReturnAdr, top()      );
   return memory;
@@ -2359,9 +2383,7 @@ Node* GraphKit::make_runtime_call(int flags,
   } else {
     assert(!wide_out, "narrow in => narrow out");
     Node* narrow_mem = memory(adr_type);
-    prev_mem = reset_memory();
-    map()->set_memory(narrow_mem);
-    set_predefined_input_for_runtime_call(call);
+    prev_mem = set_predefined_input_for_runtime_call(call, narrow_mem);
   }
 
   // Hook each parm in order.  Stop looking at the first NULL.
@@ -3491,10 +3513,6 @@ Node* GraphKit::new_array(Node* klass_node,     // array klass (maybe variable)
 
   Node* initial_slow_cmp  = _gvn.transform( new (C) CmpUNode( length, intcon( fast_size_limit ) ) );
   Node* initial_slow_test = _gvn.transform( new (C) BoolNode( initial_slow_cmp, BoolTest::gt ) );
-  if (initial_slow_test->is_Bool()) {
-    // Hide it behind a CMoveI, or else PhaseIdealLoop::split_up will get sick.
-    initial_slow_test = initial_slow_test->as_Bool()->as_int_value(&_gvn);
-  }
 
   // --- Size Computation ---
   // array_size = round_to_heap(array_header + (length << elem_shift));
@@ -3540,13 +3558,35 @@ Node* GraphKit::new_array(Node* klass_node,     // array klass (maybe variable)
   Node* lengthx = ConvI2X(length);
   Node* headerx = ConvI2X(header_size);
 #ifdef _LP64
-  { const TypeLong* tllen = _gvn.find_long_type(lengthx);
-    if (tllen != NULL && tllen->_lo < 0) {
+  { const TypeInt* tilen = _gvn.find_int_type(length);
+    if (tilen != NULL && tilen->_lo < 0) {
       // Add a manual constraint to a positive range.  Cf. array_element_address.
-      jlong size_max = arrayOopDesc::max_array_length(T_BYTE);
-      if (size_max > tllen->_hi)  size_max = tllen->_hi;
-      const TypeLong* tlcon = TypeLong::make(CONST64(0), size_max, Type::WidenMin);
-      lengthx = _gvn.transform( new (C) ConvI2LNode(length, tlcon));
+      jlong size_max = fast_size_limit;
+      if (size_max > tilen->_hi)  size_max = tilen->_hi;
+      const TypeInt* tlcon = TypeInt::make(0, size_max, Type::WidenMin);
+
+      // Only do a narrow I2L conversion if the range check passed.
+      IfNode* iff = new (C) IfNode(control(), initial_slow_test, PROB_MIN, COUNT_UNKNOWN);
+      _gvn.transform(iff);
+      RegionNode* region = new (C) RegionNode(3);
+      _gvn.set_type(region, Type::CONTROL);
+      lengthx = new (C) PhiNode(region, TypeLong::LONG);
+      _gvn.set_type(lengthx, TypeLong::LONG);
+
+      // Range check passed. Use ConvI2L node with narrow type.
+      Node* passed = IfFalse(iff);
+      region->init_req(1, passed);
+      // Make I2L conversion control dependent to prevent it from
+      // floating above the range check during loop optimizations.
+      lengthx->init_req(1, C->constrained_convI2L(&_gvn, length, tlcon, passed));
+
+      // Range check failed. Use ConvI2L with wide type because length may be invalid.
+      region->init_req(2, IfTrue(iff));
+      lengthx->init_req(2, ConvI2X(length));
+
+      set_control(region);
+      record_for_igvn(region);
+      record_for_igvn(lengthx);
     }
   }
 #endif
@@ -3576,6 +3616,11 @@ Node* GraphKit::new_array(Node* klass_node,     // array klass (maybe variable)
   // since GC and deoptimization can happened.
   Node *mem = reset_memory();
   set_all_memory(mem); // Create new memory state
+
+  if (initial_slow_test->is_Bool()) {
+    // Hide it behind a CMoveI, or else PhaseIdealLoop::split_up will get sick.
+    initial_slow_test = initial_slow_test->as_Bool()->as_int_value(&_gvn);
+  }
 
   // Create the AllocateArrayNode and its result projections
   AllocateArrayNode* alloc
@@ -3803,7 +3848,11 @@ void GraphKit::write_barrier_post(Node* oop_store,
 
   // Smash zero into card
   if( !UseConcMarkSweepGC ) {
+#if defined(AARCH64)
+    __ store(__ ctrl(), card_adr, zero, bt, adr_type, MemNode::unordered);
+#else
     __ store(__ ctrl(), card_adr, zero, bt, adr_type, MemNode::release);
+#endif
   } else {
     // Specialized path for CM store barrier
     __ storeCM(__ ctrl(), card_adr, zero, oop_store, adr_idx, bt, adr_type);

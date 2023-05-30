@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,8 +32,8 @@
 #include "runtime/mutex.hpp"
 #include "utilities/growableArray.hpp"
 #include "utilities/macros.hpp"
-#if INCLUDE_TRACE
-#include "utilities/ticks.hpp"
+#if INCLUDE_JFR
+#include "jfr/support/jfrTraceIdExtension.hpp"
 #endif
 
 //
@@ -51,7 +51,6 @@
 
 class ClassLoaderData;
 class JNIMethodBlock;
-class JNIHandleBlock;
 class Metadebug;
 
 // GC root for walking class loader data created
@@ -71,7 +70,6 @@ class ClassLoaderDataGraph : public AllStatic {
   static bool _should_purge;
 
   static ClassLoaderData* add(Handle class_loader, bool anonymous, TRAPS);
-  static void post_class_unload_events(void);
   static void clean_metaspaces();
  public:
   static ClassLoaderData* find_or_create(Handle class_loader, TRAPS);
@@ -83,6 +81,7 @@ class ClassLoaderDataGraph : public AllStatic {
   static void always_strong_oops_do(OopClosure* blk, KlassClosure* klass_closure, bool must_claim);
   // cld do
   static void cld_do(CLDClosure* cl);
+  static void cld_unloading_do(CLDClosure* cl);
   static void roots_cld_do(CLDClosure* strong, CLDClosure* weak);
   static void keep_alive_cld_do(CLDClosure* cl);
   static void always_strong_cld_do(CLDClosure* cl);
@@ -117,12 +116,6 @@ class ClassLoaderDataGraph : public AllStatic {
 #ifndef PRODUCT
   static bool contains_loader_data(ClassLoaderData* loader_data);
 #endif
-
-#if INCLUDE_TRACE
- private:
-  static Ticks _class_unload_time;
-  static void class_unload_event(Klass* const k);
-#endif
 };
 
 // ClassLoaderData class
@@ -142,6 +135,31 @@ class ClassLoaderData : public CHeapObj<mtClass> {
     }
     void add(Handle dependency, TRAPS);
     void init(TRAPS);
+    void oops_do(OopClosure* f);
+  };
+
+  class ChunkedHandleList VALUE_OBJ_CLASS_SPEC {
+    struct Chunk : public CHeapObj<mtClass> {
+      static const size_t CAPACITY = 32;
+
+      oop _data[CAPACITY];
+      volatile juint _size;
+      Chunk* _next;
+
+      Chunk(Chunk* c) : _next(c), _size(0) { }
+    };
+
+    Chunk* _head;
+
+    void oops_do_chunk(OopClosure* f, Chunk* c, const juint size);
+
+   public:
+    ChunkedHandleList() : _head(NULL) {}
+    ~ChunkedHandleList();
+
+    // Only one thread at a time can add, guarded by ClassLoaderData::metaspace_lock().
+    // However, multiple threads can execute oops_do concurrently with add.
+    oop* add(oop o);
     void oops_do(OopClosure* f);
   };
 
@@ -169,7 +187,8 @@ class ClassLoaderData : public CHeapObj<mtClass> {
                            // Has to be an int because we cas it.
   Klass* _klasses;         // The classes defined by the class loader.
 
-  JNIHandleBlock* _handles; // Handles to constant pool arrays
+  ChunkedHandleList _handles; // Handles to constant pool arrays, etc, which
+                              // have the same life cycle of the corresponding ClassLoader.
 
   // These method IDs are created for the class loader and set to NULL when the
   // class loader is unloaded.  They are rarely freed, only for redefine classes
@@ -188,6 +207,8 @@ class ClassLoaderData : public CHeapObj<mtClass> {
   static Metaspace* _ro_metaspace;
   static Metaspace* _rw_metaspace;
 
+  JFR_ONLY(DEFINE_TRACE_ID_FIELD;)
+
   void set_next(ClassLoaderData* next) { _next = next; }
   ClassLoaderData* next() const        { return _next; }
 
@@ -196,15 +217,7 @@ class ClassLoaderData : public CHeapObj<mtClass> {
 
   void set_metaspace(Metaspace* m) { _metaspace = m; }
 
-  JNIHandleBlock* handles() const;
-  void set_handles(JNIHandleBlock* handles);
-
   Mutex* metaspace_lock() const { return _metaspace_lock; }
-
-  // GC interface.
-  void clear_claimed()          { _claimed = 0; }
-  bool claimed() const          { return _claimed == 1; }
-  bool claim();
 
   void unload();
   bool keep_alive() const       { return _keep_alive; }
@@ -219,6 +232,11 @@ class ClassLoaderData : public CHeapObj<mtClass> {
   MetaWord* allocate(size_t size);
 
  public:
+
+  // GC interface.
+  void clear_claimed()          { _claimed = 0; }
+  bool claimed() const          { return _claimed == 1; }
+  bool claim();
 
   bool is_alive(BoolObjectClosure* is_alive_closure) const;
 
@@ -303,6 +321,8 @@ class ClassLoaderData : public CHeapObj<mtClass> {
   Metaspace* ro_metaspace();
   Metaspace* rw_metaspace();
   void initialize_shared_metaspaces();
+
+  JFR_ONLY(DEFINE_TRACE_ID_METHODS;)
 };
 
 // An iterator that distributes Klasses to parallel worker threads.

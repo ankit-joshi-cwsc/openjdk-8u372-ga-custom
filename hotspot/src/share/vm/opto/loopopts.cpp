@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -40,6 +40,14 @@ Node *PhaseIdealLoop::split_thru_phi( Node *n, Node *region, int policy ) {
   if (n->Opcode() == Op_ConvI2L && n->bottom_type() != TypeLong::LONG) {
     // ConvI2L may have type information on it which is unsafe to push up
     // so disable this for now
+    return NULL;
+  }
+
+  // Splitting range check CastIIs through a loop induction Phi can
+  // cause new Phis to be created that are left unrelated to the loop
+  // induction Phi and prevent optimizations (vectorization)
+  if (n->Opcode() == Op_CastII && n->as_CastII()->has_range_check() &&
+      region->is_CountedLoop() && n->in(1) == region->as_CountedLoop()->phi()) {
     return NULL;
   }
 
@@ -301,6 +309,7 @@ Node *PhaseIdealLoop::has_local_phi_input( Node *n ) {
       }
       return NULL;
     }
+    assert(n->is_Phi() || m->is_Phi() || is_dominator(get_ctrl(m), n_ctrl), "m has strange control");
   }
 
   return n_ctrl;
@@ -601,6 +610,7 @@ Node *PhaseIdealLoop::conditional_move( Node *region ) {
   // Now replace all Phis with CMOV's
   Node *cmov_ctrl = iff->in(0);
   uint flip = (lp->Opcode() == Op_IfTrue);
+  Node_List wq;
   while (1) {
     PhiNode* phi = NULL;
     for (DUIterator_Fast imax, i = region->fast_outs(imax); i < imax; i++) {
@@ -615,17 +625,21 @@ Node *PhaseIdealLoop::conditional_move( Node *region ) {
     if (PrintOpto && VerifyLoopOptimizations) tty->print_cr("CMOV");
 #endif
     // Move speculative ops
-    for (uint j = 1; j < region->req(); j++) {
-      Node *proj = region->in(j);
-      Node *inp = phi->in(j);
-      if (get_ctrl(inp) == proj) { // Found local op
+    wq.push(phi);
+    while (wq.size() > 0) {
+      Node *n = wq.pop();
+      for (uint j = 1; j < n->req(); j++) {
+        Node* m = n->in(j);
+        if (m != NULL && !is_dominator(get_ctrl(m), cmov_ctrl)) {
 #ifndef PRODUCT
-        if (PrintOpto && VerifyLoopOptimizations) {
-          tty->print("  speculate: ");
-          inp->dump();
-        }
+          if (PrintOpto && VerifyLoopOptimizations) {
+            tty->print("  speculate: ");
+            m->dump();
+          }
 #endif
-        set_ctrl(inp, cmov_ctrl);
+          set_ctrl(m, cmov_ctrl);
+          wq.push(m);
+        }
       }
     }
     Node *cmov = CMoveNode::make( C, cmov_ctrl, iff->in(1), phi->in(1+flip), phi->in(2-flip), _igvn.type(phi) );
@@ -772,6 +786,9 @@ static bool merge_point_safe(Node* region) {
 #ifdef _LP64
         if (m->Opcode() == Op_ConvI2L)
           return false;
+        if (m->is_CastII() && m->isa_CastII()->has_range_check()) {
+          return false;
+        }
 #endif
       }
     }

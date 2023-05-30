@@ -32,6 +32,7 @@ compiler.err.proc.cant.create.loader                    # security exception fro
 compiler.err.proc.no.service                            # JavacProcessingEnvironment: no service loader available
 compiler.err.proc.processor.bad.option.name             # cannot happen? masked by javac.err.invalid.A.key
 compiler.err.proc.service.problem                       # JavacProcessingEnvironment: catch Throwable from service loader
+compiler.err.proc.cant.load.class                       # JavacProcessingEnvironment: cant load the class/jar file
 compiler.err.signature.doesnt.match.intf                # UNUSED
 compiler.err.signature.doesnt.match.supertype           # UNUSED
 compiler.err.source.cant.overwrite.input.file
@@ -112,3 +113,4 @@ compiler.warn.unknown.enum.constant.reason              # in bad class file
 compiler.warn.override.equals.but.not.hashcode          # when a class overrides equals but not hashCode method from Object
 compiler.err.cant.inherit.from.anon                     # error for subclass of anonymous class
 compiler.misc.bad.const.pool.entry                      # constant pool entry has wrong type
+compiler.misc.incompatible.upper.eq.bounds

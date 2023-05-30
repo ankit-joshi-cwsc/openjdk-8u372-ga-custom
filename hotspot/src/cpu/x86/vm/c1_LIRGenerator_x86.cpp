@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -166,8 +166,32 @@ LIR_Address* LIRGenerator::emit_array_address(LIR_Opr array_opr, LIR_Opr index_o
   LIR_Address* addr;
   if (index_opr->is_constant()) {
     int elem_size = type2aelembytes(type);
-    addr = new LIR_Address(array_opr,
-                           offset_in_bytes + index_opr->as_jint() * elem_size, type);
+#ifdef _LP64
+    jint index = index_opr->as_jint();
+    jlong disp = offset_in_bytes + (jlong)(index) * elem_size;
+    if (disp > max_jint) {
+      // Displacement overflow. Cannot directly use instruction with 32-bit displacement for 64-bit addresses.
+      // Convert array index to long to do array offset computation with 64-bit values.
+      index_opr = new_register(T_LONG);
+      __ move(LIR_OprFact::longConst(index), index_opr);
+      addr = new LIR_Address(array_opr, index_opr, LIR_Address::scale(type), offset_in_bytes, type);
+    } else {
+      addr = new LIR_Address(array_opr, disp, type);
+    }
+#else
+    // A displacement overflow can also occur for x86 but that is not a problem due to the 32-bit address range!
+    // Let's assume an array 'a' and an access with displacement 'disp'. When disp overflows, then "a + disp" will
+    // always be negative (i.e. underflows the 32-bit address range):
+    // Let N = 2^32: a + signed_overflow(disp) = a + disp - N.
+    // "a + disp" is always smaller than N. If an index was chosen which would point to an address beyond N, then
+    // range checks would catch that and throw an exception. Thus, a + disp < 0 holds which means that it always
+    // underflows the 32-bit address range:
+    // unsigned_underflow(a + signed_overflow(disp)) = unsigned_underflow(a + disp - N)
+    //                                              = (a + disp - N) + N = a + disp
+    // This shows that we still end up at the correct address with a displacement overflow due to the 32-bit address
+    // range limitation. This overflow only needs to be handled if addresses can be larger as on 64-bit platforms.
+    addr = new LIR_Address(array_opr, offset_in_bytes + index_opr->as_jint() * elem_size, type);
+#endif // _LP64
   } else {
 #ifdef _LP64
     if (index_opr->type() == T_INT) {
@@ -195,7 +219,7 @@ LIR_Address* LIRGenerator::emit_array_address(LIR_Opr array_opr, LIR_Opr index_o
 
 
 LIR_Opr LIRGenerator::load_immediate(int x, BasicType type) {
-  LIR_Opr r;
+  LIR_Opr r = NULL;
   if (type == T_LONG) {
     r = LIR_OprFact::longConst(x);
   } else if (type == T_INT) {
@@ -233,16 +257,16 @@ void LIRGenerator::cmp_reg_mem(LIR_Condition condition, LIR_Opr reg, LIR_Opr bas
 }
 
 
-bool LIRGenerator::strength_reduce_multiply(LIR_Opr left, int c, LIR_Opr result, LIR_Opr tmp) {
-  if (tmp->is_valid()) {
+bool LIRGenerator::strength_reduce_multiply(LIR_Opr left, jint c, LIR_Opr result, LIR_Opr tmp) {
+  if (tmp->is_valid() && c > 0 && c < max_jint) {
     if (is_power_of_2(c + 1)) {
       __ move(left, tmp);
-      __ shift_left(left, log2_intptr(c + 1), left);
+      __ shift_left(left, log2_jint(c + 1), left);
       __ sub(left, tmp, result);
       return true;
     } else if (is_power_of_2(c - 1)) {
       __ move(left, tmp);
-      __ shift_left(left, log2_intptr(c - 1), left);
+      __ shift_left(left, log2_jint(c - 1), left);
       __ add(left, tmp, result);
       return true;
     }
@@ -283,7 +307,7 @@ void LIRGenerator::do_StoreIndexed(StoreIndexed* x) {
     length.load_item();
 
   }
-  if (needs_store_check) {
+  if (needs_store_check || x->check_boolean()) {
     value.load_item();
   } else {
     value.load_for_store(x->elt_type());
@@ -331,7 +355,8 @@ void LIRGenerator::do_StoreIndexed(StoreIndexed* x) {
     // Seems to be a precise
     post_barrier(LIR_OprFact::address(array_addr), value.result());
   } else {
-    __ move(value.result(), array_addr, null_check_info);
+    LIR_Opr result = maybe_mask_boolean(x, array.result(), value.result(), null_check_info);
+    __ move(result, array_addr, null_check_info);
   }
 }
 
@@ -484,7 +509,7 @@ void LIRGenerator::do_ArithmeticOp_Long(ArithmeticOp* x) {
     __ cmp(lir_cond_equal, right.result(), LIR_OprFact::longConst(0));
     __ branch(lir_cond_equal, T_LONG, new DivByZeroStub(info));
 
-    address entry;
+    address entry = NULL;
     switch (x->op()) {
     case Bytecodes::_lrem:
       entry = CAST_FROM_FN_PTR(address, SharedRuntime::lrem);
@@ -601,8 +626,8 @@ void LIRGenerator::do_ArithmeticOp_Int(ArithmeticOp* x) {
       bool use_constant = false;
       bool use_tmp = false;
       if (right_arg->is_constant()) {
-        int iconst = right_arg->get_jint_constant();
-        if (iconst > 0) {
+        jint iconst = right_arg->get_jint_constant();
+        if (iconst > 0 && iconst < max_jint) {
           if (is_power_of_2(iconst)) {
             use_constant = true;
           } else if (is_power_of_2(iconst - 1) || is_power_of_2(iconst + 1)) {
@@ -1024,7 +1049,7 @@ LIR_Opr fixed_register_for(BasicType type) {
 
 void LIRGenerator::do_Convert(Convert* x) {
   // flags that vary for the different operations and different SSE-settings
-  bool fixed_input, fixed_result, round_result, needs_stub;
+  bool fixed_input = false, fixed_result = false, round_result = false, needs_stub = false;
 
   switch (x->op()) {
     case Bytecodes::_i2l: // fall through
@@ -1227,12 +1252,17 @@ void LIRGenerator::do_CheckCast(CheckCast* x) {
   obj.load_item();
 
   // info for exceptions
-  CodeEmitInfo* info_for_exception = state_for(x);
+  CodeEmitInfo* info_for_exception =
+      (x->needs_exception_state() ? state_for(x) :
+                                    state_for(x, x->state_before(), true /*ignore_xhandler*/));
 
   CodeStub* stub;
   if (x->is_incompatible_class_change_check()) {
     assert(patching_info == NULL, "can't patch this");
     stub = new SimpleExceptionStub(Runtime1::throw_incompatible_class_change_error_id, LIR_OprFact::illegalOpr, info_for_exception);
+  } else if (x->is_invokespecial_receiver_check()) {
+    assert(patching_info == NULL, "can't patch this");
+    stub = new DeoptimizeStub(info_for_exception);
   } else {
     stub = new SimpleExceptionStub(Runtime1::throw_class_cast_exception_id, obj.result(), info_for_exception);
   }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -78,6 +78,7 @@ volatile int32_t* os::_mem_serialize_page = NULL;
 uintptr_t         os::_serialize_page_mask = 0;
 long              os::_rand_seed          = 1;
 int               os::_processor_count    = 0;
+int               os::_initial_active_processor_count = 0;
 size_t            os::_page_sizes[os::page_sizes_max];
 
 #ifndef PRODUCT
@@ -93,6 +94,14 @@ void os_init_globals() {
   // Called from init_globals().
   // See Threads::create_vm() in thread.cpp, and init.cpp.
   os::init_globals();
+}
+
+int os::snprintf(char* buf, size_t len, const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  int result = os::vsnprintf(buf, len, fmt, args);
+  va_end(args);
+  return result;
 }
 
 // Fill in buffer with current local time as an ISO-8601 string.
@@ -133,21 +142,31 @@ char* os::iso8601_time(char* buffer, size_t buffer_length) {
     assert(false, "Failed localtime_pd");
     return NULL;
   }
-#if defined(_ALLBSD_SOURCE)
-  const time_t zone = (time_t) time_struct.tm_gmtoff;
-#else
-  const time_t zone = timezone;
-#endif
 
-  // If daylight savings time is in effect,
-  // we are 1 hour East of our time zone
   const time_t seconds_per_minute = 60;
   const time_t minutes_per_hour = 60;
   const time_t seconds_per_hour = seconds_per_minute * minutes_per_hour;
-  time_t UTC_to_local = zone;
+
+  time_t UTC_to_local = 0;
+#if defined(_ALLBSD_SOURCE) || defined(_GNU_SOURCE)
+    UTC_to_local = -(time_struct.tm_gmtoff);
+#elif defined(_WINDOWS)
+  long zone;
+  _get_timezone(&zone);
+  UTC_to_local = static_cast<time_t>(zone);
+#else
+  UTC_to_local = timezone;
+#endif
+
+  // tm_gmtoff already includes adjustment for daylight saving
+#if !defined(_ALLBSD_SOURCE) && !defined(_GNU_SOURCE)
+  // If daylight savings time is in effect,
+  // we are 1 hour East of our time zone
   if (time_struct.tm_isdst > 0) {
     UTC_to_local = UTC_to_local - seconds_per_hour;
   }
+#endif
+
   // Compute the time zone offset.
   //    localtime_pd() sets timezone to the difference (in seconds)
   //    between UTC and and local time.
@@ -255,11 +274,33 @@ static void signal_thread_entry(JavaThread* thread, TRAPS) {
 
     switch (sig) {
       case SIGBREAK: {
+#if INCLUDE_SERVICES
         // Check if the signal is a trigger to start the Attach Listener - in that
         // case don't print stack traces.
-        if (!DisableAttachMechanism && AttachListener::is_init_trigger()) {
-          continue;
+        if (!DisableAttachMechanism) {
+          // Attempt to transit state to AL_INITIALIZING.
+          jlong cur_state = AttachListener::transit_state(AL_INITIALIZING, AL_NOT_INITIALIZED);
+          if (cur_state == AL_INITIALIZING) {
+            // Attach Listener has been started to initialize. Ignore this signal.
+            continue;
+          } else if (cur_state == AL_NOT_INITIALIZED) {
+            // Start to initialize.
+            if (AttachListener::is_init_trigger()) {
+              // Attach Listener has been initialized.
+              // Accept subsequent request.
+              continue;
+            } else {
+              // Attach Listener could not be started.
+              // So we need to transit the state to AL_NOT_INITIALIZED.
+              AttachListener::set_state(AL_NOT_INITIALIZED);
+            }
+          } else if (AttachListener::check_socket_file()) {
+            // Attach Listener has been started, but unix domain socket file
+            // does not exist. So restart Attach Listener.
+            continue;
+          }
         }
+#endif
         // Print stack traces
         // Any SIGBREAK operations added here should make sure to flush
         // the output stream (e.g. tty->flush()) after output.  See 4803766.
@@ -322,9 +363,14 @@ static void signal_thread_entry(JavaThread* thread, TRAPS) {
 }
 
 void os::init_before_ergo() {
+  initialize_initial_active_processor_count();
   // We need to initialize large page support here because ergonomics takes some
   // decisions depending on large page support and the calculated large page size.
   large_page_init();
+
+  // VM version initialization identifies some characteristics of the
+  // the platform that are used during ergonomic decisions.
+  VM_Version::init_before_ergo();
 }
 
 void os::signal_init() {
@@ -571,21 +617,10 @@ void* os::malloc(size_t size, MEMFLAGS memflags, const NativeCallStack& stack) {
   NOT_PRODUCT(inc_stat_counter(&num_mallocs, 1));
   NOT_PRODUCT(inc_stat_counter(&alloc_bytes, size));
 
-#ifdef ASSERT
-  // checking for the WatcherThread and crash_protection first
-  // since os::malloc can be called when the libjvm.{dll,so} is
-  // first loaded and we don't have a thread yet.
-  // try to find the thread after we see that the watcher thread
-  // exists and has crash protection.
-  WatcherThread *wt = WatcherThread::watcher_thread();
-  if (wt != NULL && wt->has_crash_protection()) {
-    Thread* thread = ThreadLocalStorage::get_thread_slow();
-    if (thread == wt) {
-      assert(!wt->has_crash_protection(),
-          "Can't malloc with crash protection from WatcherThread");
-    }
-  }
-#endif
+  // Since os::malloc can be called when the libjvm.{dll,so} is
+  // first loaded and we don't have a thread yet we must accept NULL also here.
+  assert(!os::ThreadCrashProtection::is_crash_protected(ThreadLocalStorage::thread()),
+         "malloc() not allowed when crash protection is set");
 
   if (size == 0) {
     // return a valid pointer if size is zero
@@ -596,6 +631,11 @@ void* os::malloc(size_t size, MEMFLAGS memflags, const NativeCallStack& stack) {
   // NMT support
   NMT_TrackingLevel level = MemTracker::tracking_level();
   size_t            nmt_header_size = MemTracker::malloc_header_size(level);
+
+  // Check for overflow.
+  if (size + nmt_header_size < size) {
+    return NULL;
+  }
 
 #ifndef ASSERT
   const size_t alloc_size = size + nmt_header_size;
@@ -831,13 +871,17 @@ void os::print_cpu_info(outputStream* st) {
   st->print("CPU:");
   st->print("total %d", os::processor_count());
   // It's not safe to query number of active processors after crash
-  // st->print("(active %d)", os::active_processor_count());
+  // st->print("(active %d)", os::active_processor_count()); but we can
+  // print the initial number of active processors.
+  // We access the raw value here because the assert in the accessor will
+  // fail if the crash occurs before initialization of this value.
+  st->print(" (initial active %d)", _initial_active_processor_count);
   st->print(" %s", VM_Version::cpu_features());
   st->cr();
   pd_print_cpu_info(st);
 }
 
-void os::print_date_and_time(outputStream *st) {
+void os::print_date_and_time(outputStream *st, char* buf, size_t buflen) {
   const int secs_per_day  = 86400;
   const int secs_per_hour = 3600;
   const int secs_per_min  = 60;
@@ -846,11 +890,20 @@ void os::print_date_and_time(outputStream *st) {
   (void)time(&tloc);
   st->print("time: %s", ctime(&tloc));  // ctime adds newline.
 
+  struct tm tz;
+  if (localtime_pd(&tloc, &tz) != NULL) {
+    wchar_t w_buf[80];
+    size_t n = ::wcsftime(w_buf, 80, L"%Z", &tz);
+    if (n > 0) {
+      ::wcstombs(buf, w_buf, buflen);
+      st->print_cr("timezone: %s", buf);
+    }
+  }
+
   double t = os::elapsedTime();
-  // NOTE: It tends to crash after a SEGV if we want to printf("%f",...) in
-  //       Linux. Must be a bug in glibc ? Workaround is to round "t" to int
-  //       before printf. We lost some precision, but who cares?
+  // NOTE: a crash using printf("%f",...) on Linux was historically noted here.
   int eltime = (int)t;  // elapsed time in seconds
+  int eltimeFraction = (int) ((t - eltime) * 1000000);
 
   // print elapsed time in a human-readable format:
   int eldays = eltime / secs_per_day;
@@ -860,7 +913,7 @@ void os::print_date_and_time(outputStream *st) {
   int elmins = (eltime - day_secs - hour_secs) / secs_per_min;
   int minute_secs = elmins * secs_per_min;
   int elsecs = (eltime - day_secs - hour_secs - minute_secs);
-  st->print_cr("elapsed time: %d seconds (%dd %dh %dm %ds)", eltime, eldays, elhours, elmins, elsecs);
+  st->print_cr("elapsed time: %d.%06d seconds (%dd %dh %dm %ds)", eltime, eltimeFraction, eldays, elhours, elmins, elsecs);
 }
 
 // moved from debug.cpp (used to be find()) but still called from there
@@ -1252,7 +1305,7 @@ char** os::split_path(const char* path, int* n) {
 }
 
 void os::set_memory_serialize_page(address page) {
-  int count = log2_intptr(sizeof(class JavaThread)) - log2_intptr(64);
+  int count = log2_intptr(sizeof(class JavaThread)) - log2_int(64);
   _mem_serialize_page = (volatile int32_t *)page;
   // We initialize the serialization page shift count here
   // We assume a cache line size of 64 bytes
@@ -1412,6 +1465,11 @@ bool os::is_server_class_machine() {
     }
   }
   return result;
+}
+
+void os::initialize_initial_active_processor_count() {
+  assert(_initial_active_processor_count == 0, "Initial active processor count already set.");
+  _initial_active_processor_count = active_processor_count();
 }
 
 void os::SuspendedThreadTask::run() {

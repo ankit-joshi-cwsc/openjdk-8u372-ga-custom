@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 1997, 2015, Oracle and/or its affiliates. All rights reserved.
- * Copyright 2012, 2015 SAP AG. All rights reserved.
+ * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2017 SAP AG. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -296,8 +296,16 @@ address AbstractInterpreterGenerator::generate_slow_signature_handler() {
   __ bind(do_float);
   __ lfs(floatSlot, 0, arg_java);
 #if defined(LINUX)
+  // Linux uses ELF ABI. Both original ELF and ELFv2 ABIs have float
+  // in the least significant word of an argument slot.
+#if defined(VM_LITTLE_ENDIAN)
+  __ stfs(floatSlot, 0, arg_c);
+#else
   __ stfs(floatSlot, 4, arg_c);
+#endif
 #elif defined(AIX)
+  // Although AIX runs on big endian CPU, float is in most significant
+  // word of an argument slot.
   __ stfs(floatSlot, 0, arg_c);
 #else
 #error "unknown OS"
@@ -405,11 +413,8 @@ address AbstractInterpreterGenerator::generate_result_handler_for(BasicType type
   case T_LONG:
      break;
   case T_OBJECT:
-    // unbox result if not null
-    __ cmpdi(CCR0, R3_RET, 0);
-    __ beq(CCR0, done);
-    __ ld(R3_RET, 0, R3_RET);
-    __ verify_oop(R3_RET);
+    // JNIHandles::resolve result.
+    __ resolve_jobject(R3_RET, R11_scratch1, R12_scratch2, /* needs_frame */ true); // kills R31
     break;
   case T_FLOAT:
      break;
@@ -626,6 +631,16 @@ address InterpreterGenerator::generate_accessor_entry(void) {
     __ align(32, 28, 28); // align load
     __ fence(); // volatile entry point (one instruction before non-volatile_entry point)
     branch_table[btos] = __ pc(); // non-volatile_entry point
+    __ lbzx(R3_RET, Rclass_or_obj, Roffset);
+    __ extsb(R3_RET, R3_RET);
+    __ beq(CCR6, Lacquire);
+    __ blr();
+  }
+
+  if (branch_table[ztos] == 0) { // generate only once
+    __ align(32, 28, 28); // align load
+    __ fence(); // volatile entry point (one instruction before non-volatile_entry point)
+    branch_table[ztos] = __ pc(); // non-volatile_entry point
     __ lbzx(R3_RET, Rclass_or_obj, Roffset);
     __ extsb(R3_RET, R3_RET);
     __ beq(CCR6, Lacquire);

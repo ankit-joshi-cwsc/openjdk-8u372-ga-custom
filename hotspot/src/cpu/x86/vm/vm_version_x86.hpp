@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -592,10 +592,10 @@ public:
       result = _cpuid_info.std_cpuid1_ebx.bits.threads_per_cpu /
                cores_per_cpu();
     }
-    return result;
+    return (result == 0 ? 1 : result);
   }
 
-  static intx prefetch_data_size()  {
+  static intx L1_line_size()  {
     intx result = 0;
     if (is_intel()) {
       result = (_cpuid_info.dcp_cpuid4_ebx.bits.L1_line_size + 1);
@@ -605,6 +605,10 @@ public:
     if (result < 32) // not defined ?
       result = 32;   // 32 bytes by default on x86 and other x64
     return result;
+  }
+
+  static intx prefetch_data_size()  {
+    return L1_line_size();
   }
 
   //
@@ -747,6 +751,12 @@ public:
     intx count = PrefetchFieldsAhead;
     return count >= 0 ? count : 1;
   }
+
+#ifdef __APPLE__
+  // Is the CPU running emulated (for example macOS Rosetta running x86_64 code on M1 ARM (aarch64)
+  static bool is_cpu_emulated();
+#endif
+
 };
 
 #endif // CPU_X86_VM_VM_VERSION_X86_HPP

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2000, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,10 +25,13 @@
 
 package java.util;
 
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.lang.reflect.Array;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
+import sun.misc.SharedSecrets;
 
 /**
  * This class implements the <tt>Map</tt> interface with a hash table, using
@@ -964,10 +967,11 @@ public class IdentityHashMap<K,V>
      */
     public Set<K> keySet() {
         Set<K> ks = keySet;
-        if (ks != null)
-            return ks;
-        else
-            return keySet = new KeySet();
+        if (ks == null) {
+            ks = new KeySet();
+            keySet = ks;
+        }
+        return ks;
     }
 
     private class KeySet extends AbstractSet<K> {
@@ -1069,10 +1073,11 @@ public class IdentityHashMap<K,V>
      */
     public Collection<V> values() {
         Collection<V> vs = values;
-        if (vs != null)
-            return vs;
-        else
-            return values = new Values();
+        if (vs == null) {
+            vs = new Values();
+            values = vs;
+        }
+        return vs;
     }
 
     private class Values extends AbstractCollection<V> {
@@ -1269,12 +1274,12 @@ public class IdentityHashMap<K,V>
      *          IdentityHashMap.  The key-value mappings are emitted in no
      *          particular order.
      */
-    private void writeObject(java.io.ObjectOutputStream s)
+    private void writeObject(ObjectOutputStream s)
         throws java.io.IOException  {
-        // Write out and any hidden stuff
+        // Write out size (number of mappings) and any hidden stuff
         s.defaultWriteObject();
 
-        // Write out size (number of Mappings)
+        // Write out size again (maintained for backward compatibility)
         s.writeInt(size);
 
         // Write out keys and values (alternating)
@@ -1292,17 +1297,21 @@ public class IdentityHashMap<K,V>
      * Reconstitutes the <tt>IdentityHashMap</tt> instance from a stream (i.e.,
      * deserializes it).
      */
-    private void readObject(java.io.ObjectInputStream s)
+    private void readObject(ObjectInputStream s)
         throws java.io.IOException, ClassNotFoundException  {
-        // Read in any hidden stuff
-        s.defaultReadObject();
+        // Size (number of mappings) is written to the stream twice
+        // Read first size value and ignore it
+        s.readFields();
 
-        // Read in size (number of Mappings)
+        // Read second size value, validate and assign to size field
         int size = s.readInt();
         if (size < 0)
             throw new java.io.StreamCorruptedException
                 ("Illegal mappings count: " + size);
-        init(capacity(size));
+        int cap = capacity(size);
+        SharedSecrets.getJavaOISAccess().checkArray(s, Object[].class, cap*2);
+        this.size = size;
+        init(cap);
 
         // Read the keys and values, and put the mappings in the table
         for (int i=0; i<size; i++) {

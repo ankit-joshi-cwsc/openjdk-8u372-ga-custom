@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2001, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -39,6 +39,9 @@
 #include "runtime/thread.inline.hpp"
 #ifdef TARGET_ARCH_x86
 # include "jniTypes_x86.hpp"
+#endif
+#ifdef TARGET_ARCH_aarch64
+# include "jniTypes_aarch64.hpp"
 #endif
 #ifdef TARGET_ARCH_sparc
 # include "jniTypes_sparc.hpp"
@@ -428,21 +431,20 @@ static void* check_wrapped_array_release(JavaThread* thr, const char* fn_name,
   size_t sz;
   void* orig_result = check_wrapped_array(thr, fn_name, obj, carray, &sz);
   switch (mode) {
+  // As we never make copies, mode 0 and JNI_COMMIT are the same.
   case 0:
-    memcpy(orig_result, carray, sz);
-    GuardedMemory::free_copy(carray);
-    break;
   case JNI_COMMIT:
     memcpy(orig_result, carray, sz);
     break;
   case JNI_ABORT:
-    GuardedMemory::free_copy(carray);
     break;
   default:
     tty->print_cr("%s: Unrecognized mode %i releasing array "
         PTR_FORMAT " elements " PTR_FORMAT, fn_name, mode, p2i(obj), p2i(carray));
     NativeReportJNIFatalError(thr, "Unrecognized array release mode");
   }
+  // We always need to release the copy we made with GuardedMemory
+  GuardedMemory::free_copy(carray);
   return orig_result;
 }
 
@@ -461,15 +463,10 @@ oop jniCheck::validate_handle(JavaThread* thr, jobject obj) {
 
 Method* jniCheck::validate_jmethod_id(JavaThread* thr, jmethodID method_id) {
   ASSERT_OOPS_ALLOWED;
-  // do the fast jmethodID check first
+  // Do the jmethodID check
   Method* moop = Method::checked_resolve_jmethod_id(method_id);
   if (moop == NULL) {
     ReportJNIFatalError(thr, fatal_wrong_class_or_method);
-  }
-  // jmethodIDs are supposed to be weak handles in the class loader data,
-  // but that can be expensive so check it last
-  else if (!Method::is_method_id(method_id)) {
-    ReportJNIFatalError(thr, fatal_non_weak_method);
   }
   return moop;
 }

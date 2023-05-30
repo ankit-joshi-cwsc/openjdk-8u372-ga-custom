@@ -278,7 +278,7 @@ void AwtRobot::GetRGBPixels(jint x, jint y, jint width, jint height, jintArray p
 
     // copy pixels into Java array
     env->SetIntArrayRegion(pixelArray, 0, numPixels, (jint *)pixelData);
-    delete pinfo;
+    delete[] pinfo;
 
     // free all the GDI objects we made
     ::SelectObject(hdcMem, hOldBitmap);
@@ -315,6 +315,9 @@ void AwtRobot::DoKeyEvent( jint jkey, DWORD dwFlags )
     } else {
         // get the scancode from the virtual key
         scancode = ::MapVirtualKey(vkey, 0);
+        if (vkey == VK_RMENU) {
+            dwFlags |= KEYEVENTF_EXTENDEDKEY;
+        }
         keybd_event(vkey, scancode, dwFlags, 0);
     }
 }

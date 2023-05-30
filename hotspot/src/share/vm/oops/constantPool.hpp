@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -34,6 +34,9 @@
 #include "utilities/constantTag.hpp"
 #ifdef TARGET_ARCH_x86
 # include "bytes_x86.hpp"
+#endif
+#ifdef TARGET_ARCH_aarch64
+# include "bytes_aarch64.hpp"
 #endif
 #ifdef TARGET_ARCH_sparc
 # include "bytes_sparc.hpp"
@@ -125,7 +128,7 @@ class ConstantPool : public Metadata {
  private:
   intptr_t* base() const { return (intptr_t*) (((char*) this) + sizeof(ConstantPool)); }
 
-  CPSlot slot_at(int which) {
+  CPSlot slot_at(int which) const {
     assert(is_within_bounds(which), "index out of bounds");
     // Uses volatile because the klass slot changes without a lock.
     volatile intptr_t adr = (intptr_t)OrderAccess::load_ptr_acquire(obj_at_addr_raw(which));
@@ -200,6 +203,7 @@ class ConstantPool : public Metadata {
 
   // resolved strings, methodHandles and callsite objects from the constant pool
   objArrayOop resolved_references()  const;
+  objArrayOop resolved_references_or_null()  const;
   // mapping resolved object array indexes to cp indexes and back.
   int object_to_cp_index(int index)         { return _reference_map->at(index); }
   int cp_to_object_index(int index);
@@ -349,10 +353,10 @@ class ConstantPool : public Metadata {
 
   Klass* klass_at(int which, TRAPS) {
     constantPoolHandle h_this(THREAD, this);
-    return klass_at_impl(h_this, which, CHECK_NULL);
+    return klass_at_impl(h_this, which, THREAD);
   }
 
-  Symbol* klass_name_at(int which);  // Returns the name, w/o resolving.
+  Symbol* klass_name_at(int which) const;  // Returns the name, w/o resolving.
 
   Klass* resolved_klass_at(int which) const {  // Used by Compiler
     guarantee(tag_at(which).is_klass(), "Corrupted constant pool");
@@ -822,8 +826,12 @@ class ConstantPool : public Metadata {
   static void resolve_string_constants_impl(constantPoolHandle this_oop, TRAPS);
 
   static oop resolve_constant_at_impl(constantPoolHandle this_oop, int index, int cache_index, TRAPS);
-  static void save_and_throw_exception(constantPoolHandle this_oop, int which, int tag_value, TRAPS);
   static oop resolve_bootstrap_specifier_at_impl(constantPoolHandle this_oop, int index, TRAPS);
+
+  // Exception handling
+  static void throw_resolution_error(constantPoolHandle this_oop, int which, TRAPS);
+  static Symbol* exception_message(constantPoolHandle this_oop, int which, constantTag tag, oop pending_exception);
+  static void save_and_throw_exception(constantPoolHandle this_oop, int which, constantTag tag, TRAPS);
 
  public:
   // Merging ConstantPool* support:
@@ -983,7 +991,7 @@ class SymbolHashMap: public CHeapObj<mtSymbol> {
         delete(cur);
       }
     }
-    delete _buckets;
+    FREE_C_HEAP_ARRAY(SymbolHashMapBucket, _buckets, mtSymbol);
   }
 }; // End SymbolHashMap class
 

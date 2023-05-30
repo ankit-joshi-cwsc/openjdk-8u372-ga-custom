@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -155,6 +155,14 @@ address CompiledIC::stub_address() const {
   return _ic_call->destination();
 }
 
+// Clears the IC stub if the compiled IC is in transition state
+void CompiledIC::clear_ic_stub() {
+  if (is_in_transition_state()) {
+    ICStub* stub = ICStub_from_destination_address(stub_address());
+    stub->clear();
+  }
+}
+
 
 //-----------------------------------------------------------------------------
 // High-level access to an inline cache. Guaranteed to be MT-safe.
@@ -220,10 +228,13 @@ bool CompiledIC::set_to_megamorphic(CallInfo* call_info, Bytecodes::Code bytecod
 #ifdef ASSERT
     int index = call_info->resolved_method()->itable_index();
     assert(index == itable_index, "CallInfo pre-computes this");
-#endif //ASSERT
     InstanceKlass* k = call_info->resolved_method()->method_holder();
     assert(k->verify_itable_index(itable_index), "sanity check");
-    InlineCacheBuffer::create_transition_stub(this, k, entry);
+#endif //ASSERT
+    CompiledICHolder* holder = new CompiledICHolder(call_info->resolved_method()->method_holder(),
+                                                    call_info->resolved_klass()(), false);
+    holder->claim();
+    InlineCacheBuffer::create_transition_stub(this, holder, entry);
   } else {
     assert(call_info->call_kind() == CallInfo::vtable_call, "either itable or vtable");
     // Can be different than selected_method->vtable_index(), due to package-private etc.
@@ -259,7 +270,7 @@ bool CompiledIC::is_megamorphic() const {
   assert(!is_optimized(), "an optimized call cannot be megamorphic");
 
   // Cannot rely on cached_value. It is either an interface or a method.
-  return VtableStubs::is_entry_point(ic_destination());
+  return VtableStubs::entry_point(ic_destination()) != NULL;
 }
 
 bool CompiledIC::is_call_to_compiled() const {
@@ -279,6 +290,7 @@ bool CompiledIC::is_call_to_compiled() const {
   assert( is_c1_method ||
          !is_monomorphic ||
          is_optimized() ||
+         !caller->is_alive() ||
          (cached_metadata() != NULL && cached_metadata()->is_klass()), "sanity check");
 #endif // ASSERT
   return is_monomorphic;
@@ -313,7 +325,7 @@ bool CompiledIC::is_call_to_interpreted() const {
 }
 
 
-void CompiledIC::set_to_clean() {
+void CompiledIC::set_to_clean(bool in_use) {
   assert(SafepointSynchronize::is_at_safepoint() || CompiledIC_lock->is_locked() , "MT-unsafe call");
   if (TraceInlineCacheClearing || TraceICs) {
     tty->print_cr("IC@" INTPTR_FORMAT ": set to clean", p2i(instruction_address()));
@@ -329,17 +341,14 @@ void CompiledIC::set_to_clean() {
 
   // A zombie transition will always be safe, since the metadata has already been set to NULL, so
   // we only need to patch the destination
-  bool safe_transition = is_optimized() || SafepointSynchronize::is_at_safepoint();
+  bool safe_transition = !in_use || is_optimized() || SafepointSynchronize::is_at_safepoint();
 
   if (safe_transition) {
     // Kill any leftover stub we might have too
-    if (is_in_transition_state()) {
-      ICStub* old_stub = ICStub_from_destination_address(stub_address());
-      old_stub->clear();
-    }
+    clear_ic_stub();
     if (is_optimized()) {
-    set_ic_destination(entry);
-  } else {
+      set_ic_destination(entry);
+    } else {
       set_ic_destination_and_value(entry, (void*)NULL);
     }
   } else {
@@ -521,7 +530,16 @@ void CompiledIC::compute_monomorphic_entry(methodHandle method,
 
 bool CompiledIC::is_icholder_entry(address entry) {
   CodeBlob* cb = CodeCache::find_blob_unsafe(entry);
-  return (cb != NULL && cb->is_adapter_blob());
+  if (cb != NULL && cb->is_adapter_blob()) {
+    return true;
+  }
+  // itable stubs also use CompiledICHolder
+  if (cb != NULL && cb->is_vtable_blob()) {
+    VtableStub* s = VtableStubs::entry_point(entry);
+    return (s != NULL) && s->is_itable_stub();
+  }
+
+  return false;
 }
 
 // ----------------------------------------------------------------------------

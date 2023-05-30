@@ -1,5 +1,5 @@
 #
-# Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 1997, 2015, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -28,8 +28,7 @@
 SUNWprivate_1.1 {
 	global:
 		JNI_OnLoad;
-		Java_java_net_AbstractPlainDatagramSocketImpl_init;
-		Java_java_net_AbstractPlainDatagramSocketImpl_dataAvailable;
+		Java_java_net_PlainDatagramSocketImpl_dataAvailable;
 		Java_java_net_PlainSocketImpl_socketListen;
 		Java_java_net_PlainDatagramSocketImpl_getTTL;
 		Java_java_net_PlainDatagramSocketImpl_init;
@@ -100,6 +99,13 @@ SUNWprivate_1.1 {
 		Java_sun_net_ExtendedOptionsImpl_setFlowOption;
 		Java_sun_net_ExtendedOptionsImpl_getFlowOption;
 		Java_sun_net_ExtendedOptionsImpl_flowSupported;
+		Java_sun_net_ExtendedOptionsImpl_keepAliveOptionsSupported;
+		Java_sun_net_ExtendedOptionsImpl_setTcpKeepAliveProbes;
+		Java_sun_net_ExtendedOptionsImpl_setTcpKeepAliveTime;
+		Java_sun_net_ExtendedOptionsImpl_setTcpKeepAliveIntvl;
+		Java_sun_net_ExtendedOptionsImpl_getTcpKeepAliveProbes;
+		Java_sun_net_ExtendedOptionsImpl_getTcpKeepAliveTime;
+		Java_sun_net_ExtendedOptionsImpl_getTcpKeepAliveIntvl;
 		NET_AllocSockaddr;
 		NET_SockaddrToInetAddress;
                 NET_SockaddrEqualsInetAddress;
@@ -113,6 +119,7 @@ SUNWprivate_1.1 {
 		NET_EnableFastTcpLoopback;
 		NET_ThrowNew;
                 ipv6_available;
+                initInetAddressIDs;
 
 	local:
 		*;

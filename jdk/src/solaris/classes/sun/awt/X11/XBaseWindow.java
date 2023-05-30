@@ -79,7 +79,6 @@ public class XBaseWindow {
 
     static enum InitialiseState {
         INITIALISING,
-        NOT_INITIALISED,
         INITIALISED,
         FAILED_INITIALISATION
     };
@@ -122,7 +121,6 @@ public class XBaseWindow {
      */
     void instantPreInit(XCreateWindowParams params) {
         state_lock = new StateLock();
-        initialising = InitialiseState.NOT_INITIALISED;
     }
 
     /**
@@ -131,7 +129,6 @@ public class XBaseWindow {
      */
     void preInit(XCreateWindowParams params) {
         state_lock = new StateLock();
-        initialising = InitialiseState.NOT_INITIALISED;
         embedded = Boolean.TRUE.equals(params.get(EMBEDDED));
         visible = Boolean.TRUE.equals(params.get(VISIBLE));
 
@@ -223,7 +220,6 @@ public class XBaseWindow {
                       return false;
                   }
                   return true;
-              case NOT_INITIALISED:
               case FAILED_INITIALISATION:
                   return false;
               default:
@@ -673,7 +669,7 @@ public class XBaseWindow {
         XToolkit.awtLock();
         try {
             XAtom xa = XAtom.get(XAtom.XA_WM_CLASS);
-            xa.setProperty8(getWindow(), cl[0] + '\0' + cl[1]);
+            xa.setProperty8(getWindow(), cl[0] + '\0' + cl[1] + '\0');
         } finally {
             XToolkit.awtUnlock();
         }
@@ -1008,29 +1004,37 @@ public class XBaseWindow {
          * InputEvent.BUTTON_DOWN_MASK.
          * One more bit is reserved for FIRST_HIGH_BIT.
          */
-        if (xbe.get_button() > SunToolkit.MAX_BUTTONS_SUPPORTED) {
+        int theButton = xbe.get_button();
+        if (theButton > SunToolkit.MAX_BUTTONS_SUPPORTED) {
             return;
         }
         int buttonState = 0;
         buttonState = xbe.get_state() & XConstants.ALL_BUTTONS_MASK;
-        switch (xev.get_type()) {
-        case XConstants.ButtonPress:
-            if (buttonState == 0) {
-                XWindowPeer parent = getToplevelXWindow();
-                // See 6385277, 6981400.
-                if (parent != null && parent.isFocusableWindow()) {
-                    // A click in a client area drops the actual focused window retaining.
-                    parent.setActualFocusedWindow(null);
-                    parent.requestWindowFocus(xbe.get_time(), true);
-                }
-                XAwtState.setAutoGrabWindow(this);
+
+        boolean isWheel = (theButton == XConstants.MouseWheelUp ||
+                           theButton == XConstants.MouseWheelDown);
+
+        // don't give focus if it's just the mouse wheel turning
+        if (!isWheel) {
+            switch (xev.get_type()) {
+                case XConstants.ButtonPress:
+                    if (buttonState == 0) {
+                        XWindowPeer parent = getToplevelXWindow();
+                        // See 6385277, 6981400.
+                        if (parent != null && parent.isFocusableWindow()) {
+                            // A click in a client area drops the actual focused window retaining.
+                            parent.setActualFocusedWindow(null);
+                            parent.requestWindowFocus(xbe.get_time(), true);
+                        }
+                        XAwtState.setAutoGrabWindow(this);
+                    }
+                    break;
+                case XConstants.ButtonRelease:
+                    if (isFullRelease(buttonState, xbe.get_button())) {
+                        XAwtState.setAutoGrabWindow(null);
+                    }
+                    break;
             }
-            break;
-        case XConstants.ButtonRelease:
-            if (isFullRelease(buttonState, xbe.get_button())) {
-                XAwtState.setAutoGrabWindow(null);
-            }
-            break;
         }
     }
     public void handleMotionNotify(XEvent xev) {

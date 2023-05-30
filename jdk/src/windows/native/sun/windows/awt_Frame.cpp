@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1996, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1996, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -99,7 +99,6 @@ jfieldID AwtFrame::handleID;
 
 jfieldID AwtFrame::undecoratedID;
 jmethodID AwtFrame::getExtendedStateMID;
-jmethodID AwtFrame::setExtendedStateMID;
 
 jmethodID AwtFrame::activateEmbeddingTopLevelMID;
 jfieldID AwtFrame::isEmbeddedInIEID;
@@ -156,7 +155,7 @@ AwtFrame* AwtFrame::Create(jobject self, jobject parent)
 
     PDATA pData;
     HWND hwndParent = NULL;
-    AwtFrame* frame;
+    AwtFrame* frame = NULL;
     jclass cls = NULL;
     jclass inputMethodWindowCls = NULL;
     jobject target = NULL;
@@ -169,7 +168,8 @@ AwtFrame* AwtFrame::Create(jobject self, jobject parent)
             JNI_CHECK_PEER_GOTO(parent, done);
             {
                 AwtFrame* parent = (AwtFrame *)pData;
-                hwndParent = parent->GetHWnd();
+                HWND oHWnd = parent->GetOverriddenHWnd();
+                hwndParent = oHWnd ? oHWnd : parent->GetHWnd();
             }
         }
 
@@ -484,7 +484,10 @@ MsgRouting AwtFrame::WmShowWindow(BOOL show, UINT status)
             if (fgProcessID != ::GetCurrentProcessId()) {
                 AwtWindow* window = (AwtWindow*)GetComponent(GetHWnd());
 
-                if (window != NULL && window->IsFocusableWindow() && window->IsAutoRequestFocus() &&
+                if (window != NULL &&
+                    window->IsFocusableWindow() &&
+                    window->IsAutoRequestFocus() &&
+                    !::IsWindowVisible(GetHWnd()) && // the window is really showing
                     !::IsWindow(GetModalBlocker(GetHWnd())))
                 {
                     // When the Java process is not allowed to set the foreground window
@@ -807,13 +810,6 @@ AwtFrame::Show()
 }
 
 void
-AwtFrame::SendWindowStateEvent(int oldState, int newState)
-{
-    SendWindowEvent(java_awt_event_WindowEvent_WINDOW_STATE_CHANGED,
-                    NULL, oldState, newState);
-}
-
-void
 AwtFrame::ClearMaximizedBounds()
 {
     m_maxBoundsSet = FALSE;
@@ -951,24 +947,7 @@ MsgRouting AwtFrame::WmSize(UINT type, int w, int h)
 
     jint changed = oldState ^ newState;
     if (changed != 0) {
-        DTRACE_PRINTLN2("AwtFrame::WmSize: reporting state change %x -> %x",
-                oldState, newState);
-
-        // sync target with peer
-        JNIEnv *env = (JNIEnv *)JNU_GetEnv(jvm, JNI_VERSION_1_2);
-        env->CallVoidMethod(GetPeer(env), AwtFrame::setExtendedStateMID, newState);
-
-        // report (de)iconification to old clients
-        if (changed & java_awt_Frame_ICONIFIED) {
-            if (newState & java_awt_Frame_ICONIFIED) {
-                SendWindowEvent(java_awt_event_WindowEvent_WINDOW_ICONIFIED);
-            } else {
-                SendWindowEvent(java_awt_event_WindowEvent_WINDOW_DEICONIFIED);
-            }
-        }
-
-        // New (since 1.4) state change event
-        SendWindowStateEvent(oldState, newState);
+        NotifyWindowStateChanged(oldState, newState);
     }
 
     // If window is in iconic state, do not send COMPONENT_RESIZED event
@@ -993,7 +972,9 @@ MsgRouting AwtFrame::WmActivate(UINT nState, BOOL fMinimized, HWND opposite)
         AwtComponent::SetFocusedWindow(GetHWnd());
 
     } else {
-        if (!::IsWindow(AwtWindow::GetModalBlocker(opposite))) {
+        if (::IsWindow(AwtWindow::GetModalBlocker(opposite))) {
+            return mrConsume;
+        } else {
             // If deactivation happens because of press on grabbing
             // window - this is nonsense, since grabbing window is
             // assumed to have focus and watch for deactivation.  But
@@ -1111,11 +1092,19 @@ AwtMenuBar* AwtFrame::GetMenuBar()
 
 void AwtFrame::SetMenuBar(AwtMenuBar* mb)
 {
+    if (menuBar) {
+        menuBar->SetFrame(NULL);
+    }
     menuBar = mb;
     if (mb == NULL) {
         // Remove existing menu bar, if any.
         ::SetMenu(GetHWnd(), NULL);
     } else {
+        AwtFrame* oldFrame = menuBar->GetFrame();
+        if (oldFrame && oldFrame != this) {
+            oldFrame->SetMenuBar(NULL);
+        }
+        menuBar->SetFrame(this);
         if (menuBar->GetHMenu() != NULL) {
             ::SetMenu(GetHWnd(), menuBar->GetHMenu());
         }
@@ -1568,12 +1557,12 @@ void AwtFrame::_NotifyModalBlocked(void *param)
 
     PDATA pData;
 
-    pData = JNI_GET_PDATA(peer);
+    JNI_CHECK_PEER_GOTO(peer, ret);
     AwtFrame *f = (AwtFrame *)pData;
 
     // dialog here may be NULL, for example, if the blocker is a native dialog
     // however, we need to install/unistall modal hooks anyway
-    pData = JNI_GET_PDATA(blockerPeer);
+    JNI_CHECK_PEER_GOTO(blockerPeer, ret);
     AwtDialog *d = (AwtDialog *)pData;
 
     if ((f != NULL) && ::IsWindow(f->GetHWnd()))
@@ -1625,7 +1614,7 @@ void AwtFrame::_NotifyModalBlocked(void *param)
             }
         }
     }
-
+ret:
     env->DeleteGlobalRef(self);
     env->DeleteGlobalRef(peer);
     env->DeleteGlobalRef(blockerPeer);
@@ -1664,10 +1653,6 @@ JNIEXPORT void JNICALL
 Java_sun_awt_windows_WFramePeer_initIDs(JNIEnv *env, jclass cls)
 {
     TRY;
-
-    AwtFrame::setExtendedStateMID = env->GetMethodID(cls, "setExtendedState", "(I)V");
-    DASSERT(AwtFrame::setExtendedStateMID);
-    CHECK_NULL(AwtFrame::setExtendedStateMID);
 
     AwtFrame::getExtendedStateMID = env->GetMethodID(cls, "getExtendedState", "()I");
     DASSERT(AwtFrame::getExtendedStateMID);
@@ -1797,8 +1782,6 @@ Java_sun_awt_windows_WFramePeer_createAwtFrame(JNIEnv *env, jobject self,
     AwtToolkit::CreateComponent(self, parent,
                                 (AwtToolkit::ComponentFactory)
                                 AwtFrame::Create);
-    PDATA pData;
-    JNI_CHECK_PEER_CREATION_RETURN(self);
 
     CATCH_BAD_ALLOC;
 }
@@ -1912,8 +1895,6 @@ Java_sun_awt_windows_WEmbeddedFramePeer_create(JNIEnv *env, jobject self,
     AwtToolkit::CreateComponent(self, parent,
                                 (AwtToolkit::ComponentFactory)
                                 AwtFrame::Create);
-    PDATA pData;
-    JNI_CHECK_PEER_CREATION_RETURN(self);
 
     CATCH_BAD_ALLOC;
 }
@@ -1959,29 +1940,6 @@ Java_sun_awt_windows_WFramePeer_synthesizeWmActivate(JNIEnv *env, jobject self, 
     // global ref and sas are deleted in _SynthesizeWmActivate()
 
     CATCH_BAD_ALLOC;
-}
-
-JNIEXPORT jboolean JNICALL
-Java_sun_awt_windows_WEmbeddedFramePeer_requestFocusToEmbedder(JNIEnv *env, jobject self)
-{
-    jboolean result = JNI_FALSE;
-
-    TRY;
-
-    AwtFrame *frame = NULL;
-
-    PDATA pData;
-    JNI_CHECK_PEER_GOTO(self, ret);
-    frame = (AwtFrame *)pData;
-
-    // JDK-8056915: During initial applet activation, set focus to plugin control window
-    HWND hwndParent = ::GetParent(frame->GetHWnd());
-
-    result = SetFocusToPluginControl(hwndParent);
-
-    CATCH_BAD_ALLOC_RET(JNI_FALSE);
-ret:
-    return result;
 }
 
 } /* extern "C" */

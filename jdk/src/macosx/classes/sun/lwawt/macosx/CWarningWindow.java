@@ -219,32 +219,28 @@ public final class CWarningWindow extends CPlatformWindow
     @Override
     public void setVisible(boolean visible) {
         synchronized (lock) {
-            final long nsWindowPtr = getNSWindowPtr();
-
-            // Process parent-child relationship when hiding
-            if (!visible) {
-                // Unparent myself
-                if (owner != null && owner.isVisible()) {
-                    CWrapper.NSWindow.removeChildWindow(
-                            owner.getNSWindowPtr(), nsWindowPtr);
+            execute(ptr -> {
+                // Actually show or hide the window
+                if (visible) {
+                    CWrapper.NSWindow.orderFront(ptr);
+                } else {
+                    CWrapper.NSWindow.orderOut(ptr);
                 }
-            }
-
-            // Actually show or hide the window
-            if (visible) {
-                CWrapper.NSWindow.orderFront(nsWindowPtr);
-            } else {
-                CWrapper.NSWindow.orderOut(nsWindowPtr);
-            }
+            });
 
             this.visible = visible;
 
             // Manage parent-child relationship when showing
             if (visible) {
-                // Add myself as a child
+                // Order myself above my parent
                 if (owner != null && owner.isVisible()) {
-                    CWrapper.NSWindow.addChildWindow(owner.getNSWindowPtr(),
-                            nsWindowPtr, CWrapper.NSWindow.NSWindowAbove);
+                    owner.execute(ownerPtr -> {
+                        execute(ptr -> {
+                            CWrapper.NSWindow.orderWindow(ptr,
+                                                          CWrapper.NSWindow.NSWindowAbove,
+                                                          ownerPtr);
+                        });
+                    });
 
                     // do not allow security warning to be obscured by other windows
                     applyWindowLevel(ownerWindow);

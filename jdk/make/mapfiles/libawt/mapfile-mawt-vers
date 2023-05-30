@@ -196,11 +196,11 @@ SUNWprivate_1.1 {
                 Java_sun_java2d_opengl_GLXGraphicsConfig_initConfig;
                 Java_sun_java2d_opengl_GLXGraphicsConfig_getOGLCapabilities;
                 Java_sun_java2d_opengl_GLXSurfaceData_initOps;
-                Java_sun_java2d_opengl_GLXSurfaceData_initPbuffer;
 
                 Java_sun_print_CUPSPrinter_initIDs;
                 Java_sun_print_CUPSPrinter_getCupsServer;
                 Java_sun_print_CUPSPrinter_getCupsPort;
+                Java_sun_print_CUPSPrinter_getCupsDefaultPrinter;
                 Java_sun_print_CUPSPrinter_canConnect;
                 Java_sun_print_CUPSPrinter_getMedia;
                 Java_sun_print_CUPSPrinter_getPageSizes;
@@ -242,7 +242,7 @@ SUNWprivate_1.1 {
 		getDefaultConfig;
                 Java_sun_font_FontConfigManager_getFontConfig;
                 Java_sun_font_FontConfigManager_getFontConfigAASettings;
-		Java_sun_awt_X11FontManager_getFontPathNative;
+		Java_sun_awt_FcFontManager_getFontPathNative;
 		Java_sun_font_SunFontManager_populateFontFileNameMap;
 
 		# CDE private entry point

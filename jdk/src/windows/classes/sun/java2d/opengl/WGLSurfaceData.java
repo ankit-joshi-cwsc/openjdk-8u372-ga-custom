@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004, 2009, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2004, 2015, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -41,11 +41,8 @@ public abstract class WGLSurfaceData extends OGLSurfaceData {
     protected WComponentPeer peer;
     private WGLGraphicsConfig graphicsConfig;
 
-    private native void initOps(long pConfigInfo, WComponentPeer peer,
-                                long hwnd);
-    protected native boolean initPbuffer(long pData, long pConfigInfo,
-                                         boolean isOpaque,
-                                         int width, int height);
+    private native void initOps(OGLGraphicsConfig gc, long pConfigInfo,
+                                WComponentPeer peer, long hwnd);
 
     protected WGLSurfaceData(WComponentPeer peer, WGLGraphicsConfig gc,
                              ColorModel cm, int type)
@@ -57,7 +54,7 @@ public abstract class WGLSurfaceData extends OGLSurfaceData {
         long pConfigInfo = gc.getNativeConfigInfo();
         long hwnd = peer != null ? peer.getHWnd() : 0L;
 
-        initOps(pConfigInfo, peer, hwnd);
+        initOps(gc, pConfigInfo, peer, hwnd);
     }
 
     public GraphicsConfiguration getDeviceConfiguration() {

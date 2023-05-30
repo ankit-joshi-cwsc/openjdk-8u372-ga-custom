@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -651,9 +651,29 @@ GetJREPath(char *path, jint pathsize, const char * arch, jboolean speculative)
     }
 
     size_t indexOfLastPathComponent = pathLen - sizeOfLastPathComponent;
-    if (0 == strncmp(realPathToSelf + indexOfLastPathComponent, lastPathComponent, sizeOfLastPathComponent - 1)) {
+    if (0 == strncmp(realPathToSelf + indexOfLastPathComponent, lastPathComponent, sizeOfLastPathComponent)) {
         realPathToSelf[indexOfLastPathComponent + 1] = '\0';
         return JNI_TRUE;
+    }
+
+    // If libjli.dylib is loaded from a macos bundle MacOS dir, find the JRE dir
+    // in ../Home.
+    const char altLastPathComponent[] = "/MacOS/libjli.dylib";
+    size_t sizeOfAltLastPathComponent = sizeof(altLastPathComponent) - 1;
+    if (pathLen < sizeOfLastPathComponent) {
+        return JNI_FALSE;
+    }
+
+    size_t indexOfAltLastPathComponent = pathLen - sizeOfAltLastPathComponent;
+    if (0 == strncmp(realPathToSelf + indexOfAltLastPathComponent, altLastPathComponent, sizeOfAltLastPathComponent)) {
+        JLI_Snprintf(realPathToSelf + indexOfAltLastPathComponent, sizeOfAltLastPathComponent, "%s", "/Home/jre");
+        if (access(realPathToSelf, F_OK) == 0) {
+            return JNI_TRUE;
+        }
+        JLI_Snprintf(realPathToSelf + indexOfAltLastPathComponent, sizeOfAltLastPathComponent, "%s", "/Home");
+        if (access(realPathToSelf, F_OK) == 0) {
+            return JNI_TRUE;
+        }
     }
 
     if (!speculative)
@@ -752,7 +772,7 @@ CounterGet()
 {
     struct timeval tv;
     gettimeofday(&tv, NULL);
-    return (tv.tv_sec * 1000) + tv.tv_usec;
+    return (tv.tv_sec * 1000000) + tv.tv_usec;
 }
 
 
@@ -1004,32 +1024,6 @@ SetXStartOnFirstThreadArg()
     setenv(envVar, "1", 1);
 }
 
-/* This class is made for performSelectorOnMainThread when java main
- * should be launched on main thread.
- * We cannot use dispatch_sync here, because it blocks the main dispatch queue
- * which is used inside Cocoa
- */
-@interface JavaLaunchHelper : NSObject {
-    int _returnValue;
-}
-- (void) launchJava:(NSValue*)argsValue;
-- (int) getReturnValue;
-@end
-
-@implementation JavaLaunchHelper
-
-- (void) launchJava:(NSValue*)argsValue
-{
-    _returnValue = JavaMain([argsValue pointerValue]);
-}
-
-- (int) getReturnValue
-{
-    return _returnValue;
-}
-
-@end
-
 // MacOSX we may continue in the same thread
 int
 JVMInit(InvocationFunctions* ifn, jlong threadStackSize,
@@ -1039,20 +1033,26 @@ JVMInit(InvocationFunctions* ifn, jlong threadStackSize,
         JLI_TraceLauncher("In same thread\n");
         // need to block this thread against the main thread
         // so signals get caught correctly
-        JavaMainArgs args;
-        args.argc = argc;
-        args.argv = argv;
-        args.mode = mode;
-        args.what = what;
-        args.ifn  = *ifn;
-        int rslt;
+        __block int rslt = 0;
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
         {
-            JavaLaunchHelper* launcher = [[[JavaLaunchHelper alloc] init] autorelease];
-            [launcher performSelectorOnMainThread:@selector(launchJava:)
-                                       withObject:[NSValue valueWithPointer:(void*)&args]
-                                    waitUntilDone:YES];
-            rslt = [launcher getReturnValue];
+            NSBlockOperation *op = [NSBlockOperation blockOperationWithBlock: ^{
+                JavaMainArgs args;
+                args.argc = argc;
+                args.argv = argv;
+                args.mode = mode;
+                args.what = what;
+                args.ifn  = *ifn;
+                rslt = JavaMain(&args);
+            }];
+
+            /*
+             * We cannot use dispatch_sync here, because it blocks the main dispatch queue.
+             * Using the main NSRunLoop allows the dispatch queue to run properly once
+             * SWT (or whatever toolkit this is needed for) kicks off it's own NSRunLoop
+             * and starts running.
+             */
+            [op performSelectorOnMainThread:@selector(start) withObject:nil waitUntilDone:YES];
         }
         [pool drain];
         return rslt;
@@ -1068,6 +1068,7 @@ JVMInit(InvocationFunctions* ifn, jlong threadStackSize,
 void PostJVMInit(JNIEnv *env, jstring mainClass, JavaVM *vm) {
     jvmInstance = vm;
     SetMainClassForAWT(env, mainClass);
+    CHECK_EXCEPTION_RETURN();
     ShowSplashScreen();
 }
 

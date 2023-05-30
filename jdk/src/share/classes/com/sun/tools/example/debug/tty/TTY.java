@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2011, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -40,6 +40,7 @@ import com.sun.jdi.request.*;
 import com.sun.jdi.connect.*;
 
 import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.io.*;
 
 public class TTY implements EventNotifier {
@@ -48,13 +49,23 @@ public class TTY implements EventNotifier {
     /**
      * List of Strings to execute at each stop.
      */
-    private List<String> monitorCommands = new ArrayList<String>();
+    private List<String> monitorCommands = new CopyOnWriteArrayList<>();
     private int monitorCount = 0;
 
     /**
      * The name of this tool.
      */
     private static final String progname = "jdb";
+
+    private volatile boolean shuttingDown = false;
+
+    public void setShuttingDown(boolean s) {
+       shuttingDown = s;
+    }
+
+    public boolean isShuttingDown() {
+        return shuttingDown;
+    }
 
     @Override
     public void vmStartEvent(VMStartEvent se)  {
@@ -750,7 +761,13 @@ public class TTY implements EventNotifier {
             while (true) {
                 String ln = in.readLine();
                 if (ln == null) {
-                    MessageOutput.println("Input stream closed.");
+                    /*
+                     *  Jdb is being shutdown because debuggee exited, ignore any 'null'
+                     *  returned by readLine() during shutdown. JDK-8154144.
+                     */
+                    if (!isShuttingDown()) {
+                        MessageOutput.println("Input stream closed.");
+                    }
                     ln = "quit";
                 }
 

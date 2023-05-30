@@ -1628,6 +1628,9 @@ installHandler(HandlerNode *node,
 
     node->handlerID = external? ++requestIdCounter : 0;
     error = eventFilterRestricted_install(node);
+    if (node->ei == EI_GC_FINISH) {
+        classTrack_activate(getEnv());
+    }
     if (error == JVMTI_ERROR_NONE) {
         insert(getHandlerChain(node->ei), node);
     }
@@ -1682,7 +1685,7 @@ HandlerNode *
 eventHandler_createPermanentInternal(EventIndex ei, HandlerFunction func)
 {
     return createInternal(ei, func, NULL,
-                          NULL, NULL, (jlocation)NULL, JNI_TRUE);
+                          NULL, NULL, 0, JNI_TRUE);
 }
 
 HandlerNode *
@@ -1691,7 +1694,7 @@ eventHandler_createInternalThreadOnly(EventIndex ei,
                                       jthread thread)
 {
     return createInternal(ei, func, thread,
-                          NULL, NULL, (jlocation)NULL, JNI_FALSE);
+                          NULL, NULL, 0, JNI_FALSE);
 }
 
 HandlerNode *

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -27,6 +27,9 @@
 #include "gc_implementation/shared/gcId.hpp"
 #include "oops/oop.inline.hpp"
 #include "runtime/arguments.hpp"
+#include "runtime/mutexLocker.hpp"
+#include "runtime/os.hpp"
+#include "runtime/vmThread.hpp"
 #include "utilities/defaultStream.hpp"
 #include "utilities/ostream.hpp"
 #include "utilities/top.hpp"
@@ -89,6 +92,8 @@ const char* outputStream::do_vsnprintf(char* buffer, size_t buflen,
                                        const char* format, va_list ap,
                                        bool add_cr,
                                        size_t& result_len) {
+  assert(buflen >= 2, "buffer too small");
+
   const char* result;
   if (add_cr)  buflen--;
   if (!strchr(format, '%')) {
@@ -101,18 +106,20 @@ const char* outputStream::do_vsnprintf(char* buffer, size_t buflen,
     result = va_arg(ap, const char*);
     result_len = strlen(result);
     if (add_cr && result_len >= buflen)  result_len = buflen-1;  // truncate
-  } else if (vsnprintf(buffer, buflen, format, ap) >= 0) {
-    result = buffer;
-    result_len = strlen(result);
   } else {
-    DEBUG_ONLY(warning("increase O_BUFLEN in ostream.hpp -- output truncated");)
+    int written = os::vsnprintf(buffer, buflen, format, ap);
+    assert(written >= 0, "vsnprintf encoding error");
     result = buffer;
-    result_len = buflen - 1;
-    buffer[result_len] = 0;
+    if ((size_t)written < buflen) {
+      result_len = written;
+    } else {
+      DEBUG_ONLY(warning("increase O_BUFLEN in ostream.hpp -- output truncated");)
+      result_len = buflen - 1;
+    }
   }
   if (add_cr) {
     if (result != buffer) {
-      strncpy(buffer, result, buflen);
+      memcpy(buffer, result, result_len);
       result = buffer;
     }
     buffer[result_len++] = '\n';
@@ -277,7 +284,7 @@ void outputStream::print_data(void* data, size_t len, bool with_ascii) {
   size_t limit = (len + 16) / 16 * 16;
   for (size_t i = 0; i < limit; ++i) {
     if (i % 16 == 0) {
-      indent().print(SIZE_FORMAT_HEX_W(07)":", i);
+      indent().print(SIZE_FORMAT_HEX_W(07) ":", i);
     }
     if (i % 2 == 0) {
       print(" ");
@@ -337,15 +344,19 @@ void stringStream::write(const char* s, size_t len) {
       assert(rm == NULL || Thread::current()->current_resource_mark() == rm,
              "stringStream is re-allocated with a different ResourceMark");
       buffer = NEW_RESOURCE_ARRAY(char, end);
-      strncpy(buffer, oldbuf, buffer_pos);
+      if (buffer_pos > 0) {
+        memcpy(buffer, oldbuf, buffer_pos);
+      }
       buffer_length = end;
     }
   }
   // invariant: buffer is always null-terminated
   guarantee(buffer_pos + write_len + 1 <= buffer_length, "stringStream oob");
-  buffer[buffer_pos + write_len] = 0;
-  strncpy(buffer + buffer_pos, s, write_len);
-  buffer_pos += write_len;
+  if (write_len > 0) {
+    buffer[buffer_pos + write_len] = 0;
+    memcpy(buffer + buffer_pos, s, write_len);
+    buffer_pos += write_len;
+  }
 
   // Note that the following does not depend on write_len.
   // This means that position and count get updated
@@ -374,7 +385,7 @@ extern Mutex* tty_lock;
 char* get_datetime_string(char *buf, size_t len) {
   os::local_time_string(buf, len);
   int i = (int)strlen(buf);
-  while (i-- >= 0) {
+  while (--i >= 0) {
     if (buf[i] == ' ') buf[i] = '_';
     else if (buf[i] == ':') buf[i] = '-';
   }
@@ -578,6 +589,120 @@ void test_loggc_filename() {
     assert(o_result == NULL, err_msg("Too long file name after pid expansion should return NULL, but got '%s'", o_result));
   }
 }
+
+//////////////////////////////////////////////////////////////////////////////
+// Test os::vsnprintf and friends.
+
+void check_snprintf_result(int expected, size_t limit, int actual, bool expect_count) {
+  if (expect_count || ((size_t)expected < limit)) {
+    assert(expected == actual, "snprintf result not expected value");
+  } else {
+    // Make this check more permissive for jdk8u, don't assert that actual == 0.
+    // e.g. jio_vsnprintf_wrapper and jio_snprintf return -1 when expected >= limit
+    if (expected >= (int) limit) {
+      assert(actual == -1, "snprintf result should be -1 for expected >= limit");
+    } else {
+      assert(actual > 0, "snprintf result should be >0 for expected < limit");
+    }
+  }
+}
+
+// PrintFn is expected to be int (*)(char*, size_t, const char*, ...).
+// But jio_snprintf is a C-linkage function with that signature, which
+// has a different type on some platforms (like Solaris).
+template<typename PrintFn>
+void test_snprintf(PrintFn pf, bool expect_count) {
+  const char expected[] = "abcdefghijklmnopqrstuvwxyz";
+  const int expected_len = sizeof(expected) - 1;
+  const size_t padding_size = 10;
+  char buffer[2 * (sizeof(expected) + padding_size)];
+  char check_buffer[sizeof(buffer)];
+  const char check_char = '1';  // Something not in expected.
+  memset(check_buffer, check_char, sizeof(check_buffer));
+  const size_t sizes_to_test[] = {
+    sizeof(buffer) - padding_size,       // Fits, with plenty of space to spare.
+    sizeof(buffer)/2,                    // Fits, with space to spare.
+    sizeof(buffer)/4,                    // Doesn't fit.
+    sizeof(expected) + padding_size + 1, // Fits, with a little room to spare
+    sizeof(expected) + padding_size,     // Fits exactly.
+    sizeof(expected) + padding_size - 1, // Doesn't quite fit.
+    2,                                   // One char + terminating NUL.
+    1,                                   // Only space for terminating NUL.
+    0 };                                 // No space at all.
+  for (unsigned i = 0; i < ARRAY_SIZE(sizes_to_test); ++i) {
+    memset(buffer, check_char, sizeof(buffer)); // To catch stray writes.
+    size_t test_size = sizes_to_test[i];
+    ResourceMark rm;
+    stringStream s;
+    s.print("test_size: " SIZE_FORMAT, test_size);
+    size_t prefix_size = padding_size;
+    guarantee(test_size <= (sizeof(buffer) - prefix_size), "invariant");
+    size_t write_size = MIN2(sizeof(expected), test_size);
+    size_t suffix_size = sizeof(buffer) - prefix_size - write_size;
+    char* write_start = buffer + prefix_size;
+    char* write_end = write_start + write_size;
+
+    int result = pf(write_start, test_size, "%s", expected);
+
+    check_snprintf_result(expected_len, test_size, result, expect_count);
+
+    // Verify expected output.
+    if (test_size > 0) {
+      assert(0 == strncmp(write_start, expected, write_size - 1), "strncmp failure");
+      // Verify terminating NUL of output.
+      assert('\0' == write_start[write_size - 1], "null terminator failure");
+    } else {
+      guarantee(test_size == 0, "invariant");
+      guarantee(write_size == 0, "invariant");
+      guarantee(prefix_size + suffix_size == sizeof(buffer), "invariant");
+      guarantee(write_start == write_end, "invariant");
+    }
+
+    // Verify no scribbling on prefix or suffix.
+    assert(0 == strncmp(buffer, check_buffer, prefix_size), "prefix scribble");
+    assert(0 == strncmp(write_end, check_buffer, suffix_size), "suffix scribble");
+  }
+
+  // Special case of 0-length buffer with empty (except for terminator) output.
+  check_snprintf_result(0, 0, pf(NULL, 0, "%s", ""), expect_count);
+  check_snprintf_result(0, 0, pf(NULL, 0, ""), expect_count);
+}
+
+// This is probably equivalent to os::snprintf, but we're being
+// explicit about what we're testing here.
+static int vsnprintf_wrapper(char* buf, size_t len, const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+PRAGMA_DIAG_PUSH
+PRAGMA_FORMAT_NONLITERAL_IGNORED_INTERNAL
+  int result = os::vsnprintf(buf, len, fmt, args);
+PRAGMA_DIAG_POP
+  va_end(args);
+  return result;
+}
+
+// These are declared in jvm.h; test here, with related functions.
+extern "C" {
+int jio_vsnprintf(char*, size_t, const char*, va_list);
+int jio_snprintf(char*, size_t, const char*, ...);
+}
+
+// This is probably equivalent to jio_snprintf, but we're being
+// explicit about what we're testing here.
+static int jio_vsnprintf_wrapper(char* buf, size_t len, const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  int result = jio_vsnprintf(buf, len, fmt, args);
+  va_end(args);
+  return result;
+}
+
+void test_snprintf() {
+  test_snprintf(vsnprintf_wrapper, true);
+  test_snprintf(os::snprintf, true);
+  test_snprintf(jio_vsnprintf_wrapper, false); // jio_vsnprintf returns -1 on error including exceeding buffer size
+  test_snprintf(jio_snprintf, false);          // jio_snprintf calls jio_vsnprintf
+}
 #endif // PRODUCT
 
 fileStream::fileStream(const char* file_name) {
@@ -678,9 +803,11 @@ gcLogFileStream::~gcLogFileStream() {
     FREE_C_HEAP_ARRAY(char, _file_name, mtInternal);
     _file_name = NULL;
   }
+
+  delete _file_lock;
 }
 
-gcLogFileStream::gcLogFileStream(const char* file_name) {
+gcLogFileStream::gcLogFileStream(const char* file_name) : _file_lock(NULL) {
   _cur_file_num = 0;
   _bytes_written = 0L;
   _file_name = make_log_name(file_name, NULL);
@@ -703,6 +830,10 @@ gcLogFileStream::gcLogFileStream(const char* file_name) {
   if (_file != NULL) {
     _need_close = true;
     dump_loggc_header();
+
+    if (UseGCLogFileRotation) {
+      _file_lock = new Mutex(Mutex::leaf, "GCLogFile");
+    }
   } else {
     warning("Cannot open file %s due to %s\n", _file_name, strerror(errno));
     _need_close = false;
@@ -711,21 +842,54 @@ gcLogFileStream::gcLogFileStream(const char* file_name) {
 
 void gcLogFileStream::write(const char* s, size_t len) {
   if (_file != NULL) {
-    size_t count = fwrite(s, 1, len, _file);
-    _bytes_written += count;
+    // we can't use Thread::current() here because thread may be NULL
+    // in early stage(ostream_init_log)
+    Thread* thread = ThreadLocalStorage::thread();
+
+    // avoid the mutex in the following cases
+    // 1) ThreadLocalStorage::thread() hasn't been initialized
+    // 2) _file_lock is not in use.
+    // 3) current() is VMThread and its reentry flag is set
+    if (!thread || !_file_lock || (thread->is_VM_thread()
+                               && ((VMThread* )thread)->is_gclog_reentry())) {
+      size_t count = fwrite(s, 1, len, _file);
+      _bytes_written += count;
+    }
+    else {
+      MutexLockerEx ml(_file_lock, Mutex::_no_safepoint_check_flag);
+      size_t count = fwrite(s, 1, len, _file);
+      _bytes_written += count;
+    }
   }
   update_position(s, len);
 }
 
-// rotate_log must be called from VMThread at safepoint. In case need change parameters
+// rotate_log must be called from VMThread at a safepoint. In case need change parameters
 // for gc log rotation from thread other than VMThread, a sub type of VM_Operation
 // should be created and be submitted to VMThread's operation queue. DO NOT call this
-// function directly. Currently, it is safe to rotate log at safepoint through VMThread.
-// That is, no mutator threads and concurrent GC threads run parallel with VMThread to
-// write to gc log file at safepoint. If in future, changes made for mutator threads or
-// concurrent GC threads to run parallel with VMThread at safepoint, write and rotate_log
-// must be synchronized.
+// function directly. It is safe to rotate log through VMThread because
+// no mutator threads run concurrently with the VMThread, and GC threads that run
+// concurrently with the VMThread are synchronized in write and rotate_log via _file_lock.
+// rotate_log can write log entries, so write supports reentry for it.
 void gcLogFileStream::rotate_log(bool force, outputStream* out) {
+ #ifdef ASSERT
+   Thread *thread = Thread::current();
+   assert(thread == NULL ||
+          (thread->is_VM_thread() && SafepointSynchronize::is_at_safepoint()),
+          "Must be VMThread at safepoint");
+ #endif
+
+  VMThread* vmthread = VMThread::vm_thread();
+  {
+    // nop if _file_lock is NULL.
+    MutexLockerEx ml(_file_lock, Mutex::_no_safepoint_check_flag);
+    vmthread->set_gclog_reentry(true);
+    rotate_log_impl(force, out);
+    vmthread->set_gclog_reentry(false);
+  }
+}
+
+void gcLogFileStream::rotate_log_impl(bool force, outputStream* out) {
   char time_msg[O_BUFLEN];
   char time_str[EXTRACHARLEN];
   char current_file_name[JVM_MAXPATHLEN];
@@ -735,12 +899,6 @@ void gcLogFileStream::rotate_log(bool force, outputStream* out) {
     return;
   }
 
-#ifdef ASSERT
-  Thread *thread = Thread::current();
-  assert(thread == NULL ||
-         (thread->is_VM_thread() && SafepointSynchronize::is_at_safepoint()),
-         "Must be VMThread at safepoint");
-#endif
   if (NumberOfGCLogFiles == 1) {
     // rotate in same file
     rewind();
@@ -945,7 +1103,7 @@ void defaultStream::start_log() {
     // %%% Should be: jlong time_ms = os::start_time_milliseconds(), if
     // we ever get round to introduce that method on the os class
     xs->head("hotspot_log version='%d %d'"
-             " process='%d' time_ms='"INT64_FORMAT"'",
+             " process='%d' time_ms='" INT64_FORMAT "'",
              LOG_MAJOR_VERSION, LOG_MINOR_VERSION,
              os::current_process_id(), (int64_t)time_ms);
     // Write VM version header immediately.

@@ -43,7 +43,6 @@
 #endif
 #ifdef __linux__
 #include <unistd.h>
-#include <sys/sysctl.h>
 #endif
 
 #include "jvm.h"
@@ -161,6 +160,9 @@ Java_java_net_PlainSocketImpl_initProto(JNIEnv *env, jclass cls) {
     CHECK_NULL(psi_closePendingID);
     IO_fd_fdID = NET_GetFileDescriptorID(env);
     CHECK_NULL(IO_fd_fdID);
+
+    initInetAddressIDs(env);
+    JNU_CHECK_EXCEPTION(env);
 
     /* Create the marker fd used for dup2 */
     marker_fd = getMarkerFD();

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2010, 2015, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -21,23 +21,18 @@
  * questions.
  */
 
-// key: compiler.misc.where.intersection
-// key: compiler.misc.where.description.intersection
-// key: compiler.misc.intersection.type
+// key: compiler.misc.incompatible.upper.lower.bounds
+// key: compiler.misc.where.description.typevar
+// key: compiler.misc.where.typevar
 // key: compiler.err.prob.found.req
-// key: compiler.misc.inferred.do.not.conform.to.upper.bounds
 // options: -XDdiags=where
 // run: simple
 
 class WhereIntersection {
-    interface I1 {}
-    interface I2 {}
-    class A implements I1, I2 {}
-    class B implements I1, I2 {}
-    class Test {
-        <Z> Z m(Z z1, Z z2) { return null; }
-        void main(){
-            A a = m(new A(), new B());
-        }
+    static <T> T f(T a, T b) {
+        return a;
+    }
+    static Object[] main(int a, float b) {
+        return f(a, b);
     }
 }

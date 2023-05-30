@@ -68,6 +68,12 @@ GenerationSpec* Generation::spec() {
   return gch->_gen_specs[level()];
 }
 
+// This is for CMS. It returns stable monotonic used space size.
+// Remove this when CMS is removed.
+size_t Generation::used_stable() const {
+  return used();
+}
+
 size_t Generation::max_capacity() const {
   return reserved().byte_size();
 }
@@ -187,7 +193,7 @@ bool Generation::promotion_attempt_is_safe(size_t max_promotion_in_bytes) const 
   bool   res = (available >= max_promotion_in_bytes);
   if (PrintGC && Verbose) {
     gclog_or_tty->print_cr(
-      "Generation: promo attempt is%s safe: available("SIZE_FORMAT") %s max_promo("SIZE_FORMAT")",
+      "Generation: promo attempt is%s safe: available(" SIZE_FORMAT ") %s max_promo(" SIZE_FORMAT ")",
       res? "":" not", available, res? ">=":"<",
       max_promotion_in_bytes);
   }

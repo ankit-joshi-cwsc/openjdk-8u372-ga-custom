@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -39,11 +39,14 @@ class PhaseTransform;
 //------------------------------MemNode----------------------------------------
 // Load or Store, possibly throwing a NULL pointer exception
 class MemNode : public Node {
+private:
+  bool _unaligned_access; // Unaligned access from unsafe
+  bool _mismatched_access; // Mismatched access from unsafe: byte read in integer array for instance
 protected:
 #ifdef ASSERT
   const TypePtr* _adr_type;     // What kind of memory is being addressed?
 #endif
-  virtual uint size_of() const; // Size is bigger (ASSERT only)
+  virtual uint size_of() const;
 public:
   enum { Control,               // When is it safe to do this load?
          Memory,                // Chunk of memory is being loaded from
@@ -57,20 +60,22 @@ public:
   } MemOrd;
 protected:
   MemNode( Node *c0, Node *c1, Node *c2, const TypePtr* at )
-    : Node(c0,c1,c2   ) {
+    : Node(c0,c1,c2   ), _unaligned_access(false), _mismatched_access(false) {
     init_class_id(Class_Mem);
     debug_only(_adr_type=at; adr_type();)
   }
   MemNode( Node *c0, Node *c1, Node *c2, const TypePtr* at, Node *c3 )
-    : Node(c0,c1,c2,c3) {
+    : Node(c0,c1,c2,c3), _unaligned_access(false), _mismatched_access(false) {
     init_class_id(Class_Mem);
     debug_only(_adr_type=at; adr_type();)
   }
   MemNode( Node *c0, Node *c1, Node *c2, const TypePtr* at, Node *c3, Node *c4)
-    : Node(c0,c1,c2,c3,c4) {
+    : Node(c0,c1,c2,c3,c4), _unaligned_access(false), _mismatched_access(false) {
     init_class_id(Class_Mem);
     debug_only(_adr_type=at; adr_type();)
   }
+
+  static bool check_if_adr_maybe_raw(Node* adr);
 
 public:
   // Helpers for the optimizer.  Documented in memnode.cpp.
@@ -128,6 +133,11 @@ public:
   // Can this node (load or store) accurately see a stored value in
   // the given memory state?  (The state may or may not be in(Memory).)
   Node* can_see_stored_value(Node* st, PhaseTransform* phase) const;
+
+  void set_unaligned_access() { _unaligned_access = true; }
+  bool is_unaligned_access() const { return _unaligned_access; }
+  void set_mismatched_access() { _mismatched_access = true; }
+  bool is_mismatched_access() const { return _mismatched_access; }
 
 #ifndef PRODUCT
   static void dump_adr_type(const Node* mem, const TypePtr* adr_type, outputStream *st);
@@ -576,6 +586,8 @@ public:
 
   // have all possible loads of the value stored been optimized away?
   bool value_never_loaded(PhaseTransform *phase) const;
+
+  MemBarNode* trailing_membar() const;
 };
 
 //------------------------------StoreBNode-------------------------------------
@@ -781,6 +793,7 @@ public:
   virtual const class TypePtr *adr_type() const { return _adr_type; }  // returns bottom_type of address
 
   bool result_not_used() const;
+  MemBarNode* trailing_membar() const;
 };
 
 class LoadStoreConditionalNode : public LoadStoreNode {
@@ -1034,6 +1047,20 @@ class MemBarNode: public MultiNode {
   // Memory type this node is serializing.  Usually either rawptr or bottom.
   const TypePtr* _adr_type;
 
+  // How is this membar related to a nearby memory access?
+  enum {
+    Standalone,
+    TrailingLoad,
+    TrailingStore,
+    LeadingStore,
+    TrailingLoadStore,
+    LeadingLoadStore
+  } _kind;
+
+#ifdef ASSERT
+  uint _pair_idx;
+#endif
+
 public:
   enum {
     Precedent = TypeFunc::Parms  // optional edge to force precedence
@@ -1051,6 +1078,24 @@ public:
   static MemBarNode* make(Compile* C, int opcode,
                           int alias_idx = Compile::AliasIdxBot,
                           Node* precedent = NULL);
+
+  MemBarNode* trailing_membar() const;
+  MemBarNode* leading_membar() const;
+
+  void set_trailing_load() { _kind = TrailingLoad; }
+  bool trailing_load() const { return _kind == TrailingLoad; }
+  bool trailing_store() const { return _kind == TrailingStore; }
+  bool leading_store() const { return _kind == LeadingStore; }
+  bool trailing_load_store() const { return _kind == TrailingLoadStore; }
+  bool leading_load_store() const { return _kind == LeadingLoadStore; }
+  bool trailing() const { return _kind == TrailingLoad || _kind == TrailingStore || _kind == TrailingLoadStore; }
+  bool leading() const { return _kind == LeadingStore || _kind == LeadingLoadStore; }
+  bool standalone() const { return _kind == Standalone; }
+
+  static void set_store_pair(MemBarNode* leading, MemBarNode* trailing);
+  static void set_load_store_pair(MemBarNode* leading, MemBarNode* trailing);
+
+  void remove(PhaseIterGVN *igvn);
 };
 
 // "Acquire" - no following ref can move before (but earlier refs can

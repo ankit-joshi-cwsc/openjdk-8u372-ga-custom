@@ -30,7 +30,7 @@
 //---------------------------------------------------------------------------------
 //
 //  Little Color Management System
-//  Copyright (c) 1998-2012 Marti Maria Saguer
+//  Copyright (c) 1998-2020 Marti Maria Saguer
 //
 // Permission is hereby granted, free of charge, to any person obtaining
 // a copy of this software and associated documentation files (the "Software"),
@@ -55,19 +55,6 @@
 
 #include "lcms2_internal.h"
 
-
-// Link several profiles to obtain a single LUT modelling the whole color transform. Intents, Black point
-// compensation and Adaptation parameters may vary across profiles. BPC and Adaptation refers to the PCS
-// after the profile. I.e, BPC[0] refers to connexion between profile(0) and profile(1)
-cmsPipeline* _cmsLinkProfiles(cmsContext     ContextID,
-                              cmsUInt32Number nProfiles,
-                              cmsUInt32Number Intents[],
-                              cmsHPROFILE     hProfiles[],
-                              cmsBool         BPC[],
-                              cmsFloat64Number AdaptationStates[],
-                              cmsUInt32Number dwFlags);
-
-//---------------------------------------------------------------------------------
 
 // This is the default routine for ICC-style intents. A user may decide to override it by using a plugin.
 // Supported intents are perceptual, relative colorimetric, saturation and ICC-absolute colorimetric
@@ -136,7 +123,7 @@ static cmsIntentsList DefaultIntents[] = {
 };
 
 
-// A pointer to the begining of the list
+// A pointer to the beginning of the list
 _cmsIntentsPluginChunkType _cmsIntentsPluginChunk = { NULL };
 
 // Duplicates the zone of memory used by the plug-in in the new context
@@ -299,6 +286,7 @@ cmsBool  ComputeAbsoluteIntent(cmsFloat64Number AdaptationState,
     cmsMAT3 Scale, m1, m2, m3, m4;
 
     // TODO: Follow Marc Mahy's recommendation to check if CHAD is same by using M1*M2 == M2*M1. If so, do nothing.
+    // TODO: Add support for ArgyllArts tag
 
     // Adaptation state
     if (AdaptationState == 1.0) {
@@ -391,11 +379,12 @@ cmsBool IsEmptyLayer(cmsMAT3* m, cmsVEC3* off)
 
 // Compute the conversion layer
 static
-cmsBool ComputeConversion(int i, cmsHPROFILE hProfiles[],
-                                 cmsUInt32Number Intent,
-                                 cmsBool BPC,
-                                 cmsFloat64Number AdaptationState,
-                                 cmsMAT3* m, cmsVEC3* off)
+cmsBool ComputeConversion(cmsUInt32Number i,
+                          cmsHPROFILE hProfiles[],
+                          cmsUInt32Number Intent,
+                          cmsBool BPC,
+                          cmsFloat64Number AdaptationState,
+                          cmsMAT3* m, cmsVEC3* off)
 {
 
     int k;
@@ -707,7 +696,7 @@ cmsPipeline*  CMSEXPORT _cmsDefaultICCintents(cmsContext     ContextID,
 
 // Translate black-preserving intents to ICC ones
 static
-int TranslateNonICCIntents(int Intent)
+cmsUInt32Number TranslateNonICCIntents(cmsUInt32Number Intent)
 {
     switch (Intent) {
         case INTENT_PRESERVE_K_ONLY_PERCEPTUAL:
@@ -737,7 +726,7 @@ typedef struct {
 
 // Preserve black only if that is the only ink used
 static
-int BlackPreservingGrayOnlySampler(register const cmsUInt16Number In[], register cmsUInt16Number Out[], register void* Cargo)
+int BlackPreservingGrayOnlySampler(CMSREGISTER const cmsUInt16Number In[], CMSREGISTER cmsUInt16Number Out[], CMSREGISTER void* Cargo)
 {
     GrayOnlyParams* bp = (GrayOnlyParams*) Cargo;
 
@@ -864,7 +853,7 @@ typedef struct {
 
 // The CLUT will be stored at 16 bits, but calculations are performed at cmsFloat32Number precision
 static
-int BlackPreservingSampler(register const cmsUInt16Number In[], register cmsUInt16Number Out[], register void* Cargo)
+int BlackPreservingSampler(CMSREGISTER const cmsUInt16Number In[], CMSREGISTER cmsUInt16Number Out[], CMSREGISTER void* Cargo)
 {
     int i;
     cmsFloat32Number Inf[4], Outf[4];
@@ -889,18 +878,18 @@ int BlackPreservingSampler(register const cmsUInt16Number In[], register cmsUInt
     }
 
     // Try the original transform,
-    cmsPipelineEvalFloat( Inf, Outf, bp ->cmyk2cmyk);
+    cmsPipelineEvalFloat(Inf, Outf, bp ->cmyk2cmyk);
 
     // Store a copy of the floating point result into 16-bit
     for (i=0; i < 4; i++)
             Out[i] = _cmsQuickSaturateWord(Outf[i] * 65535.0);
 
     // Maybe K is already ok (mostly on K=0)
-    if ( fabs(Outf[3] - LabK[3]) < (3.0 / 65535.0) ) {
+    if (fabsf(Outf[3] - LabK[3]) < (3.0 / 65535.0)) {
         return TRUE;
     }
 
-    // K differ, mesure and keep Lab measurement for further usage
+    // K differ, measure and keep Lab measurement for further usage
     // this is done in relative colorimetric intent
     cmsDoTransform(bp->hProofOutput, Out, &ColorimetricLab, 1);
 
@@ -917,11 +906,11 @@ int BlackPreservingSampler(register const cmsUInt16Number In[], register cmsUInt
         return TRUE;
     }
 
-    // Make sure to pass thru K (which now is fixed)
+    // Make sure to pass through K (which now is fixed)
     Outf[3] = LabK[3];
 
     // Apply TAC if needed
-    SumCMY   = Outf[0]  + Outf[1] + Outf[2];
+    SumCMY   = (cmsFloat64Number) Outf[0]  + Outf[1] + Outf[2];
     SumCMYK  = SumCMY + Outf[3];
 
     if (SumCMYK > bp ->MaxTAC) {
@@ -985,7 +974,7 @@ cmsPipeline* BlackPreservingKPlaneIntents(cmsContext     ContextID,
     memset(&bp, 0, sizeof(bp));
 
     // We need the input LUT of the last profile, assuming this one is responsible of
-    // black generation. This LUT will be seached in inverse order.
+    // black generation. This LUT will be searched in inverse order.
     bp.LabK2cmyk = _cmsReadInputLUT(hProfiles[nProfiles-1], INTENT_RELATIVE_COLORIMETRIC);
     if (bp.LabK2cmyk == NULL) goto Cleanup;
 

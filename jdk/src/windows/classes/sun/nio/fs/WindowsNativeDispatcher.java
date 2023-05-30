@@ -37,6 +37,17 @@ class WindowsNativeDispatcher {
     private WindowsNativeDispatcher() { }
 
     /**
+     * HANDLE CreateEvent(
+     *   LPSECURITY_ATTRIBUTES lpEventAttributes,
+     *   BOOL bManualReset,
+     *   BOOL bInitialState,
+     *   PCTSTR lpName
+     * );
+     */
+    static native long CreateEvent(boolean bManualReset, boolean bInitialState)
+        throws WindowsException;
+
+    /**
      * HANDLE CreateFile(
      *   LPCTSTR lpFileName,
      *   DWORD dwDesiredAccess,
@@ -1041,6 +1052,25 @@ class WindowsNativeDispatcher {
                                              long pOverlapped)
         throws WindowsException;
 
+
+    /**
+     * CancelIo(
+     *   HANDLE hFile
+     * )
+     */
+    static native void CancelIo(long hFile) throws WindowsException;
+
+    /**
+     * GetOverlappedResult(
+     *   HANDLE hFile,
+     *   LPOVERLAPPED lpOverlapped,
+     *   LPDWORD lpNumberOfBytesTransferred,
+     *   BOOL bWait
+     * );
+     */
+    static native int GetOverlappedResult(long hFile, long lpOverlapped)
+        throws WindowsException;
+
     /**
      * BackupRead(
      *   HANDLE hFile,
@@ -1093,7 +1123,12 @@ class WindowsNativeDispatcher {
 
     private static final Unsafe unsafe = Unsafe.getUnsafe();
 
-    static NativeBuffer asNativeBuffer(String s) {
+    static NativeBuffer asNativeBuffer(String s) throws WindowsException {
+        if (s.length() > (Integer.MAX_VALUE - 2)/2) {
+            throw new WindowsException
+                ("String too long to convert to native buffer");
+        }
+
         int stringLengthInBytes = s.length() << 1;
         int sizeInBytes = stringLengthInBytes + 2;  // char terminator
 

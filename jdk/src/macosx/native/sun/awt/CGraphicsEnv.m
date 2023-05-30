@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,6 +26,7 @@
 #import <JavaNativeFoundation/JavaNativeFoundation.h>
 
 #import "jni_util.h"
+#import "ThreadUtilities.h"
 #import "LWCToolkit.h"
 #import "AWT_debug.h"
 
@@ -133,17 +134,21 @@ static void displaycb_handle
 {
     if (flags == kCGDisplayBeginConfigurationFlag) return;
 
-    JNFPerformEnvBlock(JNFThreadDetachImmediately, ^(JNIEnv *env) {
-        JNFWeakJObjectWrapper *wrapper = (JNFWeakJObjectWrapper *)userInfo;
+    [ThreadUtilities performOnMainThreadWaiting:NO block:^() {
 
-        jobject graphicsEnv = [wrapper jObjectWithEnv:env];
-        if (graphicsEnv == NULL) return; // ref already GC'd
-        static JNF_CLASS_CACHE(jc_CGraphicsEnvironment, "sun/awt/CGraphicsEnvironment");
-        static JNF_MEMBER_CACHE(jm_displayReconfiguration, jc_CGraphicsEnvironment, "_displayReconfiguration", "(IZ)V");
-        JNFCallVoidMethod(env, graphicsEnv, jm_displayReconfiguration,
-                            (jint) display, 
-                            (jboolean) flags & kCGDisplayRemoveFlag);
-    });
+        JNFPerformEnvBlock(JNFThreadDetachImmediately, ^(JNIEnv *env) {
+            JNFWeakJObjectWrapper *wrapper = (JNFWeakJObjectWrapper *)userInfo;
+
+            jobject graphicsEnv = [wrapper jObjectWithEnv:env];
+            if (graphicsEnv == NULL) return; // ref already GC'd
+            static JNF_CLASS_CACHE(jc_CGraphicsEnvironment, "sun/awt/CGraphicsEnvironment");
+            static JNF_MEMBER_CACHE(jm_displayReconfiguration,
+                    jc_CGraphicsEnvironment, "_displayReconfiguration","(IZ)V");
+            JNFCallVoidMethod(env, graphicsEnv, jm_displayReconfiguration,
+                    (jint) display, (jboolean) flags & kCGDisplayRemoveFlag);
+            (*env)->DeleteLocalRef(env, graphicsEnv);
+        });
+    }];
 }
 
 /*
@@ -159,8 +164,7 @@ Java_sun_awt_CGraphicsEnvironment_registerDisplayReconfiguration
 
 JNF_COCOA_ENTER(env);
 
-    JNFWeakJObjectWrapper *wrapper = [JNFWeakJObjectWrapper wrapperWithJObject:this withEnv:env];
-    CFRetain(wrapper); // pin from ObjC-GC
+    JNFWeakJObjectWrapper *wrapper = [[JNFWeakJObjectWrapper wrapperWithJObject:this withEnv:env] retain];
 
     /* Register the callback */
     if (CGDisplayRegisterReconfigurationCallback(&displaycb_handle, wrapper) != kCGErrorSuccess) {
@@ -199,9 +203,8 @@ JNF_COCOA_ENTER(env);
         return;
     }
 
-    [wrapper setJObject:NULL withEnv:env]; // more efficiant to pre-clear
-
-    CFRelease(wrapper);
+    [wrapper setJObject:NULL withEnv:env]; // more efficient to pre-clear
+    [wrapper release];
 
 JNF_COCOA_EXIT(env);
 }

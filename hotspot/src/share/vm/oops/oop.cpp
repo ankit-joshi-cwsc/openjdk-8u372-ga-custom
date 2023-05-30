@@ -46,7 +46,7 @@ void oopDesc::print_on(outputStream* st) const {
 
 void oopDesc::print_address_on(outputStream* st) const {
   if (PrintOopAddress) {
-    st->print("{"INTPTR_FORMAT"}", this);
+    st->print("{" INTPTR_FORMAT "}", this);
   }
 }
 
@@ -111,7 +111,7 @@ unsigned int oopDesc::new_hash(juint seed) {
   jchar* chars = java_lang_String::as_unicode_string(this, length, THREAD);
   if (chars != NULL) {
     // Use alternate hashing algorithm on the string
-    return AltHashing::murmur3_32(seed, chars, length);
+    return AltHashing::halfsiphash_32(seed, chars, length);
   } else {
     vm_exit_out_of_memory(length, OOM_MALLOC_ERROR, "unable to create Unicode strings for String table rehash");
     return 0;

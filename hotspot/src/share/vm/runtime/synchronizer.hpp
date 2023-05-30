@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -42,6 +42,18 @@ class ObjectSynchronizer : AllStatic {
     owner_none,
     owner_other
   } LockOwnership;
+
+  typedef enum {
+    inflate_cause_vm_internal = 0,
+    inflate_cause_monitor_enter = 1,
+    inflate_cause_wait = 2,
+    inflate_cause_notify = 3,
+    inflate_cause_hash_code = 4,
+    inflate_cause_jni_enter = 5,
+    inflate_cause_jni_exit = 6,
+    inflate_cause_nof = 7 // Number of causes
+  } InflateCause;
+
   // exit must be implemented non-blocking, since the compiler cannot easily handle
   // deoptimization at monitor exit. Hence, it does not take a Handle argument.
 
@@ -90,9 +102,10 @@ class ObjectSynchronizer : AllStatic {
   static void omFlush   (Thread * Self) ;
 
   // Inflate light weight monitor to heavy weight monitor
-  static ObjectMonitor* inflate(Thread * Self, oop obj);
+  static ObjectMonitor* inflate(Thread * Self, oop obj, const InflateCause cause);
   // This version is only for internal use
   static ObjectMonitor* inflate_helper(oop obj);
+  static const char* inflate_cause_name(const InflateCause cause);
 
   // Returns the identity hash value for an oop
   // NOTE: It may cause monitor inflation
@@ -121,6 +134,9 @@ class ObjectSynchronizer : AllStatic {
   static void oops_do(OopClosure* f);
 
   // debugging
+  static void sanity_checks(const bool verbose,
+                            const unsigned int cache_line_size,
+                            int *error_cnt_ptr, int *warning_cnt_ptr);
   static void verify() PRODUCT_RETURN;
   static int  verify_objmon_isinpool(ObjectMonitor *addr) PRODUCT_RETURN0;
 
@@ -128,7 +144,7 @@ class ObjectSynchronizer : AllStatic {
 
  private:
   enum { _BLOCKSIZE = 128 };
-  static ObjectMonitor* gBlockList;
+  static ObjectMonitor * volatile gBlockList;
   static ObjectMonitor * volatile gFreeList;
   static ObjectMonitor * volatile gOmInUseList; // for moribund thread, so monitors they inflated still get scanned
   static int gOmInUseCount;
@@ -158,7 +174,7 @@ class ObjectLocker : public StackObj {
   void waitUninterruptibly (TRAPS) { ObjectSynchronizer::waitUninterruptibly (_obj, 0, CHECK);}
   // complete_exit gives up lock completely, returning recursion count
   // reenter reclaims lock with original recursion count
-  intptr_t complete_exit(TRAPS) { return  ObjectSynchronizer::complete_exit(_obj, CHECK_0); }
+  intptr_t complete_exit(TRAPS) { return  ObjectSynchronizer::complete_exit(_obj, THREAD); }
   void reenter(intptr_t recursion, TRAPS) { ObjectSynchronizer::reenter(_obj, recursion, CHECK); }
 };
 

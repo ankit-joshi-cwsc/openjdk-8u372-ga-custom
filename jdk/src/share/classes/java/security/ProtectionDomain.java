@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -31,17 +31,15 @@ import java.util.Enumeration;
 import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
+import sun.misc.JavaSecurityAccess;
 import sun.misc.JavaSecurityProtectionDomainAccess;
 import static sun.misc.JavaSecurityProtectionDomainAccess.ProtectionDomainCache;
+import sun.misc.SharedSecrets;
 import sun.security.util.Debug;
 import sun.security.util.SecurityConstants;
-import sun.misc.JavaSecurityAccess;
-import sun.misc.SharedSecrets;
 
 /**
- *
- *<p>
- * This ProtectionDomain class encapsulates the characteristics of a domain,
+ * The ProtectionDomain class encapsulates the characteristics of a domain,
  * which encloses a set of classes whose instances are granted a set
  * of permissions when being executed on behalf of a given set of Principals.
  * <p>
@@ -461,6 +459,7 @@ public class ProtectionDomain {
     static {
         SharedSecrets.setJavaSecurityProtectionDomainAccess(
             new JavaSecurityProtectionDomainAccess() {
+                @Override
                 public ProtectionDomainCache getProtectionDomainCache() {
                     return new ProtectionDomainCache() {
                         private final Map<Key, PermissionCollection> map =
@@ -474,6 +473,11 @@ public class ProtectionDomain {
                             return pd == null ? map.get(null) : map.get(pd.key);
                         }
                     };
+                }
+
+                @Override
+                public boolean getStaticPermissionsField(ProtectionDomain pd) {
+                    return pd.staticPermissions;
                 }
             });
     }

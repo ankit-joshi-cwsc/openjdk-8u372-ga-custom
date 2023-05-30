@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -47,6 +47,9 @@
 #include "runtime/os.hpp"
 #ifdef TARGET_ARCH_x86
 # include "bytes_x86.hpp"
+#endif
+#ifdef TARGET_ARCH_aarch64
+# include "bytes_aarch64.hpp"
 #endif
 #ifdef TARGET_ARCH_sparc
 # include "bytes_sparc.hpp"
@@ -98,7 +101,7 @@ bool Verifier::should_verify_for(oop class_loader, bool should_verify_class) {
     BytecodeVerificationLocal : BytecodeVerificationRemote;
 }
 
-bool Verifier::relax_verify_for(oop loader) {
+bool Verifier::relax_access_for(oop loader) {
   bool trusted = java_lang_ClassLoader::is_trusted_loader(loader);
   bool need_verify =
     // verifyAll
@@ -504,8 +507,13 @@ void ErrorContext::stackmap_details(outputStream* ss, const Method* method) cons
     stack_map_frame* sm_frame = sm_table->entries();
     streamIndentor si2(ss);
     int current_offset = -1;
+    address end_of_sm_table = (address)sm_table + method->stackmap_data()->length();
     for (u2 i = 0; i < sm_table->number_of_entries(); ++i) {
       ss->indent();
+      if (!sm_frame->verify((address)sm_frame, end_of_sm_table)) {
+        sm_frame->print_truncated(ss, current_offset);
+        return;
+      }
       sm_frame->print_on(ss, current_offset);
       ss->cr();
       current_offset += sm_frame->offset_delta();
@@ -1809,7 +1817,7 @@ u2 ClassVerifier::verify_stackmap_table(u2 stackmap_index, u2 bci,
       // If matched, current_frame will be updated by this method.
       bool matches = stackmap_table->match_stackmap(
         current_frame, this_offset, stackmap_index,
-        !no_control_flow, true, false, &ctx, CHECK_VERIFY_(this, 0));
+        !no_control_flow, true, &ctx, CHECK_VERIFY_(this, 0));
       if (!matches) {
         // report type error
         verify_error(ctx, "Instruction type does not match stack map");
@@ -1856,7 +1864,7 @@ void ClassVerifier::verify_exception_handler_targets(u2 bci, bool this_uninit, S
       }
       ErrorContext ctx;
       bool matches = stackmap_table->match_stackmap(
-        new_frame, handler_pc, true, false, true, &ctx, CHECK_VERIFY(this));
+        new_frame, handler_pc, true, false, &ctx, CHECK_VERIFY(this));
       if (!matches) {
         verify_error(ctx, "Stack map does not match the one at "
             "exception handler %d", handler_pc);
@@ -1964,7 +1972,7 @@ bool ClassVerifier::is_protected_access(instanceKlassHandle this_class,
   InstanceKlass* target_instance = InstanceKlass::cast(target_class);
   fieldDescriptor fd;
   if (is_method) {
-    Method* m = target_instance->uncached_lookup_method(field_name, field_sig, Klass::normal);
+    Method* m = target_instance->uncached_lookup_method(field_name, field_sig, Klass::find_overpass);
     if (m != NULL && m->is_protected()) {
       if (!this_class->is_same_class_package(m->method_holder())) {
         return true;
@@ -2134,6 +2142,7 @@ void ClassVerifier::verify_field_instructions(RawBytecodeStream* bcs,
   // Get field name and signature
   Symbol* field_name = cp->name_ref_at(index);
   Symbol* field_sig = cp->signature_ref_at(index);
+  bool is_getfield = false;
 
   if (!SignatureVerifier::is_valid_type_signature(field_sig)) {
     class_format_error(
@@ -2184,11 +2193,9 @@ void ClassVerifier::verify_field_instructions(RawBytecodeStream* bcs,
       break;
     }
     case Bytecodes::_getfield: {
+      is_getfield = true;
       stack_object_type = current_frame->pop_stack(
         target_class_type, CHECK_VERIFY(this));
-      for (int i = 0; i < n; i++) {
-        current_frame->push_stack(field_type[i], CHECK_VERIFY(this));
-      }
       goto check_protected;
     }
     case Bytecodes::_putfield: {
@@ -2218,6 +2225,15 @@ void ClassVerifier::verify_field_instructions(RawBytecodeStream* bcs,
     check_protected: {
       if (_this_type == stack_object_type)
         break; // stack_object_type must be assignable to _current_class_type
+      if (was_recursively_verified()) {
+        if (is_getfield) {
+          // Push field type for getfield.
+          for (int i = 0; i < n; i++) {
+            current_frame->push_stack(field_type[i], CHECK_VERIFY(this));
+          }
+        }
+        return;
+      }
       Symbol* ref_class_name =
         cp->klass_name_at(cp->klass_ref_index_at(index));
       if (!name_in_supers(ref_class_name, current_class()))
@@ -2245,6 +2261,12 @@ void ClassVerifier::verify_field_instructions(RawBytecodeStream* bcs,
       break;
     }
     default: ShouldNotReachHere();
+  }
+  if (is_getfield) {
+    // Push field type for getfield after doing protection check.
+    for (int i = 0; i < n; i++) {
+      current_frame->push_stack(field_type[i], CHECK_VERIFY(this));
+    }
   }
 }
 
@@ -2323,9 +2345,17 @@ bool ClassVerifier::ends_in_athrow(u4 start_bc_offset) {
       case Bytecodes::_ifnonnull:
         target = bcs.dest();
         if (visited_branches->contains(bci)) {
-          if (bci_stack->is_empty()) return true;
-          // Pop a bytecode starting offset and scan from there.
-          bcs.set_start(bci_stack->pop());
+          if (bci_stack->is_empty()) {
+            if (handler_stack->is_empty()) {
+              return true;
+            } else {
+              // Parse the catch handlers for try blocks containing athrow.
+              bcs.set_start(handler_stack->pop());
+            }
+          } else {
+            // Pop a bytecode starting offset and scan from there.
+            bcs.set_start(bci_stack->pop());
+          }
         } else {
           if (target > bci) { // forward branch
             if (target >= code_length) return false;
@@ -2348,9 +2378,17 @@ bool ClassVerifier::ends_in_athrow(u4 start_bc_offset) {
       case Bytecodes::_goto_w:
         target = (opcode == Bytecodes::_goto ? bcs.dest() : bcs.dest_w());
         if (visited_branches->contains(bci)) {
-          if (bci_stack->is_empty()) return true;
-          // Been here before, pop new starting offset from stack.
-          bcs.set_start(bci_stack->pop());
+          if (bci_stack->is_empty()) {
+            if (handler_stack->is_empty()) {
+              return true;
+            } else {
+              // Parse the catch handlers for try blocks containing athrow.
+              bcs.set_start(handler_stack->pop());
+            }
+          } else {
+            // Been here before, pop new starting offset from stack.
+            bcs.set_start(bci_stack->pop());
+          }
         } else {
           if (target >= code_length) return false;
           // Continue scanning from the target onward.
@@ -2518,7 +2556,7 @@ void ClassVerifier::verify_invoke_init(
       Klass* ref_klass = load_class(ref_class_type.name(), CHECK);
       Method* m = InstanceKlass::cast(ref_klass)->uncached_lookup_method(
         vmSymbols::object_initializer_name(),
-        cp->signature_ref_at(bcs->get_index_u2()), Klass::normal);
+        cp->signature_ref_at(bcs->get_index_u2()), Klass::find_overpass);
       // Do nothing if method is not found.  Let resolution detect the error.
       if (m != NULL) {
         instanceKlassHandle mh(THREAD, m->method_holder());

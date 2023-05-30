@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -30,6 +30,8 @@
 #include "compiler/compileBroker.hpp"
 #include "compiler/compilerOracle.hpp"
 #include "interpreter/bytecodeHistogram.hpp"
+#include "jfr/jfrEvents.hpp"
+#include "jfr/support/jfrThreadId.hpp"
 #include "memory/genCollectedHeap.hpp"
 #include "memory/oopFactory.hpp"
 #include "memory/universe.hpp"
@@ -45,6 +47,7 @@
 #include "runtime/arguments.hpp"
 #include "runtime/biasedLocking.hpp"
 #include "runtime/compilationPolicy.hpp"
+#include "runtime/deoptimization.hpp"
 #include "runtime/fprofiler.hpp"
 #include "runtime/init.hpp"
 #include "runtime/interfaceSupport.hpp"
@@ -58,7 +61,6 @@
 #include "runtime/timer.hpp"
 #include "runtime/vm_operations.hpp"
 #include "services/memTracker.hpp"
-#include "trace/tracing.hpp"
 #include "utilities/dtrace.hpp"
 #include "utilities/globalDefinitions.hpp"
 #include "utilities/histogram.hpp"
@@ -66,6 +68,9 @@
 #include "utilities/vmError.hpp"
 #ifdef TARGET_ARCH_x86
 # include "vm_version_x86.hpp"
+#endif
+#ifdef TARGET_ARCH_aarch64
+# include "vm_version_aarch64.hpp"
 #endif
 #ifdef TARGET_ARCH_sparc
 # include "vm_version_sparc.hpp"
@@ -94,6 +99,9 @@
 #include "opto/compile.hpp"
 #include "opto/indexSet.hpp"
 #include "opto/runtime.hpp"
+#endif
+#if INCLUDE_JFR
+#include "jfr/jfr.hpp"
 #endif
 
 #ifndef USDT2
@@ -334,7 +342,7 @@ void print_statistics() {
     klassVtable::print_statistics();
     klassItable::print_statistics();
   }
-  if (VerifyOops) {
+  if (VerifyOops && Verbose) {
     tty->print_cr("+VerifyOops count: %d", StubRoutines::verify_oop_count());
   }
 
@@ -523,9 +531,11 @@ void before_exit(JavaThread * thread) {
 
   EventThreadEnd event;
   if (event.should_commit()) {
-      event.set_javalangthread(java_lang_Thread::thread_id(thread->threadObj()));
-      event.commit();
+    event.set_thread(JFR_THREAD_ID(thread));
+    event.commit();
   }
+
+  JFR_ONLY(Jfr::on_vm_shutdown();)
 
   // Always call even when there are not JVMTI environments yet, since environments
   // may be attached late and JVMTI must track phases of VM execution
@@ -773,25 +783,36 @@ int JDK_Version::compare(const JDK_Version& other) const {
 }
 
 void JDK_Version::to_string(char* buffer, size_t buflen) const {
+  assert(buffer && buflen > 0, "call with useful buffer");
   size_t index = 0;
   if (!is_valid()) {
     jio_snprintf(buffer, buflen, "%s", "(uninitialized)");
   } else if (is_partially_initialized()) {
     jio_snprintf(buffer, buflen, "%s", "(uninitialized) pre-1.6.0");
   } else {
-    index += jio_snprintf(
+    int rc = jio_snprintf(
         &buffer[index], buflen - index, "%d.%d", _major, _minor);
+    if (rc == -1) return;
+    index += rc;
     if (_micro > 0) {
-      index += jio_snprintf(&buffer[index], buflen - index, ".%d", _micro);
+      rc = jio_snprintf(&buffer[index], buflen - index, ".%d", _micro);
+      if (rc == -1) return;
+      index += rc;
     }
     if (_update > 0) {
-      index += jio_snprintf(&buffer[index], buflen - index, "_%02d", _update);
+      rc = jio_snprintf(&buffer[index], buflen - index, "_%02d", _update);
+      if (rc == -1) return;
+      index += rc;
     }
     if (_special > 0) {
-      index += jio_snprintf(&buffer[index], buflen - index, "%c", _special);
+      rc = jio_snprintf(&buffer[index], buflen - index, "%c", _special);
+      if (rc == -1) return;
+      index += rc;
     }
     if (_build > 0) {
-      index += jio_snprintf(&buffer[index], buflen - index, "-b%02d", _build);
+      rc = jio_snprintf(&buffer[index], buflen - index, "-b%02d", _build);
+      if (rc == -1) return;
+      index += rc;
     }
   }
 }

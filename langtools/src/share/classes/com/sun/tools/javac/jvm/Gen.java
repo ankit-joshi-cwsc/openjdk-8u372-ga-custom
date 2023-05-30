@@ -27,6 +27,7 @@ package com.sun.tools.javac.jvm;
 
 import java.util.*;
 
+import com.sun.tools.javac.tree.TreeInfo.PosKind;
 import com.sun.tools.javac.util.*;
 import com.sun.tools.javac.util.JCDiagnostic.DiagnosticPosition;
 import com.sun.tools.javac.util.List;
@@ -1221,9 +1222,10 @@ public class Gen extends JCTree.Visitor {
                 code.resolve(c.jumpTrue(), startpc);
                 code.resolve(c.falseJumps);
             }
-            code.resolve(loopEnv.info.exit);
-            if (loopEnv.info.exit != null) {
-                loopEnv.info.exit.state.defined.excludeFrom(code.nextreg);
+            Chain exit = loopEnv.info.exit;
+            if (exit != null) {
+                code.resolve(exit);
+                exit.state.defined.excludeFrom(code.nextreg);
             }
         }
 
@@ -1234,7 +1236,11 @@ public class Gen extends JCTree.Visitor {
     public void visitLabelled(JCLabeledStatement tree) {
         Env<GenContext> localEnv = env.dup(tree, new GenContext());
         genStat(tree.body, localEnv, CRT_STATEMENT);
-        code.resolve(localEnv.info.exit);
+        Chain exit = localEnv.info.exit;
+        if (exit != null) {
+            code.resolve(exit);
+            exit.state.defined.excludeFrom(code.nextreg);
+        }
     }
 
     public void visitSwitch(JCSwitch tree) {
@@ -1343,7 +1349,11 @@ public class Gen extends JCTree.Visitor {
             }
 
             // Resolve all breaks.
-            code.resolve(switchEnv.info.exit);
+            Chain exit = switchEnv.info.exit;
+            if  (exit != null) {
+                code.resolve(exit);
+                exit.state.defined.excludeFrom(code.nextreg);
+            }
 
             // If we have not set the default offset, we do so now.
             if (code.get4(tableBase) == -1) {
@@ -1531,12 +1541,16 @@ public class Gen extends JCTree.Visitor {
                                   catchallpc, 0);
                     startseg = env.info.gaps.next().intValue();
                 }
-                code.statBegin(TreeInfo.finalizerPos(env.tree));
+                code.statBegin(TreeInfo.finalizerPos(env.tree, PosKind.FIRST_STAT_POS));
                 code.markStatBegin();
 
                 Item excVar = makeTemp(syms.throwableType);
                 excVar.store();
                 genFinalizer(env);
+                code.resolvePending();
+                code.statBegin(TreeInfo.finalizerPos(env.tree, PosKind.END_POS));
+                code.markStatBegin();
+
                 excVar.load();
                 registerCatch(body.pos(), startseg,
                               env.info.gaps.next().intValue(),
@@ -1550,7 +1564,7 @@ public class Gen extends JCTree.Visitor {
                     code.resolve(env.info.cont);
 
                     // Mark statement line number
-                    code.statBegin(TreeInfo.finalizerPos(env.tree));
+                    code.statBegin(TreeInfo.finalizerPos(env.tree, PosKind.FIRST_STAT_POS));
                     code.markStatBegin();
 
                     // Save return address.
@@ -1793,6 +1807,11 @@ public class Gen extends JCTree.Visitor {
     public void visitReturn(JCReturn tree) {
         int limit = code.nextreg;
         final Env<GenContext> targetEnv;
+
+        /* Save and then restore the location of the return in case a finally
+         * is expanded (with unwind()) in the middle of our bytecodes.
+         */
+        int tmpPos = code.pendingStatPos;
         if (tree.expr != null) {
             Item r = genExpr(tree.expr, pt).load();
             if (hasFinally(env.enclMethod, env)) {
@@ -1800,17 +1819,10 @@ public class Gen extends JCTree.Visitor {
                 r.store();
             }
             targetEnv = unwind(env.enclMethod, env);
+            code.pendingStatPos = tmpPos;
             r.load();
             code.emitop0(ireturn + Code.truncate(Code.typecode(pt)));
         } else {
-            /*  If we have a statement like:
-             *
-             *  return;
-             *
-             *  we need to store the code.pendingStatPos value before generating
-             *  the finalizer.
-             */
-            int tmpPos = code.pendingStatPos;
             targetEnv = unwind(env.enclMethod, env);
             code.pendingStatPos = tmpPos;
             code.emitop0(return_);

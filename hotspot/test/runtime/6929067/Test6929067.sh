@@ -1,7 +1,6 @@
 #!/bin/sh
 
 ##
-## @ignore 8028740
 ## @test Test6929067.sh
 ## @bug 6929067
 ## @bug 8021296
@@ -24,7 +23,7 @@ OS=`uname -s`
 case "$OS" in
   Linux)
     gcc_cmd=`which gcc`
-    if [ "x$gcc_cmd" == "x" ]; then
+    if [ "x$gcc_cmd" = "x" ]; then
         echo "WARNING: gcc not found. Cannot execute test." 2>&1
         exit 0;
     fi

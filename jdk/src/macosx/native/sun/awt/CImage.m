@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -112,17 +112,12 @@ JNIEXPORT jlong JNICALL Java_sun_lwawt_macosx_CImage_nativeCreateNSImageFromArra
     jlong result = 0L;
 
 JNF_COCOA_ENTER(env);
-
+    
     NSBitmapImageRep* imageRep = CImage_CreateImageRep(env, buffer, width, height);
     if (imageRep) {
-        NSImage *nsImage = [[NSImage alloc] initWithSize:NSMakeSize(width, height)];
+        NSImage *nsImage = [[[NSImage alloc] initWithSize:NSMakeSize(width, height)] retain];
         [nsImage addRepresentation:imageRep];
         [imageRep release];
-
-        if (nsImage != nil) {
-            CFRetain(nsImage); // GC
-        }
-
         result = ptr_to_jlong(nsImage);
     }
 
@@ -165,13 +160,8 @@ JNF_COCOA_ENTER(env);
         (*env)->ReleaseIntArrayElements(env, widths, ws, JNI_ABORT);
     }
     if ([reps count]) {
-        NSImage *nsImage = [[NSImage alloc] initWithSize:NSMakeSize(0, 0)];
+        NSImage *nsImage = [[[NSImage alloc] initWithSize:NSMakeSize(0, 0)] retain];
         [nsImage addRepresentations: reps];
-
-        if (nsImage != nil) {
-            CFRetain(nsImage); // GC
-        }
-
         result = ptr_to_jlong(nsImage);
     }
 
@@ -194,8 +184,7 @@ JNF_COCOA_ENTER(env);
 
     IconRef iconRef;
     if (noErr == GetIconRef(kOnSystemDisk, kSystemIconsCreator, selector, &iconRef)) {
-        image = [[NSImage alloc] initWithIconRef:iconRef];
-        if (image) CFRetain(image); // GC
+        image = [[[NSImage alloc] initWithIconRef:iconRef] retain];
         ReleaseIconRef(iconRef);
     }
 
@@ -217,8 +206,7 @@ JNIEXPORT jlong JNICALL Java_sun_lwawt_macosx_CImage_nativeCreateNSImageFromFile
 JNF_COCOA_ENTER(env);
 
     NSString *path = JNFNormalizedNSStringForPath(env, file);
-    image = [[NSImage alloc] initByReferencingFile:path];
-    if (image) CFRetain(image); // GC
+    image = [[[NSImage alloc] initByReferencingFile:path] retain];
 
 JNF_COCOA_EXIT(env);
 
@@ -239,9 +227,8 @@ JNF_COCOA_ENTER(env);
 
     NSString *path = JNFNormalizedNSStringForPath(env, file);
     [ThreadUtilities performOnMainThreadWaiting:YES block:^(){
-        image = [[NSWorkspace sharedWorkspace] iconForFile:path];
+        image = [[[NSWorkspace sharedWorkspace] iconForFile:path] retain];
         [image setScalesWhenResized:TRUE];
-        if (image) CFRetain(image); // GC
     }];
 
 JNF_COCOA_EXIT(env);
@@ -261,8 +248,7 @@ JNIEXPORT jlong JNICALL Java_sun_lwawt_macosx_CImage_nativeCreateNSImageFromImag
 
 JNF_COCOA_ENTER(env);
 
-    image = [NSImage imageNamed:JNFJavaToNSString(env, name)];
-    if (image) CFRetain(image); // GC
+    image = [[NSImage imageNamed:JNFJavaToNSString(env, name)] retain];
 
 JNF_COCOA_EXIT(env);
 
@@ -436,3 +422,63 @@ JNF_COCOA_EXIT(env);
 
     return jreturnArray;
 }
+
+/*
+ * Class:     sun_lwawt_macosx_CImage
+ * Method:    nativeGetPlatformImageBytes
+ * Signature: ([III)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_sun_lwawt_macosx_CImage_nativeGetPlatformImageBytes
+(JNIEnv *env, jclass klass, jintArray buffer, jint width, jint height)
+{
+    jbyteArray result = 0L;
+    
+    JNF_COCOA_ENTER(env);
+    
+    NSBitmapImageRep* imageRep = [CImage_CreateImageRep(env, buffer, width, height) autorelease];
+    if (imageRep) {
+        NSData *tiffImage = [imageRep TIFFRepresentation];
+        jsize tiffSize = (jsize)[tiffImage length];
+        result = (*env)->NewByteArray(env, tiffSize);
+        CHECK_NULL_RETURN(result, nil);
+        jbyte *tiffData = (jbyte *)(*env)->GetPrimitiveArrayCritical(env, result, 0);
+        CHECK_NULL_RETURN(tiffData, nil);
+        [tiffImage getBytes:tiffData];
+        (*env)->ReleasePrimitiveArrayCritical(env, result, tiffData, 0);
+    }
+    
+    JNF_COCOA_EXIT(env);
+    
+    return result;
+}
+
+/*
+ * Class:     sun_lwawt_macosx_CImage
+ * Method:    nativeCreateNSImageFromBytes
+ * Signature: ([B)J
+ */
+JNIEXPORT jlong JNICALL Java_sun_lwawt_macosx_CImage_nativeCreateNSImageFromBytes
+(JNIEnv *env, jclass klass, jbyteArray sourceData)
+{
+    jlong result = 0L;
+    CHECK_NULL_RETURN(sourceData, 0L);
+    
+    JNF_COCOA_ENTER(env);
+    
+    jsize sourceSize = (*env)->GetArrayLength(env, sourceData);
+    if (sourceSize == 0) return 0L;
+    
+    jbyte *sourceBytes = (*env)->GetPrimitiveArrayCritical(env, sourceData, NULL);
+    CHECK_NULL_RETURN(sourceBytes, 0L);
+    NSData *rawData = [NSData dataWithBytes:sourceBytes length:sourceSize];    
+    NSImage *newImage = [[NSImage alloc] initWithData:rawData];
+    
+    (*env)->ReleasePrimitiveArrayCritical(env, sourceData, sourceBytes, JNI_ABORT);
+    CHECK_NULL_RETURN(newImage, 0L);
+    
+    result = ptr_to_jlong(newImage);
+    JNF_COCOA_EXIT(env);
+    
+    return result;
+}
+

@@ -1657,12 +1657,14 @@
 						<era type="233">Taishō</era>
 						<era type="234">Shōwa</era>
 						<era type="235">Heisei</era>
+						<era type="236">Reiwa</era>
 					</eraAbbr>
 					<eraNarrow>
 						<era type="232">M</era>
 						<era type="233">T</era>
 						<era type="234">S</era>
 						<era type="235">H</era>
+						<era type="236">R</era>
 					</eraNarrow>
 				</eras>
 				<dateFormats>
@@ -2032,6 +2034,18 @@
 			</zone>
 			<zone type="Asia/Saigon">
 				<exemplarCity>Ho Chi Minh</exemplarCity>
+			</zone>
+			<zone type="America/Bahia_Banderas">
+				<exemplarCity>Bahía de Banderas</exemplarCity>
+			</zone>
+			<zone type="America/Cancun">
+				<exemplarCity>Cancún</exemplarCity>
+			</zone>
+			<zone type="America/Ciudad_Juarez">
+				<exemplarCity>Ciudad Juárez</exemplarCity>
+			</zone>
+			<zone type="America/Merida">
+				<exemplarCity>Mérida</exemplarCity>
 			</zone>
 		</timeZoneNames>
 	</dates>

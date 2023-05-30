@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2001, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -838,18 +838,18 @@ void ConcurrentMarkSweepGeneration::printOccupancy(const char *s) {
   GenCollectedHeap* gch = GenCollectedHeap::heap();
   if (PrintGCDetails) {
     if (Verbose) {
-      gclog_or_tty->print("[%d %s-%s: "SIZE_FORMAT"("SIZE_FORMAT")]",
+      gclog_or_tty->print("[%d %s-%s: " SIZE_FORMAT "(" SIZE_FORMAT ")]",
         level(), short_name(), s, used(), capacity());
     } else {
-      gclog_or_tty->print("[%d %s-%s: "SIZE_FORMAT"K("SIZE_FORMAT"K)]",
+      gclog_or_tty->print("[%d %s-%s: " SIZE_FORMAT "K(" SIZE_FORMAT "K)]",
         level(), short_name(), s, used() / K, capacity() / K);
     }
   }
   if (Verbose) {
-    gclog_or_tty->print(" "SIZE_FORMAT"("SIZE_FORMAT")",
+    gclog_or_tty->print(" " SIZE_FORMAT "(" SIZE_FORMAT ")",
               gch->used(), gch->capacity());
   } else {
-    gclog_or_tty->print(" "SIZE_FORMAT"K("SIZE_FORMAT"K)",
+    gclog_or_tty->print(" " SIZE_FORMAT "K(" SIZE_FORMAT "K)",
               gch->used() / K, gch->capacity() / K);
   }
 }
@@ -869,6 +869,10 @@ ConcurrentMarkSweepGeneration::unsafe_max_alloc_nogc() const {
   return _cmsSpace->max_alloc_in_words() * HeapWordSize;
 }
 
+size_t ConcurrentMarkSweepGeneration::used_stable() const {
+  return cmsSpace()->used_stable();
+}
+
 size_t ConcurrentMarkSweepGeneration::max_available() const {
   return free() + _virtual_space.uncommitted_size();
 }
@@ -879,8 +883,8 @@ bool ConcurrentMarkSweepGeneration::promotion_attempt_is_safe(size_t max_promoti
   bool   res = (available >= av_promo) || (available >= max_promotion_in_bytes);
   if (Verbose && PrintGCDetails) {
     gclog_or_tty->print_cr(
-      "CMS: promo attempt is%s safe: available("SIZE_FORMAT") %s av_promo("SIZE_FORMAT"),"
-      "max_promo("SIZE_FORMAT")",
+      "CMS: promo attempt is%s safe: available(" SIZE_FORMAT ") %s av_promo(" SIZE_FORMAT "),"
+      "max_promo(" SIZE_FORMAT ")",
       res? "":" not", available, res? ">=":"<",
       av_promo, max_promotion_in_bytes);
   }
@@ -966,8 +970,8 @@ void ConcurrentMarkSweepGeneration::compute_new_size_free_list() {
         desired_free_percentage);
       gclog_or_tty->print_cr("  Maximum free fraction %f",
         maximum_free_percentage);
-      gclog_or_tty->print_cr("  Capactiy "SIZE_FORMAT, capacity()/1000);
-      gclog_or_tty->print_cr("  Desired capacity "SIZE_FORMAT,
+      gclog_or_tty->print_cr("  Capactiy " SIZE_FORMAT, capacity()/1000);
+      gclog_or_tty->print_cr("  Desired capacity " SIZE_FORMAT,
         desired_capacity/1000);
       int prev_level = level() - 1;
       if (prev_level >= 0) {
@@ -975,14 +979,14 @@ void ConcurrentMarkSweepGeneration::compute_new_size_free_list() {
         GenCollectedHeap* gch = GenCollectedHeap::heap();
         Generation* prev_gen = gch->_gens[prev_level];
         prev_size = prev_gen->capacity();
-          gclog_or_tty->print_cr("  Younger gen size "SIZE_FORMAT,
+          gclog_or_tty->print_cr("  Younger gen size " SIZE_FORMAT,
                                  prev_size/1000);
       }
-      gclog_or_tty->print_cr("  unsafe_max_alloc_nogc "SIZE_FORMAT,
+      gclog_or_tty->print_cr("  unsafe_max_alloc_nogc " SIZE_FORMAT,
         unsafe_max_alloc_nogc()/1000);
-      gclog_or_tty->print_cr("  contiguous available "SIZE_FORMAT,
+      gclog_or_tty->print_cr("  contiguous available " SIZE_FORMAT,
         contiguous_available()/1000);
-      gclog_or_tty->print_cr("  Expand by "SIZE_FORMAT" (bytes)",
+      gclog_or_tty->print_cr("  Expand by " SIZE_FORMAT " (bytes)",
         expand_bytes);
     }
     // safe if expansion fails
@@ -1513,8 +1517,8 @@ bool CMSCollector::shouldConcurrentCollect() {
     stats().print_on(gclog_or_tty);
     gclog_or_tty->print_cr("time_until_cms_gen_full %3.7f",
       stats().time_until_cms_gen_full());
-    gclog_or_tty->print_cr("free="SIZE_FORMAT, _cmsGen->free());
-    gclog_or_tty->print_cr("contiguous_available="SIZE_FORMAT,
+    gclog_or_tty->print_cr("free=" SIZE_FORMAT, _cmsGen->free());
+    gclog_or_tty->print_cr("contiguous_available=" SIZE_FORMAT,
                            _cmsGen->contiguous_available());
     gclog_or_tty->print_cr("promotion_rate=%g", stats().promotion_rate());
     gclog_or_tty->print_cr("cms_allocation_rate=%g", stats().cms_allocation_rate());
@@ -1924,9 +1928,7 @@ NOT_PRODUCT(
 
     // Has the GC time limit been exceeded?
     DefNewGeneration* young_gen = _young_gen->as_DefNewGeneration();
-    size_t max_eden_size = young_gen->max_capacity() -
-                           young_gen->to()->capacity() -
-                           young_gen->from()->capacity();
+    size_t max_eden_size = young_gen->max_eden_size();
     GenCollectedHeap* gch = GenCollectedHeap::heap();
     GCCause::Cause gc_cause = gch->gc_cause();
     size_policy()->check_gc_overhead_limit(_young_gen->used(),
@@ -1955,6 +1957,8 @@ void CMSCollector::compute_new_size() {
   FreelistLocker z(this);
   MetaspaceGC::compute_new_size();
   _cmsGen->compute_new_size_free_list();
+  // recalculate CMS used space after CMS collection
+  _cmsGen->cmsSpace()->recalculate_used_stable();
 }
 
 // A work method used by foreground collection to determine
@@ -2288,7 +2292,7 @@ void CMSCollector::collect_in_background(bool clear_all_soft_refs, GCCause::Caus
   }
 
   // Used for PrintGC
-  size_t prev_used;
+  size_t prev_used = 0;
   if (PrintGC && Verbose) {
     prev_used = _cmsGen->used(); // XXXPERM
   }
@@ -2768,6 +2772,7 @@ void ConcurrentMarkSweepGeneration::gc_prologue(bool full) {
 
   _capacity_at_prologue = capacity();
   _used_at_prologue = used();
+  _cmsSpace->recalculate_used_stable();
 
   // Delegate to CMScollector which knows how to coordinate between
   // this and any other CMS generations that it is responsible for
@@ -2792,8 +2797,8 @@ void ConcurrentMarkSweepGeneration::gc_prologue_work(bool full,
     assert(_numObjectsPromoted == 0, "check");
     assert(_numWordsPromoted   == 0, "check");
     if (Verbose && PrintGC) {
-      gclog_or_tty->print("Allocated "SIZE_FORMAT" objects, "
-                          SIZE_FORMAT" bytes concurrently",
+      gclog_or_tty->print("Allocated " SIZE_FORMAT " objects, "
+                          SIZE_FORMAT " bytes concurrently",
       _numObjectsAllocated, _numWordsAllocated*sizeof(HeapWord));
     }
     _numObjectsAllocated = 0;
@@ -2837,6 +2842,7 @@ void CMSCollector::gc_epilogue(bool full) {
   _eden_chunk_index = 0;
 
   size_t cms_used   = _cmsGen->cmsSpace()->used();
+  _cmsGen->cmsSpace()->recalculate_used_stable();
 
   // update performance counters - this uses a special version of
   // update_counters() that allows the utilization to be passed as a
@@ -2879,8 +2885,8 @@ void ConcurrentMarkSweepGeneration::gc_epilogue_work(bool full) {
     assert(_numObjectsAllocated == 0, "check");
     assert(_numWordsAllocated == 0, "check");
     if (Verbose && PrintGC) {
-      gclog_or_tty->print("Promoted "SIZE_FORMAT" objects, "
-                          SIZE_FORMAT" bytes",
+      gclog_or_tty->print("Promoted " SIZE_FORMAT " objects, "
+                          SIZE_FORMAT " bytes",
                  _numObjectsPromoted, _numWordsPromoted*sizeof(HeapWord));
     }
     _numObjectsPromoted = 0;
@@ -2890,7 +2896,7 @@ void ConcurrentMarkSweepGeneration::gc_epilogue_work(bool full) {
   if (PrintGC && Verbose) {
     // Call down the chain in contiguous_available needs the freelistLock
     // so print this out before releasing the freeListLock.
-    gclog_or_tty->print(" Contiguous available "SIZE_FORMAT" bytes ",
+    gclog_or_tty->print(" Contiguous available " SIZE_FORMAT " bytes ",
                         contiguous_available());
   }
 }
@@ -2978,7 +2984,7 @@ class VerifyMarkedClosure: public BitMapClosure {
     HeapWord* addr = _marks->offsetToHeapWord(offset);
     if (!_marks->isMarked(addr)) {
       oop(addr)->print_on(gclog_or_tty);
-      gclog_or_tty->print_cr(" ("INTPTR_FORMAT" should have been marked)", addr);
+      gclog_or_tty->print_cr(" (" INTPTR_FORMAT " should have been marked)", addr);
       _failed = true;
     }
     return true;
@@ -3672,6 +3678,7 @@ void CMSCollector::checkpointRootsInitial(bool asynch) {
     _collectorState = Marking;
   }
   SpecializationStats::print();
+  _cmsGen->cmsSpace()->recalculate_used_stable();
 }
 
 void CMSCollector::checkpointRootsInitialWork(bool asynch) {
@@ -5039,7 +5046,7 @@ void CMSCollector::checkpointRootsFinal(bool asynch,
 
   SpecializationStats::clear();
   if (PrintGCDetails) {
-    gclog_or_tty->print("[YG occupancy: "SIZE_FORMAT" K ("SIZE_FORMAT" K)]",
+    gclog_or_tty->print("[YG occupancy: " SIZE_FORMAT " K (" SIZE_FORMAT " K)]",
                         _young_gen->used() / K,
                         _young_gen->capacity() / K);
   }
@@ -5066,10 +5073,12 @@ void CMSCollector::checkpointRootsFinal(bool asynch,
                     Mutex::_no_safepoint_check_flag);
     assert(!init_mark_was_synchronous, "but that's impossible!");
     checkpointRootsFinalWork(asynch, clear_all_soft_refs, false);
+    _cmsGen->cmsSpace()->recalculate_used_stable();
   } else {
     // already have all the locks
     checkpointRootsFinalWork(asynch, clear_all_soft_refs,
                              init_mark_was_synchronous);
+    _cmsGen->cmsSpace()->recalculate_used_stable();
   }
   verify_work_stacks_empty();
   verify_overflow_empty();
@@ -5172,8 +5181,8 @@ void CMSCollector::checkpointRootsFinalWork(bool asynch,
   if (ser_ovflw > 0) {
     if (PrintCMSStatistics != 0) {
       gclog_or_tty->print_cr("Marking stack overflow (benign) "
-        "(pmc_pc="SIZE_FORMAT", pmc_rm="SIZE_FORMAT", kac="SIZE_FORMAT
-        ", kac_preclean="SIZE_FORMAT")",
+        "(pmc_pc=" SIZE_FORMAT ", pmc_rm=" SIZE_FORMAT ", kac=" SIZE_FORMAT
+        ", kac_preclean=" SIZE_FORMAT ")",
         _ser_pmc_preclean_ovflw, _ser_pmc_remark_ovflw,
         _ser_kac_ovflw, _ser_kac_preclean_ovflw);
     }
@@ -5186,7 +5195,7 @@ void CMSCollector::checkpointRootsFinalWork(bool asynch,
   if (_par_pmc_remark_ovflw > 0 || _par_kac_ovflw > 0) {
     if (PrintCMSStatistics != 0) {
       gclog_or_tty->print_cr("Work queue overflow (benign) "
-        "(pmc_rm="SIZE_FORMAT", kac="SIZE_FORMAT")",
+        "(pmc_rm=" SIZE_FORMAT ", kac=" SIZE_FORMAT ")",
         _par_pmc_remark_ovflw, _par_kac_ovflw);
     }
     _par_pmc_remark_ovflw = 0;
@@ -5194,12 +5203,12 @@ void CMSCollector::checkpointRootsFinalWork(bool asynch,
   }
   if (PrintCMSStatistics != 0) {
      if (_markStack._hit_limit > 0) {
-       gclog_or_tty->print_cr(" (benign) Hit max stack size limit ("SIZE_FORMAT")",
+       gclog_or_tty->print_cr(" (benign) Hit max stack size limit (" SIZE_FORMAT ")",
                               _markStack._hit_limit);
      }
      if (_markStack._failed_double > 0) {
-       gclog_or_tty->print_cr(" (benign) Failed stack doubling ("SIZE_FORMAT"),"
-                              " current capacity "SIZE_FORMAT,
+       gclog_or_tty->print_cr(" (benign) Failed stack doubling (" SIZE_FORMAT "),"
+                              " current capacity " SIZE_FORMAT,
                               _markStack._failed_double,
                               _markStack.capacity());
      }
@@ -5963,7 +5972,7 @@ void CMSCollector::do_remark_non_parallel() {
                                                &markFromDirtyCardsClosure);
       verify_work_stacks_empty();
       if (PrintCMSStatistics != 0) {
-        gclog_or_tty->print(" (re-scanned "SIZE_FORMAT" dirty cards in cms gen) ",
+        gclog_or_tty->print(" (re-scanned " SIZE_FORMAT " dirty cards in cms gen) ",
           markFromDirtyCardsClosure.num_dirty_cards());
       }
     }
@@ -6368,6 +6377,10 @@ void CMSCollector::sweep(bool asynch) {
       // Update heap occupancy information which is used as
       // input to soft ref clearing policy at the next gc.
       Universe::update_heap_info_at_gc();
+
+      // recalculate CMS used space after CMS collection
+      _cmsGen->cmsSpace()->recalculate_used_stable();
+
       _collectorState = Resizing;
     }
   } else {
@@ -6467,6 +6480,7 @@ void ConcurrentMarkSweepGeneration::update_gc_stats(int current_level,
     // Gather statistics on the young generation collection.
     collector()->stats().record_gc0_end(used());
   }
+  _cmsSpace->recalculate_used_stable();
 }
 
 CMSAdaptiveSizePolicy* ConcurrentMarkSweepGeneration::size_policy() {
@@ -6714,7 +6728,7 @@ size_t CMSCollector::block_size_if_printezis_bits(HeapWord* addr) const {
 HeapWord* CMSCollector::next_card_start_after_block(HeapWord* addr) const {
   size_t sz = 0;
   oop p = (oop)addr;
-  if (p->klass_or_null() != NULL) {
+  if (p->klass_or_null_acquire() != NULL) {
     sz = CompactibleFreeListSpace::adjustObjectSize(p->size());
   } else {
     sz = block_size_using_printezis_bits(addr);
@@ -6829,7 +6843,7 @@ void CMSBitMap::region_invariant(MemRegion mr)
   size_t start_ofs = heapWordToOffset(mr.start());
   // Make sure that end() is appropriately aligned
   assert(mr.end() == (HeapWord*)round_to((intptr_t)mr.end(),
-                        (1 << (_shifter+LogHeapWordSize))),
+                        ((intptr_t) 1 << (_shifter+LogHeapWordSize))),
          "Misaligned mr.end()");
   size_t end_ofs   = heapWordToOffset(mr.end());
   assert(end_ofs > start_ofs, "Should mark at least one bit");
@@ -6893,8 +6907,8 @@ void CMSMarkStack::expand() {
   } else if (_failed_double++ == 0 && !CMSConcurrentMTEnabled && PrintGCDetails) {
     // Failed to double capacity, continue;
     // we print a detail message only once per CMS cycle.
-    gclog_or_tty->print(" (benign) Failed to expand marking stack from "SIZE_FORMAT"K to "
-            SIZE_FORMAT"K",
+    gclog_or_tty->print(" (benign) Failed to expand marking stack from " SIZE_FORMAT "K to "
+            SIZE_FORMAT "K",
             _capacity / K, new_capacity / K);
   }
 }
@@ -7172,7 +7186,7 @@ size_t ScanMarkedObjectsAgainCarefullyClosure::do_object_careful_m(
   }
   if (_bitMap->isMarked(addr)) {
     // it's marked; is it potentially uninitialized?
-    if (p->klass_or_null() != NULL) {
+    if (p->klass_or_null_acquire() != NULL) {
         // an initialized object; ignore mark word in verification below
         // since we are running concurrent with mutators
         assert(p->is_oop(true), "should be an oop");
@@ -7213,7 +7227,7 @@ size_t ScanMarkedObjectsAgainCarefullyClosure::do_object_careful_m(
     }
   } else {
     // Either a not yet marked object or an uninitialized object
-    if (p->klass_or_null() == NULL) {
+    if (p->klass_or_null_acquire() == NULL) {
       // An uninitialized object, skip to the next card, since
       // we may not be able to read its P-bits yet.
       assert(size == 0, "Initial value");
@@ -7424,7 +7438,7 @@ bool MarkFromRootsClosure::do_bit(size_t offset) {
     assert(_skipBits == 0, "tautology");
     _skipBits = 2;  // skip next two marked bits ("Printezis-marks")
     oop p = oop(addr);
-    if (p->klass_or_null() == NULL) {
+    if (p->klass_or_null_acquire() == NULL) {
       DEBUG_ONLY(if (!_verifying) {)
         // We re-dirty the cards on which this object lies and increase
         // the _threshold so that we'll come back to scan this object
@@ -7444,7 +7458,7 @@ bool MarkFromRootsClosure::do_bit(size_t offset) {
           if (_threshold < end_card_addr) {
             _threshold = end_card_addr;
           }
-          if (p->klass_or_null() != NULL) {
+          if (p->klass_or_null_acquire() != NULL) {
             // Redirty the range of cards...
             _mut->mark_range(redirty_range);
           } // ...else the setting of klass will dirty the card anyway.
@@ -7595,7 +7609,7 @@ bool Par_MarkFromRootsClosure::do_bit(size_t offset) {
     assert(_skip_bits == 0, "tautology");
     _skip_bits = 2;  // skip next two marked bits ("Printezis-marks")
     oop p = oop(addr);
-    if (p->klass_or_null() == NULL) {
+    if (p->klass_or_null_acquire() == NULL) {
       // in the case of Clean-on-Enter optimization, redirty card
       // and avoid clearing card by increasing  the threshold.
       return true;
@@ -8216,25 +8230,25 @@ SweepClosure::~SweepClosure() {
     ShouldNotReachHere();
   }
   if (Verbose && PrintGC) {
-    gclog_or_tty->print("Collected "SIZE_FORMAT" objects, " SIZE_FORMAT " bytes",
+    gclog_or_tty->print("Collected " SIZE_FORMAT " objects, " SIZE_FORMAT " bytes",
                         _numObjectsFreed, _numWordsFreed*sizeof(HeapWord));
-    gclog_or_tty->print_cr("\nLive "SIZE_FORMAT" objects,  "
-                           SIZE_FORMAT" bytes  "
-      "Already free "SIZE_FORMAT" objects, "SIZE_FORMAT" bytes",
+    gclog_or_tty->print_cr("\nLive " SIZE_FORMAT " objects,  "
+                           SIZE_FORMAT " bytes  "
+      "Already free " SIZE_FORMAT " objects, " SIZE_FORMAT " bytes",
       _numObjectsLive, _numWordsLive*sizeof(HeapWord),
       _numObjectsAlreadyFree, _numWordsAlreadyFree*sizeof(HeapWord));
     size_t totalBytes = (_numWordsFreed + _numWordsLive + _numWordsAlreadyFree)
                         * sizeof(HeapWord);
-    gclog_or_tty->print_cr("Total sweep: "SIZE_FORMAT" bytes", totalBytes);
+    gclog_or_tty->print_cr("Total sweep: " SIZE_FORMAT " bytes", totalBytes);
 
     if (PrintCMSStatistics && CMSVerifyReturnedBytes) {
       size_t indexListReturnedBytes = _sp->sumIndexedFreeListArrayReturnedBytes();
       size_t dict_returned_bytes = _sp->dictionary()->sum_dict_returned_bytes();
       size_t returned_bytes = indexListReturnedBytes + dict_returned_bytes;
-      gclog_or_tty->print("Returned "SIZE_FORMAT" bytes", returned_bytes);
-      gclog_or_tty->print("   Indexed List Returned "SIZE_FORMAT" bytes",
+      gclog_or_tty->print("Returned " SIZE_FORMAT " bytes", returned_bytes);
+      gclog_or_tty->print("   Indexed List Returned " SIZE_FORMAT " bytes",
         indexListReturnedBytes);
-      gclog_or_tty->print_cr("        Dictionary Returned "SIZE_FORMAT" bytes",
+      gclog_or_tty->print_cr("        Dictionary Returned " SIZE_FORMAT " bytes",
         dict_returned_bytes);
     }
   }
@@ -8313,13 +8327,13 @@ size_t SweepClosure::do_blk_careful(HeapWord* addr) {
     // coalesced chunk to the appropriate free list.
     if (inFreeRange()) {
       assert(freeFinger() >= _sp->bottom() && freeFinger() < _limit,
-             err_msg("freeFinger() " PTR_FORMAT" is out-of-bounds", freeFinger()));
+             err_msg("freeFinger() " PTR_FORMAT " is out-of-bounds", freeFinger()));
       flush_cur_free_chunk(freeFinger(),
                            pointer_delta(addr, freeFinger()));
       if (CMSTraceSweeper) {
         gclog_or_tty->print("Sweep: last chunk: ");
-        gclog_or_tty->print("put_free_blk 0x%x ("SIZE_FORMAT") "
-                   "[coalesced:"SIZE_FORMAT"]\n",
+        gclog_or_tty->print("put_free_blk 0x%x (" SIZE_FORMAT ") "
+                   "[coalesced:" SIZE_FORMAT "]\n",
                    freeFinger(), pointer_delta(addr, freeFinger()),
                    lastFreeRangeCoalesced());
       }
@@ -8582,7 +8596,7 @@ size_t SweepClosure::do_live_chunk(FreeChunk* fc) {
            "alignment problem");
 
 #ifdef ASSERT
-      if (oop(addr)->klass_or_null() != NULL) {
+      if (oop(addr)->klass_or_null_acquire() != NULL) {
         // Ignore mark word because we are running concurrent with mutators
         assert(oop(addr)->is_oop(true), "live block should be an oop");
         assert(size ==
@@ -8593,7 +8607,7 @@ size_t SweepClosure::do_live_chunk(FreeChunk* fc) {
 
   } else {
     // This should be an initialized object that's alive.
-    assert(oop(addr)->klass_or_null() != NULL,
+    assert(oop(addr)->klass_or_null_acquire() != NULL,
            "Should be an initialized object");
     // Ignore mark word because we are running concurrent with mutators
     assert(oop(addr)->is_oop(true), "live block should be an oop");
@@ -8624,7 +8638,7 @@ void SweepClosure::do_post_free_or_garbage_chunk(FreeChunk* fc,
 
   HeapWord* const fc_addr = (HeapWord*) fc;
 
-  bool coalesce;
+  bool coalesce = false;
   const size_t left  = pointer_delta(fc_addr, freeFinger());
   const size_t right = chunkSize;
   switch (FLSCoalescePolicy) {
@@ -9541,6 +9555,7 @@ TraceCMSMemoryManagerStats::TraceCMSMemoryManagerStats(CMSCollector::CollectorSt
     case CMSCollector::InitialMarking:
       initialize(true  /* fullGC */ ,
                  cause /* cause of the GC */,
+                 true  /* allMemoryPoolsAffected */,
                  true  /* recordGCBeginTime */,
                  true  /* recordPreGCUsage */,
                  false /* recordPeakUsage */,
@@ -9553,6 +9568,7 @@ TraceCMSMemoryManagerStats::TraceCMSMemoryManagerStats(CMSCollector::CollectorSt
     case CMSCollector::FinalMarking:
       initialize(true  /* fullGC */ ,
                  cause /* cause of the GC */,
+                 true  /* allMemoryPoolsAffected */,
                  false /* recordGCBeginTime */,
                  false /* recordPreGCUsage */,
                  false /* recordPeakUsage */,
@@ -9565,6 +9581,7 @@ TraceCMSMemoryManagerStats::TraceCMSMemoryManagerStats(CMSCollector::CollectorSt
     case CMSCollector::Sweeping:
       initialize(true  /* fullGC */ ,
                  cause /* cause of the GC */,
+                 true  /* allMemoryPoolsAffected */,
                  false /* recordGCBeginTime */,
                  false /* recordPreGCUsage */,
                  true  /* recordPeakUsage */,

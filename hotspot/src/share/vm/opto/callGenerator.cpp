@@ -188,7 +188,10 @@ JVMState* VirtualCallGenerator::generate(JVMState* jvms) {
   // the call instruction will have a seemingly deficient out-count.
   // (The bailout says something misleading about an "infinite loop".)
   if (kit.gvn().type(receiver)->higher_equal(TypePtr::NULL_PTR)) {
-    kit.inc_sp(method()->arg_size());  // restore arguments
+    assert(Bytecodes::is_invoke(kit.java_bc()), err_msg("%d: %s", kit.java_bc(), Bytecodes::name(kit.java_bc())));
+    ciMethod* declared_method = kit.method()->get_method_at_bci(kit.bci());
+    int arg_size = declared_method->signature()->arg_size_for_bc(kit.java_bc());
+    kit.inc_sp(arg_size);  // restore arguments
     kit.uncommon_trap(Deoptimization::Reason_null_check,
                       Deoptimization::Action_none,
                       NULL, "null receiver");
@@ -658,7 +661,7 @@ JVMState* PredictedCallGenerator::generate(JVMState* jvms) {
                                            &exact_receiver);
 
   SafePointNode* slow_map = NULL;
-  JVMState* slow_jvms;
+  JVMState* slow_jvms = NULL;
   { PreserveJVMState pjvms(&kit);
     kit.set_control(slow_ctl);
     if (!kit.stopped()) {
@@ -829,17 +832,18 @@ CallGenerator* CallGenerator::for_method_handle_inline(JVMState* jvms, ciMethod*
           }
         }
         // Cast reference arguments to its type.
-        for (int i = 0; i < signature->count(); i++) {
+        for (int i = 0, j = 0; i < signature->count(); i++) {
           ciType* t = signature->type_at(i);
           if (t->is_klass()) {
-            Node* arg = kit.argument(receiver_skip + i);
+            Node* arg = kit.argument(receiver_skip + j);
             const TypeOopPtr* arg_type = arg->bottom_type()->isa_oopptr();
             const Type*       sig_type = TypeOopPtr::make_from_klass(t->as_klass());
             if (arg_type != NULL && !arg_type->higher_equal(sig_type)) {
               Node* cast_obj = gvn.transform(new (C) CheckCastPPNode(kit.control(), arg, sig_type));
-              kit.set_argument(receiver_skip + i, cast_obj);
+              kit.set_argument(receiver_skip + j, cast_obj);
             }
           }
+          j += t->size();  // long and double take two slots
         }
 
         // Try to get the most accurate receiver type
@@ -1118,7 +1122,10 @@ CallGenerator::for_uncommon_trap(ciMethod* m,
 JVMState* UncommonTrapCallGenerator::generate(JVMState* jvms) {
   GraphKit kit(jvms);
   // Take the trap with arguments pushed on the stack.  (Cf. null_check_receiver).
-  int nargs = method()->arg_size();
+  // Callsite signature can be different from actual method being called (i.e _linkTo* sites).
+  // Use callsite signature always.
+  ciMethod* declared_method = kit.method()->get_method_at_bci(kit.bci());
+  int nargs = declared_method->arg_size();
   kit.inc_sp(nargs);
   assert(nargs <= kit.sp() && kit.sp() <= jvms->stk_size(), "sane sp w/ args pushed");
   if (_reason == Deoptimization::Reason_class_check &&

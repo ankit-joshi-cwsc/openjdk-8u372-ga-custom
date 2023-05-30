@@ -58,6 +58,9 @@
 #include "services/memTracker.hpp"
 #include "utilities/events.hpp"
 #include "utilities/stack.inline.hpp"
+#if INCLUDE_JFR
+#include "jfr/jfr.hpp"
+#endif // INCLUDE_JFR
 
 #include <math.h>
 
@@ -2355,7 +2358,7 @@ void PSParallelCompact::marking_phase(ParCompactionManager* cm,
   ParallelScavengeHeap* heap = gc_heap();
   uint parallel_gc_threads = heap->gc_task_manager()->workers();
   uint active_gc_threads = heap->gc_task_manager()->active_workers();
-  TaskQueueSetSuper* qset = ParCompactionManager::region_array();
+  TaskQueueSetSuper* qset = ParCompactionManager::stack_array();
   ParallelTaskTerminator terminator(active_gc_threads, qset);
 
   PSParallelCompact::MarkAndPushClosure mark_and_push_closure(cm);
@@ -2441,13 +2444,6 @@ void PSParallelCompact::follow_class_loader(ParCompactionManager* cm,
   cld->oops_do(&mark_and_push_closure, &follow_klass_closure, true);
 }
 
-// This should be moved to the shared markSweep code!
-class PSAlwaysTrueClosure: public BoolObjectClosure {
-public:
-  bool do_object_b(oop p) { return true; }
-};
-static PSAlwaysTrueClosure always_true;
-
 void PSParallelCompact::adjust_roots() {
   // Adjust the pointers to reflect the new locations
   GCTraceTime tm("adjust roots", print_phases(), true, &_gc_timer, _gc_tracer.gc_id());
@@ -2470,7 +2466,8 @@ void PSParallelCompact::adjust_roots() {
   // Now adjust pointers in remaining weak roots.  (All of which should
   // have been cleared if they pointed to non-surviving objects.)
   // Global (weak) JNI handles
-  JNIHandles::weak_oops_do(&always_true, adjust_pointer_closure());
+  JNIHandles::weak_oops_do(adjust_pointer_closure());
+  JFR_ONLY(Jfr::weak_oops_do(adjust_pointer_closure()));
 
   CodeBlobToOopClosure adjust_from_blobs(adjust_pointer_closure(), CodeBlobToOopClosure::FixRelocations);
   CodeCache::blobs_do(&adjust_from_blobs);

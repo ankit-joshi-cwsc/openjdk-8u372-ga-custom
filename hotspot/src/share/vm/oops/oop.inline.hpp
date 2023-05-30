@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -45,6 +45,9 @@
 #ifdef TARGET_ARCH_x86
 # include "bytes_x86.hpp"
 #endif
+#ifdef TARGET_ARCH_aarch64
+# include "bytes_aarch64.hpp"
+#endif
 #ifdef TARGET_ARCH_sparc
 # include "bytes_sparc.hpp"
 #endif
@@ -78,11 +81,21 @@ inline Klass* oopDesc::klass() const {
 }
 
 inline Klass* oopDesc::klass_or_null() const volatile {
-  // can be NULL in CMS
   if (UseCompressedClassPointers) {
     return Klass::decode_klass(_metadata._compressed_klass);
   } else {
     return _metadata._klass;
+  }
+}
+
+inline Klass* oopDesc::klass_or_null_acquire() const volatile {
+  if (UseCompressedClassPointers) {
+    // Workaround for non-const load_acquire parameter.
+    const volatile narrowKlass* addr = &_metadata._compressed_klass;
+    volatile narrowKlass* xaddr = const_cast<volatile narrowKlass*>(addr);
+    return Klass::decode_klass(OrderAccess::load_acquire(xaddr));
+  } else {
+    return (Klass*)OrderAccess::load_ptr_acquire(&_metadata._klass);
   }
 }
 
@@ -103,16 +116,32 @@ inline narrowKlass* oopDesc::compressed_klass_addr() {
   return &_metadata._compressed_klass;
 }
 
+#define CHECK_SET_KLASS(k)                                                \
+  do {                                                                    \
+    assert(Universe::is_bootstrapping() || k != NULL, "NULL Klass");      \
+    assert(Universe::is_bootstrapping() || k->is_klass(), "not a Klass"); \
+  } while (0)
+
 inline void oopDesc::set_klass(Klass* k) {
-  // since klasses are promoted no store check is needed
-  assert(Universe::is_bootstrapping() || k != NULL, "must be a real Klass*");
-  assert(Universe::is_bootstrapping() || k->is_klass(), "not a Klass*");
+  CHECK_SET_KLASS(k);
   if (UseCompressedClassPointers) {
     *compressed_klass_addr() = Klass::encode_klass_not_null(k);
   } else {
     *klass_addr() = k;
   }
 }
+
+inline void oopDesc::release_set_klass(Klass* k) {
+  CHECK_SET_KLASS(k);
+  if (UseCompressedClassPointers) {
+    OrderAccess::release_store(compressed_klass_addr(),
+                               Klass::encode_klass_not_null(k));
+  } else {
+    OrderAccess::release_store_ptr(klass_addr(), k);
+  }
+}
+
+#undef CHECK_SET_KLASS
 
 inline int oopDesc::klass_gap() const {
   return *(int*)(((intptr_t)this) + klass_gap_offset_in_bytes());
@@ -339,7 +368,7 @@ inline jbyte oopDesc::byte_field(int offset) const                  { return (jb
 inline void oopDesc::byte_field_put(int offset, jbyte contents)     { *byte_field_addr(offset) = (jint) contents; }
 
 inline jboolean oopDesc::bool_field(int offset) const               { return (jboolean) *bool_field_addr(offset); }
-inline void oopDesc::bool_field_put(int offset, jboolean contents)  { *bool_field_addr(offset) = (jint) contents; }
+inline void oopDesc::bool_field_put(int offset, jboolean contents)  { *bool_field_addr(offset) = (( (jint) contents) & 1); }
 
 inline jchar oopDesc::char_field(int offset) const                  { return (jchar) *char_field_addr(offset);    }
 inline void oopDesc::char_field_put(int offset, jchar contents)     { *char_field_addr(offset) = (jint) contents; }
@@ -379,7 +408,7 @@ inline jbyte oopDesc::byte_field_acquire(int offset) const                  { re
 inline void oopDesc::release_byte_field_put(int offset, jbyte contents)     { OrderAccess::release_store(byte_field_addr(offset), contents); }
 
 inline jboolean oopDesc::bool_field_acquire(int offset) const               { return OrderAccess::load_acquire(bool_field_addr(offset));     }
-inline void oopDesc::release_bool_field_put(int offset, jboolean contents)  { OrderAccess::release_store(bool_field_addr(offset), contents); }
+inline void oopDesc::release_bool_field_put(int offset, jboolean contents)  { OrderAccess::release_store(bool_field_addr(offset), (contents & 1)); }
 
 inline jchar oopDesc::char_field_acquire(int offset) const                  { return OrderAccess::load_acquire(char_field_addr(offset));     }
 inline void oopDesc::release_char_field_put(int offset, jchar contents)     { OrderAccess::release_store(char_field_addr(offset), contents); }

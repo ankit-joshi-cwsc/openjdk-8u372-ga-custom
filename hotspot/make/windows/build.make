@@ -1,5 +1,6 @@
 #
 # Copyright (c) 1998, 2013, Oracle and/or its affiliates. All rights reserved.
+# Copyright 2019 Red Hat, Inc.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -279,6 +280,10 @@ $(variantDir)\local.make: checks
 	@ echo HS_COMPANY=$(COMPANY_NAME)			>> $@
 	@ echo HS_FILEDESC=$(HS_FILEDESC)			>> $@
 	@ echo HOTSPOT_VM_DISTRO=$(HOTSPOT_VM_DISTRO)		>> $@
+	@ echo VENDOR=$(COMPANY_NAME)				>> $@
+	@ echo VENDOR_URL=$(VENDOR_URL)				>> $@
+	@ echo VENDOR_URL_BUG=$(VENDOR_URL_BUG)			>> $@
+	@ echo VENDOR_URL_VM_BUG=$(VENDOR_URL_VM_BUG)		>> $@
 	@ if "$(OPENJDK)" NEQ "" echo OPENJDK=$(OPENJDK)	>> $@
 	@ echo HS_COPYRIGHT=$(HOTSPOT_VM_COPYRIGHT)		>> $@
 	@ echo HS_NAME=$(PRODUCT_NAME) $(JDK_MKTG_VERSION)	>> $@
@@ -297,6 +302,7 @@ $(variantDir)\local.make: checks
 	@ echo LD=$(LD)						>> $@
 	@ echo MT=$(MT)						>> $@
 	@ echo RC=$(RC)						>> $@
+	@ echo ENABLE_JFR=$(ENABLE_JFR)				>> $@
 	@ sh $(WorkSpace)/make/windows/get_msc_ver.sh		>> $@
 	@ if "$(ENABLE_FULL_DEBUG_SYMBOLS)" NEQ "" echo ENABLE_FULL_DEBUG_SYMBOLS=$(ENABLE_FULL_DEBUG_SYMBOLS) >> $@
 	@ if "$(ZIP_DEBUGINFO_FILES)" NEQ "" echo ZIP_DEBUGINFO_FILES=$(ZIP_DEBUGINFO_FILES) >> $@

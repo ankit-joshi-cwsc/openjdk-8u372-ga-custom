@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2012, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -35,9 +35,11 @@ import java.net.URL;
 
 import java.security.KeyStore;
 
+import java.security.cert.X509Certificate;
 import java.text.Collator;
 
 import java.util.Locale;
+import java.util.ResourceBundle;
 
 /**
  * <p> This class provides several utilities to <code>KeyStore</code>.
@@ -52,19 +54,33 @@ public class KeyStoreUtil {
 
     private static final String JKS = "jks";
 
-    private static final Collator collator = Collator.getInstance();
-    static {
-        // this is for case insensitive string comparisons
-        collator.setStrength(Collator.PRIMARY);
-    };
+    /**
+     * Returns true if the certificate is self-signed, false otherwise.
+     */
+    public static boolean isSelfSigned(X509Certificate cert) {
+        return signedBy(cert, cert);
+    }
+
+    public static boolean signedBy(X509Certificate end, X509Certificate ca) {
+        if (!ca.getSubjectX500Principal().equals(end.getIssuerX500Principal())) {
+            return false;
+        }
+        try {
+            end.verify(ca.getPublicKey());
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
 
     /**
      * Returns true if KeyStore has a password. This is true except for
      * MSCAPI KeyStores
      */
     public static boolean isWindowsKeyStore(String storetype) {
-        return storetype.equalsIgnoreCase("Windows-MY")
-                || storetype.equalsIgnoreCase("Windows-ROOT");
+        return storetype != null
+                && (storetype.equalsIgnoreCase("Windows-MY")
+                    || storetype.equalsIgnoreCase("Windows-ROOT"));
     }
 
     /**
@@ -102,7 +118,8 @@ public class KeyStoreUtil {
     }
 
     public static char[] getPassWithModifier(String modifier, String arg,
-                                             java.util.ResourceBundle rb) {
+                                             ResourceBundle rb,
+                                             Collator collator) {
         if (modifier == null) {
             return arg.toCharArray();
         } else if (collator.compare(modifier, "env") == 0) {

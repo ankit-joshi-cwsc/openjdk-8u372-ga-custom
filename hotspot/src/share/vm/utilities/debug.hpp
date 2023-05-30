@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -156,6 +156,9 @@ do {                                                                         \
   #define assert_if_no_error(cond,msg)
 #endif // #ifdef ASSERT
 
+#define precond(p)   assert(p, "precond")
+#define postcond(p)  assert(p, "postcond")
+
 // guarantee is like assert except it's always executed -- use it for
 // cheap tests that catch errors that would otherwise be hard to find.
 // guarantee is also used for Verify options.
@@ -222,6 +225,7 @@ void report_should_not_call(const char* file, int line);
 void report_should_not_reach_here(const char* file, int line);
 void report_unimplemented(const char* file, int line);
 void report_untested(const char* file, int line, const char* message);
+void report_insufficient_metaspace(size_t required_size);
 
 void warning(const char* format, ...) ATTRIBUTE_PRINTF(1, 2);
 

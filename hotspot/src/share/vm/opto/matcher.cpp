@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -44,6 +44,8 @@
 # include "adfiles/ad_x86_32.hpp"
 #elif defined TARGET_ARCH_MODEL_x86_64
 # include "adfiles/ad_x86_64.hpp"
+#elif defined TARGET_ARCH_MODEL_aarch64
+# include "adfiles/ad_aarch64.hpp"
 #elif defined TARGET_ARCH_MODEL_sparc
 # include "adfiles/ad_sparc.hpp"
 #elif defined TARGET_ARCH_MODEL_zero
@@ -79,7 +81,7 @@ Matcher::Matcher()
   _register_save_type(register_save_type),
   _ruleName(ruleName),
   _allocation_started(false),
-  _states_arena(Chunk::medium_size),
+  _states_arena(Chunk::medium_size, mtCompiler),
   _visited(&_states_arena),
   _shared(&_states_arena),
   _dontcare(&_states_arena) {
@@ -95,6 +97,7 @@ Matcher::Matcher()
   idealreg2spillmask  [Op_VecD] = NULL;
   idealreg2spillmask  [Op_VecX] = NULL;
   idealreg2spillmask  [Op_VecY] = NULL;
+  idealreg2spillmask  [Op_RegFlags] = NULL;
 
   idealreg2debugmask  [Op_RegI] = NULL;
   idealreg2debugmask  [Op_RegN] = NULL;
@@ -106,6 +109,7 @@ Matcher::Matcher()
   idealreg2debugmask  [Op_VecD] = NULL;
   idealreg2debugmask  [Op_VecX] = NULL;
   idealreg2debugmask  [Op_VecY] = NULL;
+  idealreg2debugmask  [Op_RegFlags] = NULL;
 
   idealreg2mhdebugmask[Op_RegI] = NULL;
   idealreg2mhdebugmask[Op_RegN] = NULL;
@@ -117,6 +121,7 @@ Matcher::Matcher()
   idealreg2mhdebugmask[Op_VecD] = NULL;
   idealreg2mhdebugmask[Op_VecX] = NULL;
   idealreg2mhdebugmask[Op_VecY] = NULL;
+  idealreg2mhdebugmask[Op_RegFlags] = NULL;
 
   debug_only(_mem_node = NULL;)   // Ideal memory node consumed by mach node
 }
@@ -132,7 +137,7 @@ OptoReg::Name Matcher::warp_incoming_stk_arg( VMReg reg ) {
       _in_arg_limit = OptoReg::add(warped, 1); // Bump max stack slot seen
     if (!RegMask::can_represent_arg(warped)) {
       // the compiler cannot represent this method's calling sequence
-      C->record_method_not_compilable_all_tiers("unsupported incoming calling sequence");
+      C->record_method_not_compilable("unsupported incoming calling sequence");
       return OptoReg::Bad;
     }
     return warped;
@@ -193,7 +198,7 @@ void Matcher::match( ) {
   const TypeTuple *range = C->tf()->range();
   if( range->cnt() > TypeFunc::Parms ) { // If not a void function
     // Get ideal-register return type
-    int ireg = range->field_at(TypeFunc::Parms)->ideal_reg();
+    uint ireg = range->field_at(TypeFunc::Parms)->ideal_reg();
     // Get machine return register
     uint sop = C->start()->Opcode();
     OptoRegPair regs = return_value(ireg, false);
@@ -335,14 +340,14 @@ void Matcher::match( ) {
   grow_new_node_array(C->unique());
 
   // Reset node counter so MachNodes start with _idx at 0
-  int nodes = C->unique(); // save value
+  int live_nodes = C->live_nodes();
   C->set_unique(0);
   C->reset_dead_node_list();
 
   // Recursively match trees from old space into new space.
   // Correct leaves of new-space Nodes; they point to old-space.
   _visited.Clear();             // Clear visit bits for xform call
-  C->set_cached_top_node(xform( C->top(), nodes ));
+  C->set_cached_top_node(xform( C->top(), live_nodes));
   if (!C->failing()) {
     Node* xroot =        xform( C->root(), 1 );
     if (xroot == NULL) {
@@ -995,7 +1000,7 @@ class MStack: public Node_Stack {
 Node *Matcher::transform( Node *n ) { ShouldNotCallThis(); return n; }
 Node *Matcher::xform( Node *n, int max_stack ) {
   // Use one stack to keep both: child's node/state and parent's node/index
-  MStack mstack(max_stack * 2 * 2); // C->unique() * 2 * 2
+  MStack mstack(max_stack * 2 * 2); // usually: C->live_nodes() * 2 * 2
   mstack.push(n, Visit, NULL, -1);  // set NULL as parent to indicate root
 
   while (mstack.is_nonempty()) {
@@ -1020,7 +1025,7 @@ Node *Matcher::xform( Node *n, int max_stack ) {
             if (C->failing())  return NULL;
             if (m == NULL) { Matcher::soft_match_failure(); return NULL; }
           } else {                  // Nothing the matcher cares about
-            if( n->is_Proj() && n->in(0)->is_Multi()) {       // Projections?
+            if (n->is_Proj() && n->in(0) != NULL && n->in(0)->is_Multi()) {       // Projections?
               // Convert to machine-dependent projection
               m = n->in(0)->as_Multi()->match( n->as_Proj(), this );
 #ifdef ASSERT
@@ -1134,7 +1139,7 @@ OptoReg::Name Matcher::warp_outgoing_stk_arg( VMReg reg, OptoReg::Name begin_out
     if( warped >= out_arg_limit_per_call )
       out_arg_limit_per_call = OptoReg::add(warped,1);
     if (!RegMask::can_represent_arg(warped)) {
-      C->record_method_not_compilable_all_tiers("unsupported calling sequence");
+      C->record_method_not_compilable("unsupported calling sequence");
       return OptoReg::Bad;
     }
     return warped;
@@ -1313,7 +1318,7 @@ MachNode *Matcher::match_sfpt( SafePointNode *sfpt ) {
     uint r_cnt = mcall->tf()->range()->cnt();
     MachProjNode *proj = new (C) MachProjNode( mcall, r_cnt+10000, RegMask::Empty, MachProjNode::fat_proj );
     if (!RegMask::can_represent_arg(OptoReg::Name(out_arg_limit_per_call-1))) {
-      C->record_method_not_compilable_all_tiers("unsupported outgoing calling sequence");
+      C->record_method_not_compilable("unsupported outgoing calling sequence");
     } else {
       for (int i = begin_out_arg_area; i < out_arg_limit_per_call; i++)
         proj->_rout.Insert(OptoReg::Name(i));
@@ -1501,7 +1506,7 @@ Node *Matcher::Label_Root( const Node *n, State *svec, Node *control, const Node
   // out of stack space.  See bugs 6272980 & 6227033 for more info.
   LabelRootDepth++;
   if (LabelRootDepth > MaxLabelRootDepth) {
-    C->record_method_not_compilable_all_tiers("Out of stack space, increase MaxLabelRootDepth");
+    C->record_method_not_compilable("Out of stack space, increase MaxLabelRootDepth");
     return NULL;
   }
   uint care = 0;                // Edges matcher cares about
@@ -1657,6 +1662,7 @@ MachNode *Matcher::ReduceInst( State *s, int rule, Node *&mem ) {
 
   // Build the object to represent this state & prepare for recursive calls
   MachNode *mach = s->MachNodeGenerator( rule, C );
+  guarantee(mach != NULL, "Missing MachNode");
   mach->_opnds[0] = s->MachOperGenerator( _reduceOp[rule], C );
   assert( mach->_opnds[0] != NULL, "Missing result operand" );
   Node *leaf = s->_leaf;
@@ -2021,8 +2027,8 @@ bool Matcher::is_bmi_pattern(Node *n, Node *m) {
 //------------------------------find_shared------------------------------------
 // Set bits if Node is shared or otherwise a root
 void Matcher::find_shared( Node *n ) {
-  // Allocate stack of size C->unique() * 2 to avoid frequent realloc
-  MStack mstack(C->unique() * 2);
+  // Allocate stack of size C->live_nodes() * 2 to avoid frequent realloc
+  MStack mstack(C->live_nodes() * 2);
   // Mark nodes as address_visited if they are inputs to an address expression
   VectorSet address_visited(Thread::current()->resource_area());
   mstack.push(n, Visit);     // Don't need to pre-visit root node
@@ -2039,6 +2045,12 @@ void Matcher::find_shared( Node *n ) {
         // Node is shared and has no reason to clone.  Flag it as shared.
         // This causes it to match into a register for the sharing.
         set_shared(n);       // Flag as shared and
+        if (n->is_DecodeNarrowPtr()) {
+          // Oop field/array element loads must be shared but since
+          // they are shared through a DecodeN they may appear to have
+          // a single use so force sharing here.
+          set_shared(n->in(1));
+        }
         mstack.pop();        // remove node from stack
         continue;
       }
@@ -2159,13 +2171,6 @@ void Matcher::find_shared( Node *n ) {
         if( _must_clone[mop] ) {
           mstack.push(m, Visit);
           continue; // for(int i = ...)
-        }
-
-        if( mop == Op_AddP && m->in(AddPNode::Base)->is_DecodeNarrowPtr()) {
-          // Bases used in addresses must be shared but since
-          // they are shared through a DecodeN they may appear
-          // to have a single use so force sharing here.
-          set_shared(m->in(AddPNode::Base)->in(1));
         }
 
         // if 'n' and 'm' are part of a graph for BMI instruction, clone this node.

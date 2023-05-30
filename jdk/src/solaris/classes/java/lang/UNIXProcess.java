@@ -225,9 +225,8 @@ final class UNIXProcess extends Process {
             ThreadGroup systemThreadGroup = tg;
 
             ThreadFactory threadFactory = grimReaper -> {
-                // Our thread stack requirement is quite modest.
-                Thread t = new Thread(systemThreadGroup, grimReaper,
-                                      "process reaper", 32768);
+                long stackSize = Boolean.getBoolean("jdk.lang.processReaperUseDefaultStackSize") ? 0 : 32768;
+                Thread t = new Thread(systemThreadGroup, grimReaper,"process reaper", stackSize);
                 t.setDaemon(true);
                 // A small attempt (probably futile) to avoid priority inversion
                 t.setPriority(Thread.MAX_PRIORITY);
@@ -402,15 +401,13 @@ final class UNIXProcess extends Process {
     public synchronized boolean waitFor(long timeout, TimeUnit unit)
         throws InterruptedException
     {
+        long remainingNanos = unit.toNanos(timeout);    // throw NPE before other conditions
         if (hasExited) return true;
         if (timeout <= 0) return false;
 
-        long remainingNanos = unit.toNanos(timeout);
         long deadline = System.nanoTime() + remainingNanos;
-
         do {
-            // Round up to next millisecond
-            wait(TimeUnit.NANOSECONDS.toMillis(remainingNanos + 999_999L));
+            TimeUnit.NANOSECONDS.timedWait(this, remainingNanos);
             if (hasExited) {
                 return true;
             }

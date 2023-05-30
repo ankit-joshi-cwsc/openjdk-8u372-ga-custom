@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -55,7 +55,7 @@ template <MEMFLAGS F> BasicHashtableEntry<F>* BasicHashtable<F>::new_entry(unsig
     if (_first_free_entry + _entry_size >= _end_block) {
       int block_size = MIN2(512, MAX2((int)_table_size / 2, (int)_number_of_entries));
       int len = _entry_size * block_size;
-      len = 1 << log2_intptr(len); // round down to power of 2
+      len = 1 << log2_int(len); // round down to power of 2
       assert(len >= _entry_size, "");
       _first_free_entry = NEW_C_HEAP_ARRAY2(char, len, F, CURRENT_PC);
       _end_block = _first_free_entry + len;
@@ -93,8 +93,6 @@ template <class T, MEMFLAGS F> bool RehashableHashtable<T, F>::check_rehash_tabl
   }
   return false;
 }
-
-template <class T, MEMFLAGS F> juint RehashableHashtable<T, F>::_seed = 0;
 
 // Create a new table and using alternate hash code, populate the new table
 // with the existing elements.   This can be used to change the hash code
@@ -172,6 +170,35 @@ template <MEMFLAGS F> void BasicHashtable<F>::reverse() {
   }
 }
 
+template <MEMFLAGS F> void BasicHashtable<F>::BucketUnlinkContext::free_entry(BasicHashtableEntry<F>* entry) {
+  entry->set_next(_removed_head);
+  _removed_head = entry;
+  if (_removed_tail == NULL) {
+    _removed_tail = entry;
+  }
+  _num_removed++;
+}
+
+template <MEMFLAGS F> void BasicHashtable<F>::bulk_free_entries(BucketUnlinkContext* context) {
+  if (context->_num_removed == 0) {
+    assert(context->_removed_head == NULL && context->_removed_tail == NULL,
+           err_msg("Zero entries in the unlink context, but elements linked from " PTR_FORMAT " to " PTR_FORMAT,
+                   p2i(context->_removed_head), p2i(context->_removed_tail)));
+    return;
+  }
+
+  // MT-safe add of the list of BasicHashTableEntrys from the context to the free list.
+  BasicHashtableEntry<F>* current = _free_list;
+  while (true) {
+    context->_removed_tail->set_next(current);
+    BasicHashtableEntry<F>* old = (BasicHashtableEntry<F>*)Atomic::cmpxchg_ptr(context->_removed_head, &_free_list, current);
+    if (old == current) {
+      break;
+    }
+    current = old;
+  }
+  Atomic::add(-context->_num_removed, &_number_of_entries);
+}
 
 // Copy the table to the shared space.
 
@@ -190,7 +217,7 @@ template <MEMFLAGS F> void BasicHashtable<F>::copy_table(char** top, char* end) 
       if (*top + entry_size() > end) {
         report_out_of_shared_space(SharedMiscData);
       }
-      *p = (BasicHashtableEntry<F>*)memcpy(*top, *p, entry_size());
+      *p = (BasicHashtableEntry<F>*)memcpy(*top, (void*)*p, entry_size());
       *top += entry_size();
     }
   }
@@ -304,7 +331,7 @@ template <MEMFLAGS F> void BasicHashtable<F>::copy_buckets(char** top, char* end
   if (*top + len > end) {
     report_out_of_shared_space(SharedMiscData);
   }
-  _buckets = (HashtableBucket<F>*)memcpy(*top, _buckets, len);
+  _buckets = (HashtableBucket<F>*)memcpy(*top, (void*)_buckets, len);
   *top += len;
 }
 

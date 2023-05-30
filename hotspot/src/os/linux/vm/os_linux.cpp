@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -37,6 +37,7 @@
 #include "mutex_linux.inline.hpp"
 #include "oops/oop.inline.hpp"
 #include "os_share_linux.hpp"
+#include "osContainer_linux.hpp"
 #include "prims/jniFastGetField.hpp"
 #include "prims/jvm.h"
 #include "prims/jvm_misc.hpp"
@@ -104,6 +105,14 @@
 
 PRAGMA_FORMAT_MUTE_WARNINGS_FOR_GCC
 
+#ifndef _GNU_SOURCE
+  #define _GNU_SOURCE
+  #include <sched.h>
+  #undef _GNU_SOURCE
+#else
+  #include <sched.h>
+#endif
+
 // if RUSAGE_THREAD for getrusage() has not been defined, do it here. The code calling
 // getrusage() is prepared to handle the associated failure.
 #ifndef RUSAGE_THREAD
@@ -127,6 +136,7 @@ uintptr_t os::Linux::_initial_thread_stack_size   = 0;
 
 int (*os::Linux::_clock_gettime)(clockid_t, struct timespec *) = NULL;
 int (*os::Linux::_pthread_getcpuclockid)(pthread_t, clockid_t *) = NULL;
+int (*os::Linux::_pthread_setname_np)(pthread_t, const char*) = NULL;
 Mutex* os::Linux::_createThread_lock = NULL;
 pthread_t os::Linux::_main_thread;
 int os::Linux::_page_size = -1;
@@ -171,13 +181,50 @@ julong os::available_memory() {
 julong os::Linux::available_memory() {
   // values in struct sysinfo are "unsigned long"
   struct sysinfo si;
-  sysinfo(&si);
+  julong avail_mem;
 
-  return (julong)si.freeram * si.mem_unit;
+  if (OSContainer::is_containerized()) {
+    jlong mem_limit = OSContainer::memory_limit_in_bytes();
+    jlong mem_usage;
+    if (mem_limit > 0 && (mem_usage = OSContainer::memory_usage_in_bytes()) < 1) {
+      if (PrintContainerInfo) {
+        tty->print_cr("container memory usage failed: " JLONG_FORMAT ", using host value", mem_usage);
+      }
+    }
+    if (mem_limit > 0 && mem_usage > 0) {
+      avail_mem = mem_limit > mem_usage ? (julong)mem_limit - (julong)mem_usage : 0;
+      if (PrintContainerInfo) {
+        tty->print_cr("available container memory: " JULONG_FORMAT, avail_mem);
+      }
+      return avail_mem;
+    }
+  }
+
+  sysinfo(&si);
+  avail_mem = (julong)si.freeram * si.mem_unit;
+  if (Verbose) {
+    tty->print_cr("available memory: " JULONG_FORMAT, avail_mem);
+  }
+  return avail_mem;
 }
 
 julong os::physical_memory() {
-  return Linux::physical_memory();
+  jlong phys_mem = 0;
+  if (OSContainer::is_containerized()) {
+    jlong mem_limit;
+    if ((mem_limit = OSContainer::memory_limit_in_bytes()) > 0) {
+      if (PrintContainerInfo) {
+        tty->print_cr("total container memory: " JLONG_FORMAT, mem_limit);
+      }
+      return mem_limit;
+    }
+  }
+
+  phys_mem = Linux::physical_memory();
+  if (Verbose) {
+    tty->print_cr("total system memory: " JLONG_FORMAT, phys_mem);
+  }
+  return phys_mem;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -247,6 +294,14 @@ pid_t os::Linux::gettid() {
   } else {
      return (pid_t)rslt;
   }
+}
+
+// Returns the amount of swap currently configured, in bytes.
+// This can change at any time.
+julong os::Linux::host_swap() {
+  struct sysinfo si;
+  sysinfo(&si);
+  return (julong)si.totalswap;
 }
 
 // Most versions of linux have a bug where the number of processors are
@@ -666,6 +721,10 @@ static void _expand_stack_to(address bottom) {
   }
 }
 
+void os::Linux::expand_stack_to(address bottom) {
+  _expand_stack_to(bottom);
+}
+
 bool os::Linux::manually_expand_stack(JavaThread * t, address addr) {
   assert(t!=NULL, "just checking");
   assert(t->osthread()->expanding_stack(), "expand should be set");
@@ -938,8 +997,8 @@ bool os::create_attached_thread(JavaThread* thread) {
     }
   }
 
-  if (os::Linux::is_initial_thread()) {
-    // If current thread is initial thread, its stack is mapped on demand,
+  if (os::is_primordial_thread()) {
+    // If current thread is primordial thread, its stack is mapped on demand,
     // see notes about MAP_GROWSDOWN. Here we try to force kernel to map
     // the entire stack region to avoid SEGV in stack banging.
     // It is also useful to get around the heap-stack-gap problem on SuSE
@@ -1024,21 +1083,24 @@ extern "C" Thread* get_thread() {
 }
 
 //////////////////////////////////////////////////////////////////////////////
-// initial thread
+// primordial thread
 
-// Check if current thread is the initial thread, similar to Solaris thr_main.
-bool os::Linux::is_initial_thread(void) {
+// Check if current thread is the primordial thread, similar to Solaris thr_main.
+bool os::is_primordial_thread(void) {
   char dummy;
   // If called before init complete, thread stack bottom will be null.
   // Can be called if fatal error occurs before initialization.
-  if (initial_thread_stack_bottom() == NULL) return false;
-  assert(initial_thread_stack_bottom() != NULL &&
-         initial_thread_stack_size()   != 0,
-         "os::init did not locate initial thread's stack region");
-  if ((address)&dummy >= initial_thread_stack_bottom() &&
-      (address)&dummy < initial_thread_stack_bottom() + initial_thread_stack_size())
+  if (os::Linux::initial_thread_stack_bottom() == NULL) return false;
+  assert(os::Linux::initial_thread_stack_bottom() != NULL &&
+         os::Linux::initial_thread_stack_size()   != 0,
+         "os::init did not locate primordial thread's stack region");
+  if ((address)&dummy >= os::Linux::initial_thread_stack_bottom() &&
+      (address)&dummy < os::Linux::initial_thread_stack_bottom() +
+                        os::Linux::initial_thread_stack_size()) {
        return true;
-  else return false;
+  } else {
+       return false;
+  }
 }
 
 // Find the virtual memory area that contains addr
@@ -1065,31 +1127,35 @@ static bool find_vma(address addr, address* vma_low, address* vma_high) {
   return false;
 }
 
-// Locate initial thread stack. This special handling of initial thread stack
+// Locate primordial thread stack. This special handling of primordial thread stack
 // is needed because pthread_getattr_np() on most (all?) Linux distros returns
-// bogus value for initial thread.
+// bogus value for the primordial process thread. While the launcher has created
+// the VM in a new thread since JDK 6, we still have to allow for the use of the
+// JNI invocation API from a primordial thread.
 void os::Linux::capture_initial_stack(size_t max_size) {
-  // stack size is the easy part, get it from RLIMIT_STACK
-  size_t stack_size;
+
+  // max_size is either 0 (which means accept OS default for thread stacks) or
+  // a user-specified value known to be at least the minimum needed. If we
+  // are actually on the primordial thread we can make it appear that we have a
+  // smaller max_size stack by inserting the guard pages at that location. But we
+  // cannot do anything to emulate a larger stack than what has been provided by
+  // the OS or threading library. In fact if we try to use a stack greater than
+  // what is set by rlimit then we will crash the hosting process.
+
+  // Maximum stack size is the easy part, get it from RLIMIT_STACK.
+  // If this is "unlimited" then it will be a huge value.
   struct rlimit rlim;
   getrlimit(RLIMIT_STACK, &rlim);
-  stack_size = rlim.rlim_cur;
+  size_t stack_size = rlim.rlim_cur;
 
   // 6308388: a bug in ld.so will relocate its own .data section to the
   //   lower end of primordial stack; reduce ulimit -s value a little bit
   //   so we won't install guard page on ld.so's data section.
-  stack_size -= 2 * page_size();
+  //   But ensure we don't underflow the stack size - allow 1 page spare
+  if (stack_size >= (size_t)(3 * page_size())) {
+    stack_size -= 2 * page_size();
+  }
 
-  // 4441425: avoid crash with "unlimited" stack size on SuSE 7.1 or Redhat
-  //   7.1, in both cases we will get 2G in return value.
-  // 4466587: glibc 2.2.x compiled w/o "--enable-kernel=2.4.0" (RH 7.0,
-  //   SuSE 7.2, Debian) can not handle alternate signal stack correctly
-  //   for initial thread if its stack size exceeds 6M. Cap it at 2M,
-  //   in case other parts in glibc still assumes 2M max stack size.
-  // FIXME: alt signal stack is gone, maybe we can relax this constraint?
-  // Problem still exists RH7.2 (IA64 anyway) but 2MB is a little small
-  if (stack_size > 2 * K * K IA64_ONLY(*2))
-      stack_size = 2 * K * K IA64_ONLY(*2);
   // Try to figure out where the stack base (top) is. This is harder.
   //
   // When an application is started, glibc saves the initial stack pointer in
@@ -1209,16 +1275,16 @@ void os::Linux::capture_initial_stack(size_t max_size) {
 
       if (i != 28 - 2) {
          assert(false, "Bad conversion from /proc/self/stat");
-         // product mode - assume we are the initial thread, good luck in the
+         // product mode - assume we are the primordial thread, good luck in the
          // embedded case.
-         warning("Can't detect initial thread stack location - bad conversion");
+         warning("Can't detect primordial thread stack location - bad conversion");
          stack_start = (uintptr_t) &rlim;
       }
     } else {
       // For some reason we can't open /proc/self/stat (for example, running on
       // FreeBSD with a Linux emulator, or inside chroot), this should work for
       // most cases, so don't abort:
-      warning("Can't detect initial thread stack location - no /proc/self/stat");
+      warning("Can't detect primordial thread stack location - no /proc/self/stat");
       stack_start = (uintptr_t) &rlim;
     }
   }
@@ -1238,7 +1304,7 @@ void os::Linux::capture_initial_stack(size_t max_size) {
     stack_top = (uintptr_t)high;
   } else {
     // failed, likely because /proc/self/maps does not exist
-    warning("Can't detect initial thread stack location - find_vma failed");
+    warning("Can't detect primordial thread stack location - find_vma failed");
     // best effort: stack_start is normally within a few pages below the real
     // stack top, use it as stack top, and reduce stack size so we won't put
     // guard page outside stack.
@@ -1249,14 +1315,18 @@ void os::Linux::capture_initial_stack(size_t max_size) {
   // stack_top could be partially down the page so align it
   stack_top = align_size_up(stack_top, page_size());
 
-  if (max_size && stack_size > max_size) {
-     _initial_thread_stack_size = max_size;
+  // Allowed stack value is minimum of max_size and what we derived from rlimit
+  if (max_size > 0) {
+    _initial_thread_stack_size = MIN2(max_size, stack_size);
   } else {
-     _initial_thread_stack_size = stack_size;
+    // Accept the rlimit max, but if stack is unlimited then it will be huge, so
+    // clamp it at 8MB as we do on Solaris
+    _initial_thread_stack_size = MIN2(stack_size, 8*M);
   }
 
   _initial_thread_stack_size = align_size_down(_initial_thread_stack_size, page_size());
   _initial_thread_stack_bottom = (address)stack_top - _initial_thread_stack_size;
+  assert(_initial_thread_stack_bottom < (address)stack_top, "overflow!");
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1344,8 +1414,8 @@ void os::Linux::clock_init() {
 
 #ifndef SYS_clock_getres
 
-#if defined(IA32) || defined(AMD64)
-#define SYS_clock_getres IA32_ONLY(266)  AMD64_ONLY(229)
+#if defined(IA32) || defined(AMD64) || defined(AARCH64)
+#define SYS_clock_getres IA32_ONLY(266)  AMD64_ONLY(229) AARCH64_ONLY(114)
 #define sys_clock_getres(x,y)  ::syscall(SYS_clock_getres, x, y)
 #else
 #warning "SYS_clock_getres not defined for this platform, disabling fast_thread_cpu_time"
@@ -1876,6 +1946,9 @@ void * os::dll_load(const char *filename, char *ebuf, int ebuflen)
   #ifndef EM_486
   #define EM_486          6               /* Intel 80486 */
   #endif
+  #ifndef EM_AARCH64
+  #define EM_AARCH64    183               /* ARM AARCH64 */
+  #endif
 
   static const arch_t arch_array[]={
     {EM_386,         EM_386,     ELFCLASS32, ELFDATA2LSB, (char*)"IA 32"},
@@ -1887,7 +1960,7 @@ void * os::dll_load(const char *filename, char *ebuf, int ebuflen)
     {EM_SPARCV9,     EM_SPARCV9, ELFCLASS64, ELFDATA2MSB, (char*)"Sparc v9 64"},
     {EM_PPC,         EM_PPC,     ELFCLASS32, ELFDATA2MSB, (char*)"Power PC 32"},
 #if defined(VM_LITTLE_ENDIAN)
-    {EM_PPC64,       EM_PPC64,   ELFCLASS64, ELFDATA2LSB, (char*)"Power PC 64"},
+    {EM_PPC64,       EM_PPC64,   ELFCLASS64, ELFDATA2LSB, (char*)"Power PC 64 LE"},
 #else
     {EM_PPC64,       EM_PPC64,   ELFCLASS64, ELFDATA2MSB, (char*)"Power PC 64"},
 #endif
@@ -1897,7 +1970,8 @@ void * os::dll_load(const char *filename, char *ebuf, int ebuflen)
     {EM_MIPS_RS3_LE, EM_MIPS_RS3_LE, ELFCLASS32, ELFDATA2LSB, (char*)"MIPSel"},
     {EM_MIPS,        EM_MIPS,    ELFCLASS32, ELFDATA2MSB, (char*)"MIPS"},
     {EM_PARISC,      EM_PARISC,  ELFCLASS32, ELFDATA2MSB, (char*)"PARISC"},
-    {EM_68K,         EM_68K,     ELFCLASS32, ELFDATA2MSB, (char*)"M68k"}
+    {EM_68K,         EM_68K,     ELFCLASS32, ELFDATA2MSB, (char*)"M68k"},
+    {EM_AARCH64,     EM_AARCH64, ELFCLASS64, ELFDATA2LSB, (char*)"AARCH64"},
   };
 
   #if  (defined IA32)
@@ -1928,9 +2002,11 @@ void * os::dll_load(const char *filename, char *ebuf, int ebuflen)
     static  Elf32_Half running_arch_code=EM_MIPS;
   #elif  (defined M68K)
     static  Elf32_Half running_arch_code=EM_68K;
+  #elif  (defined AARCH64)
+    static  Elf32_Half running_arch_code=EM_AARCH64;
   #else
     #error Method os::dll_load requires that one of following is defined:\
-         IA32, AMD64, IA64, __sparc, __powerpc__, ARM, S390, ALPHA, MIPS, MIPSEL, PARISC, M68K
+         IA32, AMD64, IA64, __sparc, __powerpc__, ARM, S390, ALPHA, MIPS, MIPSEL, PARISC, M68K, AARCH64
   #endif
 
   // Identify compatability class for VM's architecture and library's architecture
@@ -2072,6 +2148,41 @@ void os::print_dll_info(outputStream *st) {
    }
 }
 
+int os::get_loaded_modules_info(os::LoadedModulesCallbackFunc callback, void *param) {
+  FILE *procmapsFile = NULL;
+
+  // Open the procfs maps file for the current process
+  if ((procmapsFile = fopen("/proc/self/maps", "r")) != NULL) {
+    // Allocate PATH_MAX for file name plus a reasonable size for other fields.
+    char line[PATH_MAX + 100];
+
+    // Read line by line from 'file'
+    while (fgets(line, sizeof(line), procmapsFile) != NULL) {
+      u8 base, top, offset, inode;
+      char permissions[5];
+      char device[6];
+      char name[PATH_MAX + 1];
+
+      // Parse fields from line
+      sscanf(line, UINT64_FORMAT_X "-" UINT64_FORMAT_X " %4s " UINT64_FORMAT_X " %7s " INT64_FORMAT " %s",
+             &base, &top, permissions, &offset, device, &inode, name);
+
+      // Filter by device id '00:00' so that we only get file system mapped files.
+      if (strcmp(device, "00:00") != 0) {
+
+        // Call callback with the fields of interest
+        if(callback(name, (address)base, (address)top, param)) {
+          // Oops abort, callback aborted
+          fclose(procmapsFile);
+          return 1;
+        }
+      }
+    }
+    fclose(procmapsFile);
+  }
+  return 0;
+}
+
 void os::print_os_info_brief(outputStream* st) {
   os::Linux::print_distro_info(st);
 
@@ -2101,6 +2212,8 @@ void os::print_os_info(outputStream* st) {
   os::Posix::print_load_average(st);
 
   os::Linux::print_full_memory_info(st);
+
+  os::Linux::print_container_info(st);
 }
 
 // Try to identify popular distros.
@@ -2164,6 +2277,57 @@ void os::Linux::print_full_memory_info(outputStream* st) {
    st->print("\n/proc/meminfo:\n");
    _print_ascii_file("/proc/meminfo", st);
    st->cr();
+}
+
+void os::Linux::print_container_info(outputStream* st) {
+  if (!OSContainer::is_containerized()) {
+    return;
+  }
+
+  st->print("container (cgroup) information:\n");
+
+  const char *p_ct = OSContainer::container_type();
+  st->print("container_type: %s\n", p_ct != NULL ? p_ct : "failed");
+
+  char *p = OSContainer::cpu_cpuset_cpus();
+  st->print("cpu_cpuset_cpus: %s\n", p != NULL ? p : "failed");
+  free(p);
+
+  p = OSContainer::cpu_cpuset_memory_nodes();
+  st->print("cpu_memory_nodes: %s\n", p != NULL ? p : "failed");
+  free(p);
+
+  int i = OSContainer::active_processor_count();
+  if (i > 0) {
+    st->print("active_processor_count: %d\n", i);
+  } else {
+    st->print("active_processor_count: failed\n");
+  }
+
+  i = OSContainer::cpu_quota();
+  st->print("cpu_quota: %d\n", i);
+
+  i = OSContainer::cpu_period();
+  st->print("cpu_period: %d\n", i);
+
+  i = OSContainer::cpu_shares();
+  st->print("cpu_shares: %d\n", i);
+
+  jlong j = OSContainer::memory_limit_in_bytes();
+  st->print("memory_limit_in_bytes: " JLONG_FORMAT "\n", j);
+
+  j = OSContainer::memory_and_swap_limit_in_bytes();
+  st->print("memory_and_swap_limit_in_bytes: " JLONG_FORMAT "\n", j);
+
+  j = OSContainer::memory_soft_limit_in_bytes();
+  st->print("memory_soft_limit_in_bytes: " JLONG_FORMAT "\n", j);
+
+  j = OSContainer::OSContainer::memory_usage_in_bytes();
+  st->print("memory_usage_in_bytes: " JLONG_FORMAT "\n", j);
+
+  j = OSContainer::OSContainer::memory_max_usage_in_bytes();
+  st->print("memory_max_usage_in_bytes: " JLONG_FORMAT "\n", j);
+  st->cr();
 }
 
 void os::print_memory_info(outputStream* st) {
@@ -2723,8 +2887,9 @@ void os::numa_make_local(char *addr, size_t bytes, int lgrp_hint) {
 bool os::numa_topology_changed()   { return false; }
 
 size_t os::numa_get_groups_num() {
-  int max_node = Linux::numa_max_node();
-  return max_node > 0 ? max_node + 1 : 1;
+  // Return just the number of nodes in which it's possible to allocate memory
+  // (in numa terminology, configured nodes).
+  return Linux::numa_num_configured_nodes();
 }
 
 int os::numa_get_group_id() {
@@ -2738,11 +2903,33 @@ int os::numa_get_group_id() {
   return 0;
 }
 
-size_t os::numa_get_leaf_groups(int *ids, size_t size) {
-  for (size_t i = 0; i < size; i++) {
-    ids[i] = i;
+int os::Linux::get_existing_num_nodes() {
+  size_t node;
+  size_t highest_node_number = Linux::numa_max_node();
+  int num_nodes = 0;
+
+  // Get the total number of nodes in the system including nodes without memory.
+  for (node = 0; node <= highest_node_number; node++) {
+    if (isnode_in_existing_nodes(node)) {
+      num_nodes++;
+    }
   }
-  return size;
+  return num_nodes;
+}
+
+size_t os::numa_get_leaf_groups(int *ids, size_t size) {
+  size_t highest_node_number = Linux::numa_max_node();
+  size_t i = 0;
+
+  // Map all node ids in which is possible to allocate memory. Also nodes are
+  // not always consecutively available, i.e. available from 0 to the highest
+  // node number.
+  for (size_t node = 0; node <= highest_node_number; node++) {
+    if (Linux::isnode_in_configured_nodes(node)) {
+      ids[i++] = node;
+    }
+  }
+  return i;
 }
 
 bool os::get_page_info(char *start, page_info* info) {
@@ -2755,15 +2942,10 @@ char *os::scan_pages(char *start, char* end, page_info* page_expected, page_info
 
 
 int os::Linux::sched_getcpu_syscall(void) {
-  unsigned int cpu;
+  unsigned int cpu = 0;
   int retval = -1;
 
-#if defined(IA32)
-# ifndef SYS_getcpu
-# define SYS_getcpu 318
-# endif
-  retval = syscall(SYS_getcpu, &cpu, NULL, NULL);
-#elif defined(AMD64)
+#if defined(AMD64)
 // Unfortunately we have to bring all these macros here from vsyscall.h
 // to be able to compile on old linuxes.
 # define __NR_vgetcpu 2
@@ -2773,6 +2955,11 @@ int os::Linux::sched_getcpu_syscall(void) {
   typedef long (*vgetcpu_t)(unsigned int *cpu, unsigned int *node, unsigned long *tcache);
   vgetcpu_t vgetcpu = (vgetcpu_t)VSYSCALL_ADDR(__NR_vgetcpu);
   retval = vgetcpu(&cpu, NULL, NULL);
+#elif defined(IA32) || defined(AARCH64)
+# ifndef SYS_getcpu
+#  define SYS_getcpu AARCH64_ONLY(168) IA32_ONLY(318)
+# endif
+  retval = syscall(SYS_getcpu, &cpu, NULL, NULL);
 #endif
 
   return (retval == -1) ? retval : cpu;
@@ -2783,17 +2970,20 @@ extern "C" JNIEXPORT void numa_warn(int number, char *where, ...) { }
 extern "C" JNIEXPORT void numa_error(char *where) { }
 extern "C" JNIEXPORT int fork1() { return fork(); }
 
-
-// If we are running with libnuma version > 2, then we should
-// be trying to use symbols with versions 1.1
-// If we are running with earlier version, which did not have symbol versions,
-// we should use the base version.
+// Handle request to load libnuma symbol version 1.1 (API v1). If it fails
+// load symbol from base version instead.
 void* os::Linux::libnuma_dlsym(void* handle, const char *name) {
   void *f = dlvsym(handle, name, "libnuma_1.1");
   if (f == NULL) {
     f = dlsym(handle, name);
   }
   return f;
+}
+
+// Handle request to load libnuma symbol version 1.2 (API v2) only.
+// Return NULL if the symbol is not defined in this particular version.
+void* os::Linux::libnuma_v2_dlsym(void* handle, const char* name) {
+  return dlvsym(handle, name, "libnuma_1.2");
 }
 
 bool os::Linux::libnuma_init() {
@@ -2812,18 +3002,30 @@ bool os::Linux::libnuma_init() {
                                            libnuma_dlsym(handle, "numa_node_to_cpus")));
       set_numa_max_node(CAST_TO_FN_PTR(numa_max_node_func_t,
                                        libnuma_dlsym(handle, "numa_max_node")));
+      set_numa_num_configured_nodes(CAST_TO_FN_PTR(numa_num_configured_nodes_func_t,
+                                                   libnuma_dlsym(handle, "numa_num_configured_nodes")));
       set_numa_available(CAST_TO_FN_PTR(numa_available_func_t,
                                         libnuma_dlsym(handle, "numa_available")));
       set_numa_tonode_memory(CAST_TO_FN_PTR(numa_tonode_memory_func_t,
                                             libnuma_dlsym(handle, "numa_tonode_memory")));
       set_numa_interleave_memory(CAST_TO_FN_PTR(numa_interleave_memory_func_t,
-                                            libnuma_dlsym(handle, "numa_interleave_memory")));
+                                                libnuma_dlsym(handle, "numa_interleave_memory")));
+      set_numa_interleave_memory_v2(CAST_TO_FN_PTR(numa_interleave_memory_v2_func_t,
+                                                libnuma_v2_dlsym(handle, "numa_interleave_memory")));
       set_numa_set_bind_policy(CAST_TO_FN_PTR(numa_set_bind_policy_func_t,
-                                            libnuma_dlsym(handle, "numa_set_bind_policy")));
-
+                                              libnuma_dlsym(handle, "numa_set_bind_policy")));
+      set_numa_bitmask_isbitset(CAST_TO_FN_PTR(numa_bitmask_isbitset_func_t,
+                                               libnuma_dlsym(handle, "numa_bitmask_isbitset")));
+      set_numa_distance(CAST_TO_FN_PTR(numa_distance_func_t,
+                                       libnuma_dlsym(handle, "numa_distance")));
 
       if (numa_available() != -1) {
         set_numa_all_nodes((unsigned long*)libnuma_dlsym(handle, "numa_all_nodes"));
+        set_numa_all_nodes_ptr((struct bitmask **)libnuma_dlsym(handle, "numa_all_nodes_ptr"));
+        set_numa_nodes_ptr((struct bitmask **)libnuma_dlsym(handle, "numa_nodes_ptr"));
+        // Create an index -> node mapping, since nodes are not always consecutive
+        _nindex_to_node = new (ResourceObj::C_HEAP, mtInternal) GrowableArray<int>(0, true);
+        rebuild_nindex_to_node_map();
         // Create a cpu -> node mapping
         _cpu_to_node = new (ResourceObj::C_HEAP, mtInternal) GrowableArray<int>(0, true);
         rebuild_cpu_to_node_map();
@@ -2832,6 +3034,17 @@ bool os::Linux::libnuma_init() {
     }
   }
   return false;
+}
+
+void os::Linux::rebuild_nindex_to_node_map() {
+  int highest_node_number = Linux::numa_max_node();
+
+  nindex_to_node()->clear();
+  for (int node = 0; node <= highest_node_number; node++) {
+    if (Linux::isnode_in_existing_nodes(node)) {
+      nindex_to_node()->append(node);
+    }
+  }
 }
 
 // rebuild_cpu_to_node_map() constructs a table mapping cpud id to node id.
@@ -2846,23 +3059,53 @@ void os::Linux::rebuild_cpu_to_node_map() {
                               // in the library.
   const size_t BitsPerCLong = sizeof(long) * CHAR_BIT;
 
-  size_t cpu_num = os::active_processor_count();
+  size_t cpu_num = processor_count();
   size_t cpu_map_size = NCPUS / BitsPerCLong;
   size_t cpu_map_valid_size =
     MIN2((cpu_num + BitsPerCLong - 1) / BitsPerCLong, cpu_map_size);
 
   cpu_to_node()->clear();
   cpu_to_node()->at_grow(cpu_num - 1);
-  size_t node_num = numa_get_groups_num();
 
+  size_t node_num = get_existing_num_nodes();
+
+  int distance = 0;
+  int closest_distance = INT_MAX;
+  int closest_node = 0;
   unsigned long *cpu_map = NEW_C_HEAP_ARRAY(unsigned long, cpu_map_size, mtInternal);
   for (size_t i = 0; i < node_num; i++) {
-    if (numa_node_to_cpus(i, cpu_map, cpu_map_size * sizeof(unsigned long)) != -1) {
+    // Check if node is configured (not a memory-less node). If it is not, find
+    // the closest configured node.
+    if (!isnode_in_configured_nodes(nindex_to_node()->at(i))) {
+      closest_distance = INT_MAX;
+      // Check distance from all remaining nodes in the system. Ignore distance
+      // from itself and from another non-configured node.
+      for (size_t m = 0; m < node_num; m++) {
+        if (m != i && isnode_in_configured_nodes(nindex_to_node()->at(m))) {
+          distance = numa_distance(nindex_to_node()->at(i), nindex_to_node()->at(m));
+          // If a closest node is found, update. There is always at least one
+          // configured node in the system so there is always at least one node
+          // close.
+          if (distance != 0 && distance < closest_distance) {
+            closest_distance = distance;
+            closest_node = nindex_to_node()->at(m);
+          }
+        }
+      }
+     } else {
+       // Current node is already a configured node.
+       closest_node = nindex_to_node()->at(i);
+     }
+
+    // Get cpus from the original node and map them to the closest node. If node
+    // is a configured node (not a memory-less node), then original node and
+    // closest node are the same.
+    if (numa_node_to_cpus(nindex_to_node()->at(i), cpu_map, cpu_map_size * sizeof(unsigned long)) != -1) {
       for (size_t j = 0; j < cpu_map_valid_size; j++) {
         if (cpu_map[j] != 0) {
           for (size_t k = 0; k < BitsPerCLong; k++) {
             if (cpu_map[j] & (1UL << k)) {
-              cpu_to_node()->at_put(j * BitsPerCLong + k, i);
+              cpu_to_node()->at_put(j * BitsPerCLong + k, closest_node);
             }
           }
         }
@@ -2880,14 +3123,21 @@ int os::Linux::get_node_by_cpu(int cpu_id) {
 }
 
 GrowableArray<int>* os::Linux::_cpu_to_node;
+GrowableArray<int>* os::Linux::_nindex_to_node;
 os::Linux::sched_getcpu_func_t os::Linux::_sched_getcpu;
 os::Linux::numa_node_to_cpus_func_t os::Linux::_numa_node_to_cpus;
 os::Linux::numa_max_node_func_t os::Linux::_numa_max_node;
+os::Linux::numa_num_configured_nodes_func_t os::Linux::_numa_num_configured_nodes;
 os::Linux::numa_available_func_t os::Linux::_numa_available;
 os::Linux::numa_tonode_memory_func_t os::Linux::_numa_tonode_memory;
 os::Linux::numa_interleave_memory_func_t os::Linux::_numa_interleave_memory;
+os::Linux::numa_interleave_memory_v2_func_t os::Linux::_numa_interleave_memory_v2;
 os::Linux::numa_set_bind_policy_func_t os::Linux::_numa_set_bind_policy;
+os::Linux::numa_bitmask_isbitset_func_t os::Linux::_numa_bitmask_isbitset;
+os::Linux::numa_distance_func_t os::Linux::_numa_distance;
 unsigned long* os::Linux::_numa_all_nodes;
+struct bitmask* os::Linux::_numa_all_nodes_ptr;
+struct bitmask* os::Linux::_numa_nodes_ptr;
 
 bool os::pd_uncommit_memory(char* addr, size_t size) {
   uintptr_t res = (uintptr_t) ::mmap(addr, size, PROT_NONE,
@@ -2967,11 +3217,11 @@ address get_stack_commited_bottom(address bottom, size_t size) {
 // where we're going to put our guard pages, truncate the mapping at
 // that point by munmap()ping it.  This ensures that when we later
 // munmap() the guard pages we don't leave a hole in the stack
-// mapping. This only affects the main/initial thread
+// mapping. This only affects the main/primordial thread
 
 bool os::pd_create_stack_guard_pages(char* addr, size_t size) {
 
-  if (os::Linux::is_initial_thread()) {
+  if (os::is_primordial_thread()) {
     // As we manually grow stack up to bottom inside create_attached_thread(),
     // it's likely that os::Linux::initial_thread_stack_bottom is mapped and
     // we don't need to do anything special.
@@ -2996,14 +3246,14 @@ bool os::pd_create_stack_guard_pages(char* addr, size_t size) {
 
 // If this is a growable mapping, remove the guard pages entirely by
 // munmap()ping them.  If not, just call uncommit_memory(). This only
-// affects the main/initial thread, but guard against future OS changes
-// It's safe to always unmap guard pages for initial thread because we
-// always place it right after end of the mapped region
+// affects the main/primordial thread, but guard against future OS changes.
+// It's safe to always unmap guard pages for primordial thread because we
+// always place it right after end of the mapped region.
 
 bool os::remove_stack_guard_pages(char* addr, size_t size) {
   uintptr_t stack_extent, stack_base;
 
-  if (os::Linux::is_initial_thread()) {
+  if (os::is_primordial_thread()) {
     return ::munmap(addr, size) == 0;
   }
 
@@ -3045,6 +3295,48 @@ static char* anon_mmap(char* requested_addr, size_t bytes, bool fixed) {
   }
 
   return addr == MAP_FAILED ? NULL : addr;
+}
+
+// Allocate (using mmap, NO_RESERVE, with small pages) at either a given request address
+//   (req_addr != NULL) or with a given alignment.
+//  - bytes shall be a multiple of alignment.
+//  - req_addr can be NULL. If not NULL, it must be a multiple of alignment.
+//  - alignment sets the alignment at which memory shall be allocated.
+//     It must be a multiple of allocation granularity.
+// Returns address of memory or NULL. If req_addr was not NULL, will only return
+//  req_addr or NULL.
+static char* anon_mmap_aligned(size_t bytes, size_t alignment, char* req_addr) {
+
+  size_t extra_size = bytes;
+  if (req_addr == NULL && alignment > 0) {
+    extra_size += alignment;
+  }
+
+  char* start = (char*) ::mmap(req_addr, extra_size, PROT_NONE,
+    MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,
+    -1, 0);
+  if (start == MAP_FAILED) {
+    start = NULL;
+  } else {
+    if (req_addr != NULL) {
+      if (start != req_addr) {
+        ::munmap(start, extra_size);
+        start = NULL;
+      }
+    } else {
+      char* const start_aligned = (char*) align_ptr_up(start, alignment);
+      char* const end_aligned = start_aligned + bytes;
+      char* const end = start + extra_size;
+      if (start_aligned > start) {
+        ::munmap(start, start_aligned - start);
+      }
+      if (end_aligned < end) {
+        ::munmap(end_aligned, end - end_aligned);
+      }
+      start = start_aligned;
+    }
+  }
+  return start;
 }
 
 // Don't update _highest_vm_reserved_address, because there might be memory
@@ -3221,7 +3513,7 @@ size_t os::Linux::find_large_page_size() {
 
 #ifndef ZERO
   large_page_size = IA32_ONLY(4 * M) AMD64_ONLY(2 * M) IA64_ONLY(256 * M) SPARC_ONLY(4 * M)
-                     ARM_ONLY(2 * M) PPC_ONLY(4 * M);
+                     ARM_ONLY(2 * M) PPC_ONLY(4 * M) AARCH64_ONLY(2 * M);
 #endif // ZERO
 
   FILE *fp = fopen("/proc/meminfo", "r");
@@ -3331,68 +3623,139 @@ void os::large_page_init() {
 #define SHM_HUGETLB 04000
 #endif
 
+#define shm_warning_format(format, ...)              \
+  do {                                               \
+    if (UseLargePages &&                             \
+        (!FLAG_IS_DEFAULT(UseLargePages) ||          \
+         !FLAG_IS_DEFAULT(UseSHM) ||                 \
+         !FLAG_IS_DEFAULT(LargePageSizeInBytes))) {  \
+      warning(format, __VA_ARGS__);                  \
+    }                                                \
+  } while (0)
+
+#define shm_warning(str) shm_warning_format("%s", str)
+
+#define shm_warning_with_errno(str)                \
+  do {                                             \
+    int err = errno;                               \
+    shm_warning_format(str " (error = %d)", err);  \
+  } while (0)
+
+static char* shmat_with_alignment(int shmid, size_t bytes, size_t alignment) {
+  assert(is_size_aligned(bytes, alignment), "Must be divisible by the alignment");
+
+  if (!is_size_aligned(alignment, SHMLBA)) {
+    assert(false, "Code below assumes that alignment is at least SHMLBA aligned");
+    return NULL;
+  }
+
+  // To ensure that we get 'alignment' aligned memory from shmat,
+  // we pre-reserve aligned virtual memory and then attach to that.
+
+  char* pre_reserved_addr = anon_mmap_aligned(bytes, alignment, NULL);
+  if (pre_reserved_addr == NULL) {
+    // Couldn't pre-reserve aligned memory.
+    shm_warning("Failed to pre-reserve aligned memory for shmat.");
+    return NULL;
+  }
+
+  // SHM_REMAP is needed to allow shmat to map over an existing mapping.
+  char* addr = (char*)shmat(shmid, pre_reserved_addr, SHM_REMAP);
+
+  if ((intptr_t)addr == -1) {
+    int err = errno;
+    shm_warning_with_errno("Failed to attach shared memory.");
+
+    assert(err != EACCES, "Unexpected error");
+    assert(err != EIDRM,  "Unexpected error");
+    assert(err != EINVAL, "Unexpected error");
+
+    // Since we don't know if the kernel unmapped the pre-reserved memory area
+    // we can't unmap it, since that would potentially unmap memory that was
+    // mapped from other threads.
+    return NULL;
+  }
+
+  return addr;
+}
+
+static char* shmat_at_address(int shmid, char* req_addr) {
+  if (!is_ptr_aligned(req_addr, SHMLBA)) {
+    assert(false, "Requested address needs to be SHMLBA aligned");
+    return NULL;
+  }
+
+  char* addr = (char*)shmat(shmid, req_addr, 0);
+
+  if ((intptr_t)addr == -1) {
+    shm_warning_with_errno("Failed to attach shared memory.");
+    return NULL;
+  }
+
+  return addr;
+}
+
+static char* shmat_large_pages(int shmid, size_t bytes, size_t alignment, char* req_addr) {
+  // If a req_addr has been provided, we assume that the caller has already aligned the address.
+  if (req_addr != NULL) {
+    assert(is_ptr_aligned(req_addr, os::large_page_size()), "Must be divisible by the large page size");
+    assert(is_ptr_aligned(req_addr, alignment), "Must be divisible by given alignment");
+    return shmat_at_address(shmid, req_addr);
+  }
+
+  // Since shmid has been setup with SHM_HUGETLB, shmat will automatically
+  // return large page size aligned memory addresses when req_addr == NULL.
+  // However, if the alignment is larger than the large page size, we have
+  // to manually ensure that the memory returned is 'alignment' aligned.
+  if (alignment > os::large_page_size()) {
+    assert(is_size_aligned(alignment, os::large_page_size()), "Must be divisible by the large page size");
+    return shmat_with_alignment(shmid, bytes, alignment);
+  } else {
+    return shmat_at_address(shmid, NULL);
+  }
+}
+
 char* os::Linux::reserve_memory_special_shm(size_t bytes, size_t alignment, char* req_addr, bool exec) {
   // "exec" is passed in but not used.  Creating the shared image for
   // the code cache doesn't have an SHM_X executable permission to check.
   assert(UseLargePages && UseSHM, "only for SHM large pages");
   assert(is_ptr_aligned(req_addr, os::large_page_size()), "Unaligned address");
+  assert(is_ptr_aligned(req_addr, alignment), "Unaligned address");
 
-  if (!is_size_aligned(bytes, os::large_page_size()) || alignment > os::large_page_size()) {
+  if (!is_size_aligned(bytes, os::large_page_size())) {
     return NULL; // Fallback to small pages.
   }
 
-  key_t key = IPC_PRIVATE;
-  char *addr;
-
-  bool warn_on_failure = UseLargePages &&
-                        (!FLAG_IS_DEFAULT(UseLargePages) ||
-                         !FLAG_IS_DEFAULT(UseSHM) ||
-                         !FLAG_IS_DEFAULT(LargePageSizeInBytes)
-                        );
-  char msg[128];
-
   // Create a large shared memory region to attach to based on size.
-  // Currently, size is the total size of the heap
-  int shmid = shmget(key, bytes, SHM_HUGETLB|IPC_CREAT|SHM_R|SHM_W);
+  // Currently, size is the total size of the heap.
+  int shmid = shmget(IPC_PRIVATE, bytes, SHM_HUGETLB|IPC_CREAT|SHM_R|SHM_W);
   if (shmid == -1) {
-     // Possible reasons for shmget failure:
-     // 1. shmmax is too small for Java heap.
-     //    > check shmmax value: cat /proc/sys/kernel/shmmax
-     //    > increase shmmax value: echo "0xffffffff" > /proc/sys/kernel/shmmax
-     // 2. not enough large page memory.
-     //    > check available large pages: cat /proc/meminfo
-     //    > increase amount of large pages:
-     //          echo new_value > /proc/sys/vm/nr_hugepages
-     //      Note 1: different Linux may use different name for this property,
-     //            e.g. on Redhat AS-3 it is "hugetlb_pool".
-     //      Note 2: it's possible there's enough physical memory available but
-     //            they are so fragmented after a long run that they can't
-     //            coalesce into large pages. Try to reserve large pages when
-     //            the system is still "fresh".
-     if (warn_on_failure) {
-       jio_snprintf(msg, sizeof(msg), "Failed to reserve shared memory (errno = %d).", errno);
-       warning("%s", msg);
-     }
-     return NULL;
+    // Possible reasons for shmget failure:
+    // 1. shmmax is too small for Java heap.
+    //    > check shmmax value: cat /proc/sys/kernel/shmmax
+    //    > increase shmmax value: echo "0xffffffff" > /proc/sys/kernel/shmmax
+    // 2. not enough large page memory.
+    //    > check available large pages: cat /proc/meminfo
+    //    > increase amount of large pages:
+    //          echo new_value > /proc/sys/vm/nr_hugepages
+    //      Note 1: different Linux may use different name for this property,
+    //            e.g. on Redhat AS-3 it is "hugetlb_pool".
+    //      Note 2: it's possible there's enough physical memory available but
+    //            they are so fragmented after a long run that they can't
+    //            coalesce into large pages. Try to reserve large pages when
+    //            the system is still "fresh".
+    shm_warning_with_errno("Failed to reserve shared memory.");
+    return NULL;
   }
 
-  // attach to the region
-  addr = (char*)shmat(shmid, req_addr, 0);
-  int err = errno;
+  // Attach to the region.
+  char* addr = shmat_large_pages(shmid, bytes, alignment, req_addr);
 
   // Remove shmid. If shmat() is successful, the actual shared memory segment
   // will be deleted when it's detached by shmdt() or when the process
   // terminates. If shmat() is not successful this will remove the shared
   // segment immediately.
   shmctl(shmid, IPC_RMID, NULL);
-
-  if ((intptr_t)addr == -1) {
-     if (warn_on_failure) {
-       jio_snprintf(msg, sizeof(msg), "Failed to attach shared memory (errno = %d).", err);
-       warning("%s", msg);
-     }
-     return NULL;
-  }
 
   return addr;
 }
@@ -3433,35 +3796,28 @@ char* os::Linux::reserve_memory_special_huge_tlbfs_only(size_t bytes, char* req_
   return addr;
 }
 
+// Reserve memory using mmap(MAP_HUGETLB).
+//  - bytes shall be a multiple of alignment.
+//  - req_addr can be NULL. If not NULL, it must be a multiple of alignment.
+//  - alignment sets the alignment at which memory shall be allocated.
+//     It must be a multiple of allocation granularity.
+// Returns address of memory or NULL. If req_addr was not NULL, will only return
+//  req_addr or NULL.
 char* os::Linux::reserve_memory_special_huge_tlbfs_mixed(size_t bytes, size_t alignment, char* req_addr, bool exec) {
   size_t large_page_size = os::large_page_size();
-
   assert(bytes >= large_page_size, "Shouldn't allocate large pages for small sizes");
 
-  // Allocate small pages.
+  assert(is_ptr_aligned(req_addr, alignment), "Must be");
+  assert(is_size_aligned(bytes, alignment), "Must be");
 
-  char* start;
-  if (req_addr != NULL) {
-    assert(is_ptr_aligned(req_addr, alignment), "Must be");
-    assert(is_size_aligned(bytes, alignment), "Must be");
-    start = os::reserve_memory(bytes, req_addr);
-    assert(start == NULL || start == req_addr, "Must be");
-  } else {
-    start = os::reserve_memory_aligned(bytes, alignment);
-  }
+  // First reserve - but not commit - the address range in small pages.
+  char* const start = anon_mmap_aligned(bytes, alignment, req_addr);
 
   if (start == NULL) {
     return NULL;
   }
 
   assert(is_ptr_aligned(start, alignment), "Must be");
-
-  if (MemTracker::tracking_level() > NMT_minimal) {
-    // os::reserve_memory_special will record this memory area.
-    // Need to release it here to prevent overlapping reservations.
-    Tracker tkr = MemTracker::get_virtual_memory_release_tracker();
-    tkr.record((address)start, bytes);
-  }
 
   char* end = start + bytes;
 
@@ -3482,9 +3838,9 @@ char* os::Linux::reserve_memory_special_huge_tlbfs_mixed(size_t bytes, size_t al
 
   int prot = exec ? PROT_READ|PROT_WRITE|PROT_EXEC : PROT_READ|PROT_WRITE;
 
-
   void* result;
 
+  // Commit small-paged leading area.
   if (start != lp_start) {
     result = ::mmap(start, lp_start - start, prot,
                     MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,
@@ -3495,11 +3851,12 @@ char* os::Linux::reserve_memory_special_huge_tlbfs_mixed(size_t bytes, size_t al
     }
   }
 
+  // Commit large-paged area.
   result = ::mmap(lp_start, lp_bytes, prot,
                   MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED|MAP_HUGETLB,
                   -1, 0);
   if (result == MAP_FAILED) {
-    warn_on_large_pages_failure(req_addr, bytes, errno);
+    warn_on_large_pages_failure(lp_start, lp_bytes, errno);
     // If the mmap above fails, the large pages region will be unmapped and we
     // have regions before and after with small pages. Release these regions.
     //
@@ -3512,6 +3869,7 @@ char* os::Linux::reserve_memory_special_huge_tlbfs_mixed(size_t bytes, size_t al
     return NULL;
   }
 
+  // Commit small-paged trailing area.
   if (lp_end != end) {
       result = ::mmap(lp_end, end - lp_end, prot,
                       MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,
@@ -3528,7 +3886,7 @@ char* os::Linux::reserve_memory_special_huge_tlbfs_mixed(size_t bytes, size_t al
 char* os::Linux::reserve_memory_special_huge_tlbfs(size_t bytes, size_t alignment, char* req_addr, bool exec) {
   assert(UseLargePages && UseHugeTLBFS, "only for Huge TLBFS large pages");
   assert(is_ptr_aligned(req_addr, alignment), "Must be");
-  assert(is_power_of_2(alignment), "Must be");
+  assert(is_size_aligned(alignment, os::vm_allocation_granularity()), "Must be");
   assert(is_power_of_2(os::large_page_size()), "Must be");
   assert(bytes >= os::large_page_size(), "Shouldn't allocate large pages for small sizes");
 
@@ -3707,6 +4065,10 @@ char* os::pd_attempt_reserve_memory_at(size_t bytes, char* requested_addr) {
 
 size_t os::read(int fd, void *buf, unsigned int nBytes) {
   return ::read(fd, buf, nBytes);
+}
+
+size_t os::read_at(int fd, void *buf, unsigned int nBytes, jlong offset) {
+  return ::pread(fd, buf, nBytes, offset);
 }
 
 // TODO-FIXME: reconcile Solaris' os::sleep with the linux variation.
@@ -4263,8 +4625,8 @@ static bool call_chained_handler(struct sigaction *actp, int sig,
       sigaddset(&(actp->sa_mask), sig);
     }
 
-    sa_handler_t hand;
-    sa_sigaction_t sa;
+    sa_handler_t hand = NULL;
+    sa_sigaction_t sa = NULL;
     bool siginfo_flag_set = (actp->sa_flags & SA_SIGINFO) != 0;
     // retrieve the chained handler
     if (siginfo_flag_set) {
@@ -4469,7 +4831,7 @@ jlong os::Linux::fast_thread_cpu_time(clockid_t clockid) {
 
 static const char* get_signal_handler_name(address handler,
                                            char* buf, int buflen) {
-  int offset;
+  int offset = 0;
   bool found = os::dll_address_to_library_name(handler, buf, buflen, &offset);
   if (found) {
     // skip directory names
@@ -4670,10 +5032,9 @@ const char* os::exception_name(int exception_code, char* buf, size_t size) {
   }
 }
 
-// this is called _before_ the most of global arguments have been parsed
+// this is called _before_ most of the global arguments have been parsed
 void os::init(void) {
   char dummy;   /* used to get a guess on initial stack address */
-//  first_hrtime = gethrtime();
 
   // With LinuxThreads the JavaMain thread pid (primordial thread)
   // is different than the pid of the java launcher thread.
@@ -4700,7 +5061,7 @@ void os::init(void) {
 
   Linux::initialize_system_info();
 
-  // main_thread points to the aboriginal thread
+  // _main_thread points to the thread that created/loaded the JVM.
   Linux::_main_thread = pthread_self();
 
   Linux::clock_init();
@@ -4735,6 +5096,11 @@ void os::init(void) {
     StackRedPages = 1;
     StackShadowPages = round_to((StackShadowPages*Linux::vm_default_page_size()), vm_page_size()) / vm_page_size();
   }
+
+  // retrieve entry point for pthread_setname_np
+  Linux::_pthread_setname_np =
+    (int(*)(pthread_t, const char*))dlsym(RTLD_DEFAULT, "pthread_setname_np");
+
 }
 
 // To install functions for atexit system call
@@ -4742,6 +5108,10 @@ extern "C" {
   static void perfMemory_exit_helper() {
     perfMemory_exit();
   }
+}
+
+void os::pd_init_container_support() {
+  OSContainer::init();
 }
 
 // this is called _after_ the global arguments have been parsed
@@ -4805,7 +5175,7 @@ jint os::init_2(void)
 
   Linux::capture_initial_stack(JavaThread::stack_size_at_create());
 
-#if defined(IA32)
+#if defined(IA32) && !defined(ZERO)
   workaround_expand_exec_shield_cs_limit();
 #endif
 
@@ -4908,17 +5278,91 @@ void os::make_polling_page_readable(void) {
   }
 };
 
+static int os_cpu_count(const cpu_set_t* cpus) {
+  int count = 0;
+  // only look up to the number of configured processors
+  for (int i = 0; i < os::processor_count(); i++) {
+    if (CPU_ISSET(i, cpus)) {
+      count++;
+    }
+  }
+  return count;
+}
+
+// Get the current number of available processors for this process.
+// This value can change at any time during a process's lifetime.
+// sched_getaffinity gives an accurate answer as it accounts for cpusets.
+// If anything goes wrong we fallback to returning the number of online
+// processors - which can be greater than the number available to the process.
+int os::Linux::active_processor_count() {
+  cpu_set_t cpus;  // can represent at most 1024 (CPU_SETSIZE) processors
+  int cpus_size = sizeof(cpu_set_t);
+  int cpu_count = 0;
+
+  // pid 0 means the current thread - which we have to assume represents the process
+  if (sched_getaffinity(0, cpus_size, &cpus) == 0) {
+    cpu_count = os_cpu_count(&cpus);
+    if (PrintActiveCpus) {
+      tty->print_cr("active_processor_count: sched_getaffinity processor count: %d", cpu_count);
+    }
+  }
+  else {
+    cpu_count = ::sysconf(_SC_NPROCESSORS_ONLN);
+    warning("sched_getaffinity failed (%s)- using online processor count (%d) "
+            "which may exceed available processors", strerror(errno), cpu_count);
+  }
+
+  assert(cpu_count > 0 && cpu_count <= os::processor_count(), "sanity check");
+  return cpu_count;
+}
+
+// Determine the active processor count from one of
+// three different sources:
+//
+// 1. User option -XX:ActiveProcessorCount
+// 2. kernel os calls (sched_getaffinity or sysconf(_SC_NPROCESSORS_ONLN)
+// 3. extracted from cgroup cpu subsystem (shares and quotas)
+//
+// Option 1, if specified, will always override.
+// If the cgroup subsystem is active and configured, we
+// will return the min of the cgroup and option 2 results.
+// This is required since tools, such as numactl, that
+// alter cpu affinity do not update cgroup subsystem
+// cpuset configuration files.
 int os::active_processor_count() {
-  // Linux doesn't yet have a (official) notion of processor sets,
-  // so just return the number of online processors.
-  int online_cpus = ::sysconf(_SC_NPROCESSORS_ONLN);
-  assert(online_cpus > 0 && online_cpus <= processor_count(), "sanity check");
-  return online_cpus;
+  // User has overridden the number of active processors
+  if (ActiveProcessorCount > 0) {
+    if (PrintActiveCpus) {
+      tty->print_cr("active_processor_count: "
+                    "active processor count set by user : %d",
+                    ActiveProcessorCount);
+    }
+    return ActiveProcessorCount;
+  }
+
+  int active_cpus;
+  if (OSContainer::is_containerized()) {
+    active_cpus = OSContainer::active_processor_count();
+    if (PrintActiveCpus) {
+      tty->print_cr("active_processor_count: determined by OSContainer: %d",
+                     active_cpus);
+    }
+  } else {
+    active_cpus = os::Linux::active_processor_count();
+  }
+
+  return active_cpus;
 }
 
 void os::set_native_thread_name(const char *name) {
-  // Not yet implemented.
-  return;
+  if (Linux::_pthread_setname_np) {
+    char buf [16]; // according to glibc manpage, 16 chars incl. '/0'
+    snprintf(buf, sizeof(buf), "%s", name);
+    buf[sizeof(buf) - 1] = '\0';
+    const int rc = Linux::_pthread_setname_np(pthread_self(), buf);
+    // ERANGE should not happen; all other errors should just be ignored.
+    assert(rc != ERANGE, "pthread_setname_np failed");
+  }
 }
 
 bool os::distribute_processes(uint length, uint* distribution) {
@@ -5098,8 +5542,7 @@ bool os::dir_is_empty(const char* path) {
 
   /* Scan the directory */
   bool result = true;
-  char buf[sizeof(struct dirent) + MAX_PATH];
-  while (result && (ptr = ::readdir(dir)) != NULL) {
+  while (result && (ptr = readdir(dir)) != NULL) {
     if (strcmp(ptr->d_name, ".") != 0 && strcmp(ptr->d_name, "..") != 0) {
       result = false;
     }
@@ -5354,8 +5797,6 @@ jlong os::thread_cpu_time(Thread *thread, bool user_sys_cpu_time) {
 PRAGMA_DIAG_PUSH
 PRAGMA_FORMAT_NONLITERAL_IGNORED
 static jlong slow_thread_cpu_time(Thread *thread, bool user_sys_cpu_time) {
-  static bool proc_task_unchecked = true;
-  static const char *proc_stat_path = "/proc/%d/stat";
   pid_t  tid = thread->osthread()->thread_id();
   char *s;
   char stat[2048];
@@ -5368,23 +5809,7 @@ static jlong slow_thread_cpu_time(Thread *thread, bool user_sys_cpu_time) {
   long ldummy;
   FILE *fp;
 
-  // The /proc/<tid>/stat aggregates per-process usage on
-  // new Linux kernels 2.6+ where NPTL is supported.
-  // The /proc/self/task/<tid>/stat still has the per-thread usage.
-  // See bug 6328462.
-  // There possibly can be cases where there is no directory
-  // /proc/self/task, so we check its availability.
-  if (proc_task_unchecked && os::Linux::is_NPTL()) {
-    // This is executed only once
-    proc_task_unchecked = false;
-    fp = fopen("/proc/self/task", "r");
-    if (fp != NULL) {
-      proc_stat_path = "/proc/self/task/%d/stat";
-      fclose(fp);
-    }
-  }
-
-  sprintf(proc_name, proc_stat_path, tid);
+  snprintf(proc_name, 64, "/proc/self/task/%d/stat", tid);
   fp = fopen(proc_name, "r");
   if ( fp == NULL ) return -1;
   statlen = fread(stat, 1, 2047, fp);
@@ -5922,9 +6347,11 @@ void Parker::unpark() {
         status = pthread_mutex_unlock(_mutex);
         assert (status == 0, "invariant");
       } else {
+        // must capture correct index before unlocking
+        int index = _cur_index;
         status = pthread_mutex_unlock(_mutex);
         assert (status == 0, "invariant");
-        status = pthread_cond_signal (&_cond[_cur_index]);
+        status = pthread_cond_signal (&_cond[index]);
         assert (status == 0, "invariant");
       }
     } else {
@@ -5944,10 +6371,16 @@ extern char** environ;
 // or -1 on failure (e.g. can't fork a new process).
 // Unlike system(), this function can be called from signal handler. It
 // doesn't block SIGINT et al.
-int os::fork_and_exec(char* cmd) {
+int os::fork_and_exec(char* cmd, bool use_vfork_if_available) {
   const char * argv[4] = {"sh", "-c", cmd, NULL};
 
-  pid_t pid = fork();
+  pid_t pid ;
+
+  if (use_vfork_if_available) {
+    pid = vfork();
+  } else {
+    pid = fork();
+  }
 
   if (pid < 0) {
     // fork failed
@@ -6100,47 +6533,100 @@ class TestReserveMemorySpecial : AllStatic {
     }
   }
 
-  static void test_reserve_memory_special_huge_tlbfs_mixed(size_t size, size_t alignment) {
-    if (!UseHugeTLBFS) {
-        return;
-    }
-
-    test_log("test_reserve_memory_special_huge_tlbfs_mixed(" SIZE_FORMAT ", " SIZE_FORMAT ")",
-        size, alignment);
-
-    assert(size >= os::large_page_size(), "Incorrect input to test");
-
-    char* addr = os::Linux::reserve_memory_special_huge_tlbfs_mixed(size, alignment, NULL, false);
-
-    if (addr != NULL) {
-      small_page_write(addr, size);
-
-      os::Linux::release_memory_special_huge_tlbfs(addr, size);
-    }
-  }
-
-  static void test_reserve_memory_special_huge_tlbfs_mixed_all_alignments(size_t size) {
-    size_t lp = os::large_page_size();
-    size_t ag = os::vm_allocation_granularity();
-
-    for (size_t alignment = ag; is_size_aligned(size, alignment); alignment *= 2) {
-      test_reserve_memory_special_huge_tlbfs_mixed(size, alignment);
-    }
-  }
-
   static void test_reserve_memory_special_huge_tlbfs_mixed() {
     size_t lp = os::large_page_size();
     size_t ag = os::vm_allocation_granularity();
 
-    test_reserve_memory_special_huge_tlbfs_mixed_all_alignments(lp);
-    test_reserve_memory_special_huge_tlbfs_mixed_all_alignments(lp + ag);
-    test_reserve_memory_special_huge_tlbfs_mixed_all_alignments(lp + lp / 2);
-    test_reserve_memory_special_huge_tlbfs_mixed_all_alignments(lp * 2);
-    test_reserve_memory_special_huge_tlbfs_mixed_all_alignments(lp * 2 + ag);
-    test_reserve_memory_special_huge_tlbfs_mixed_all_alignments(lp * 2 - ag);
-    test_reserve_memory_special_huge_tlbfs_mixed_all_alignments(lp * 2 + lp / 2);
-    test_reserve_memory_special_huge_tlbfs_mixed_all_alignments(lp * 10);
-    test_reserve_memory_special_huge_tlbfs_mixed_all_alignments(lp * 10 + lp / 2);
+    // sizes to test
+    const size_t sizes[] = {
+      lp, lp + ag, lp + lp / 2, lp * 2,
+      lp * 2 + ag, lp * 2 - ag, lp * 2 + lp / 2,
+      lp * 10, lp * 10 + lp / 2
+    };
+    const int num_sizes = sizeof(sizes) / sizeof(size_t);
+
+    // For each size/alignment combination, we test three scenarios:
+    // 1) with req_addr == NULL
+    // 2) with a non-null req_addr at which we expect to successfully allocate
+    // 3) with a non-null req_addr which contains a pre-existing mapping, at which we
+    //    expect the allocation to either fail or to ignore req_addr
+
+    // Pre-allocate two areas; they shall be as large as the largest allocation
+    //  and aligned to the largest alignment we will be testing.
+    const size_t mapping_size = sizes[num_sizes - 1] * 2;
+    char* const mapping1 = (char*) ::mmap(NULL, mapping_size,
+      PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,
+      -1, 0);
+    assert(mapping1 != MAP_FAILED, "should work");
+
+    char* const mapping2 = (char*) ::mmap(NULL, mapping_size,
+      PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,
+      -1, 0);
+    assert(mapping2 != MAP_FAILED, "should work");
+
+    // Unmap the first mapping, but leave the second mapping intact: the first
+    // mapping will serve as a value for a "good" req_addr (case 2). The second
+    // mapping, still intact, as "bad" req_addr (case 3).
+    ::munmap(mapping1, mapping_size);
+
+    // Case 1
+    test_log("%s, req_addr NULL:", __FUNCTION__);
+    test_log("size            align           result");
+
+    for (int i = 0; i < num_sizes; i++) {
+      const size_t size = sizes[i];
+      for (size_t alignment = ag; is_size_aligned(size, alignment); alignment *= 2) {
+        char* p = os::Linux::reserve_memory_special_huge_tlbfs_mixed(size, alignment, NULL, false);
+        test_log(SIZE_FORMAT_HEX " " SIZE_FORMAT_HEX " ->  " PTR_FORMAT " %s",
+            size, alignment, p, (p != NULL ? "" : "(failed)"));
+        if (p != NULL) {
+          assert(is_ptr_aligned(p, alignment), "must be");
+          small_page_write(p, size);
+          os::Linux::release_memory_special_huge_tlbfs(p, size);
+        }
+      }
+    }
+
+    // Case 2
+    test_log("%s, req_addr non-NULL:", __FUNCTION__);
+    test_log("size            align           req_addr         result");
+
+    for (int i = 0; i < num_sizes; i++) {
+      const size_t size = sizes[i];
+      for (size_t alignment = ag; is_size_aligned(size, alignment); alignment *= 2) {
+        char* const req_addr = (char*) align_ptr_up(mapping1, alignment);
+        char* p = os::Linux::reserve_memory_special_huge_tlbfs_mixed(size, alignment, req_addr, false);
+        test_log(SIZE_FORMAT_HEX " " SIZE_FORMAT_HEX " " PTR_FORMAT " ->  " PTR_FORMAT " %s",
+            size, alignment, req_addr, p,
+            ((p != NULL ? (p == req_addr ? "(exact match)" : "") : "(failed)")));
+        if (p != NULL) {
+          assert(p == req_addr, "must be");
+          small_page_write(p, size);
+          os::Linux::release_memory_special_huge_tlbfs(p, size);
+        }
+      }
+    }
+
+    // Case 3
+    test_log("%s, req_addr non-NULL with preexisting mapping:", __FUNCTION__);
+    test_log("size            align           req_addr         result");
+
+    for (int i = 0; i < num_sizes; i++) {
+      const size_t size = sizes[i];
+      for (size_t alignment = ag; is_size_aligned(size, alignment); alignment *= 2) {
+        char* const req_addr = (char*) align_ptr_up(mapping2, alignment);
+        char* p = os::Linux::reserve_memory_special_huge_tlbfs_mixed(size, alignment, req_addr, false);
+        test_log(SIZE_FORMAT_HEX " " SIZE_FORMAT_HEX " " PTR_FORMAT " ->  " PTR_FORMAT " %s",
+            size, alignment, req_addr, p,
+            ((p != NULL ? "" : "(failed)")));
+        // as the area around req_addr contains already existing mappings, the API should always
+        // return NULL (as per contract, it cannot return another address)
+        assert(p == NULL, "must be");
+      }
+    }
+
+    ::munmap(mapping2, mapping_size);
+
   }
 
   static void test_reserve_memory_special_huge_tlbfs() {

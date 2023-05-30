@@ -328,7 +328,8 @@ public class FileFontStrike extends PhysicalStrike {
                                                   int style,
                                                   int size,
                                                   int glyphCode,
-                                                  boolean fracMetrics);
+                                                  boolean fracMetrics,
+                                                  int fontDataSize);
 
     long getGlyphImageFromWindows(int glyphCode) {
         String family = fileFont.getFamilyName(null);
@@ -337,7 +338,8 @@ public class FileFontStrike extends PhysicalStrike {
         int size = intPtSize;
         long ptr = _getGlyphImageFromWindows
             (family, style, size, glyphCode,
-             desc.fmHint == INTVAL_FRACTIONALMETRICS_ON);
+             desc.fmHint == INTVAL_FRACTIONALMETRICS_ON,
+             ((TrueTypeFont)fileFont).fontDataSize);
         if (ptr != 0) {
             /* Get the advance from the JDK rasterizer. This is mostly
              * necessary for the fractional metrics case, but there are
@@ -351,6 +353,12 @@ public class FileFontStrike extends PhysicalStrike {
                                         advance);
             return ptr;
         } else {
+            if (FontUtilities.isLogging()) {
+                FontUtilities.getLogger().warning(
+                        "Failed to render glyph using GDI: code=" + glyphCode
+                                + ", fontFamily=" + family + ", style=" + style
+                                + ", size=" + size);
+            }
             return fileFont.getGlyphImage(pScalerContext, glyphCode);
         }
     }
@@ -420,14 +428,13 @@ public class FileFontStrike extends PhysicalStrike {
 
     /* The following method is called from CompositeStrike as a special case.
      */
-    private static final int SLOTZEROMAX = 0xffffff;
     int getSlot0GlyphImagePtrs(int[] glyphCodes, long[] images, int len) {
 
         int convertedCnt = 0;
 
         for (int i=0; i<len; i++) {
             int glyphCode = glyphCodes[i];
-            if (glyphCode >= SLOTZEROMAX) {
+            if (glyphCode >>> 24 != 0) {
                 return convertedCnt;
             } else {
                 convertedCnt++;
@@ -454,6 +461,17 @@ public class FileFontStrike extends PhysicalStrike {
 
     /* Only look in the cache */
     long getCachedGlyphPtr(int glyphCode) {
+        try {
+            return getCachedGlyphPtrInternal(glyphCode);
+        } catch (Exception e) {
+          NullFontScaler nullScaler =
+             (NullFontScaler)FontScaler.getNullScaler();
+          long nullSC = NullFontScaler.getNullScalerContext();
+          return nullScaler.getGlyphImage(nullSC, glyphCode);
+        }
+    }
+
+    private long getCachedGlyphPtrInternal(int glyphCode) {
         switch (glyphCacheFormat) {
             case INTARRAY:
                 return intGlyphImages[glyphCode] & INTMASK;
@@ -481,6 +499,27 @@ public class FileFontStrike extends PhysicalStrike {
     }
 
     private synchronized long setCachedGlyphPtr(int glyphCode, long glyphPtr) {
+        try {
+            return setCachedGlyphPtrInternal(glyphCode, glyphPtr);
+        } catch (Exception e) {
+            switch (glyphCacheFormat) {
+                case INTARRAY:
+                case SEGINTARRAY:
+                    StrikeCache.freeIntPointer((int)glyphPtr);
+                    break;
+                case LONGARRAY:
+                case SEGLONGARRAY:
+                    StrikeCache.freeLongPointer(glyphPtr);
+                    break;
+             }
+             NullFontScaler nullScaler =
+                 (NullFontScaler)FontScaler.getNullScaler();
+             long nullSC = NullFontScaler.getNullScalerContext();
+             return nullScaler.getGlyphImage(nullSC, glyphCode);
+        }
+    }
+
+    private long setCachedGlyphPtrInternal(int glyphCode, long glyphPtr) {
         switch (glyphCacheFormat) {
             case INTARRAY:
                 if (intGlyphImages[glyphCode] == 0) {

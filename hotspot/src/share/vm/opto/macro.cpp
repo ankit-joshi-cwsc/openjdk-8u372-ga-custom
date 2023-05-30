@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -401,7 +401,7 @@ Node *PhaseMacroExpand::value_from_mem_phi(Node *mem, BasicType ft, const Type *
   for (DUIterator_Fast kmax, k = region->fast_outs(kmax); k < kmax; k++) {
     Node* phi = region->fast_out(k);
     if (phi->is_Phi() && phi != mem &&
-        phi->as_Phi()->is_same_inst_field(phi_type, instance_id, alias_idx, offset)) {
+        phi->as_Phi()->is_same_inst_field(phi_type, (int)mem->_idx, instance_id, alias_idx, offset)) {
       return phi;
     }
   }
@@ -420,7 +420,7 @@ Node *PhaseMacroExpand::value_from_mem_phi(Node *mem, BasicType ft, const Type *
   GrowableArray <Node *> values(length, length, NULL, false);
 
   // create a new Phi for the value
-  PhiNode *phi = new (C) PhiNode(mem->in(0), phi_type, NULL, instance_id, alias_idx, offset);
+  PhiNode *phi = new (C) PhiNode(mem->in(0), phi_type, NULL, mem->_idx, instance_id, alias_idx, offset);
   transform_later(phi);
   value_phis->push(phi, mem->_idx);
 
@@ -693,10 +693,10 @@ bool PhaseMacroExpand::scalar_replacement(AllocateNode *alloc, GrowableArray <Sa
   ciKlass* klass = NULL;
   ciInstanceKlass* iklass = NULL;
   int nfields = 0;
-  int array_base;
-  int element_size;
-  BasicType basic_elem_type;
-  ciType* elem_type;
+  int array_base = 0;
+  int element_size = 0;
+  BasicType basic_elem_type = T_ILLEGAL;
+  ciType* elem_type = NULL;
 
   Node* res = alloc->result_cast();
   assert(res == NULL || res->is_CheckCastPP(), "unexpected AllocateNode result");
@@ -1177,10 +1177,10 @@ void PhaseMacroExpand::expand_allocate_common(
   // We need a Region and corresponding Phi's to merge the slow-path and fast-path results.
   // they will not be used if "always_slow" is set
   enum { slow_result_path = 1, fast_result_path = 2 };
-  Node *result_region;
-  Node *result_phi_rawmem;
-  Node *result_phi_rawoop;
-  Node *result_phi_i_o;
+  Node *result_region = NULL;
+  Node *result_phi_rawmem = NULL;
+  Node *result_phi_rawoop = NULL;
+  Node *result_phi_i_o = NULL;
 
   // The initial slow comparison is a size check, the comparison
   // we want to do is a BoolTest::gt
@@ -1385,7 +1385,12 @@ void PhaseMacroExpand::expand_allocate_common(
     // MemBarStoreStore so that stores that initialize this object
     // can't be reordered with a subsequent store that makes this
     // object accessible by other threads.
+#ifndef AARCH64
     if (init == NULL || (!init->is_complete_with_arraycopy() && !init->does_not_escape())) {
+#else
+    if (!alloc->does_not_escape_thread() &&
+        (init == NULL || !init->is_complete_with_arraycopy())) {
+#endif
       if (init == NULL || init->req() < InitializeNode::RawStores) {
         // No InitializeNode or no stores captured by zeroing
         // elimination. Simply add the MemBarStoreStore after object
@@ -1775,7 +1780,7 @@ Node* PhaseMacroExpand::prefetch_allocation(Node* i_o, Node*& needgc_false,
       i_o = pf_phi_abio;
    } else if( UseTLAB && AllocatePrefetchStyle == 3 ) {
       // Insert a prefetch for each allocation.
-      // This code is used for Sparc with BIS.
+      // This code is used to generate 1 prefetch instruction per cache line.
       Node *pf_region = new (C) RegionNode(3);
       Node *pf_phi_rawmem = new (C) PhiNode( pf_region, Type::MEMORY,
                                              TypeRawPtr::BOTTOM );
@@ -1791,6 +1796,8 @@ Node* PhaseMacroExpand::prefetch_allocation(Node* i_o, Node*& needgc_false,
       transform_later(cache_adr);
       cache_adr = new (C) CastP2XNode(needgc_false, cache_adr);
       transform_later(cache_adr);
+      // Address is aligned to execute prefetch to the beginning of cache line size
+      // (it is important when BIS instruction is used on SPARC as prefetch).
       Node* mask = _igvn.MakeConX(~(intptr_t)(step_size-1));
       cache_adr = new (C) AndXNode(cache_adr, mask);
       transform_later(cache_adr);

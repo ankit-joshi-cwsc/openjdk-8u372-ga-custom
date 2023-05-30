@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -28,6 +28,7 @@
 #include "c1/c1_Instruction.hpp"
 #include "c1/c1_LIR.hpp"
 #include "ci/ciMethodData.hpp"
+#include "jfr/support/jfrIntrinsics.hpp"
 #include "utilities/sizes.hpp"
 
 // The classes responsible for code emission and register allocation
@@ -241,6 +242,7 @@ class LIRGenerator: public InstructionVisitor, public BlockClosure {
 
   void do_RegisterFinalizer(Intrinsic* x);
   void do_isInstance(Intrinsic* x);
+  void do_isPrimitive(Intrinsic* x);
   void do_getClass(Intrinsic* x);
   void do_currentThread(Intrinsic* x);
   void do_MathIntrinsic(Intrinsic* x);
@@ -308,7 +310,7 @@ class LIRGenerator: public InstructionVisitor, public BlockClosure {
   // is_strictfp is only needed for mul and div (and only generates different code on i486)
   void arithmetic_op(Bytecodes::Code code, LIR_Opr result, LIR_Opr left, LIR_Opr right, bool is_strictfp, LIR_Opr tmp, CodeEmitInfo* info = NULL);
   // machine dependent.  returns true if it emitted code for the multiply
-  bool strength_reduce_multiply(LIR_Opr left, int constant, LIR_Opr result, LIR_Opr tmp);
+  bool strength_reduce_multiply(LIR_Opr left, jint constant, LIR_Opr result, LIR_Opr tmp);
 
   void store_stack_parameter (LIR_Opr opr, ByteSize offset_from_sp_in_bytes);
 
@@ -410,7 +412,7 @@ class LIRGenerator: public InstructionVisitor, public BlockClosure {
   }
 
   static LIR_Condition lir_cond(If::Condition cond) {
-    LIR_Condition l;
+    LIR_Condition l = lir_cond_unknown;
     switch (cond) {
     case If::eql: l = lir_cond_equal;        break;
     case If::neq: l = lir_cond_notEqual;     break;
@@ -420,6 +422,7 @@ class LIRGenerator: public InstructionVisitor, public BlockClosure {
     case If::gtr: l = lir_cond_greater;      break;
     case If::aeq: l = lir_cond_aboveEqual;   break;
     case If::beq: l = lir_cond_belowEqual;   break;
+    default: fatal("You must pass valid If::Condition");
     };
     return l;
   }
@@ -435,9 +438,9 @@ class LIRGenerator: public InstructionVisitor, public BlockClosure {
   void do_SwitchRanges(SwitchRangeArray* x, LIR_Opr value, BlockBegin* default_sux);
 
   void do_RuntimeCall(address routine, int expected_arguments, Intrinsic* x);
-#ifdef TRACE_HAVE_INTRINSICS
-  void do_ThreadIDIntrinsic(Intrinsic* x);
+#ifdef JFR_HAVE_INTRINSICS
   void do_ClassIDIntrinsic(Intrinsic* x);
+  void do_getEventWriter(Intrinsic* x);
 #endif
   ciKlass* profile_type(ciMethodData* md, int md_first_offset, int md_offset, intptr_t profiled_k,
                         Value arg, LIR_Opr& mdp, bool not_null, ciKlass* signature_at_call_k,
@@ -445,6 +448,7 @@ class LIRGenerator: public InstructionVisitor, public BlockClosure {
   void profile_arguments(ProfileCall* x);
   void profile_parameters(Base* x);
   void profile_parameters_at_call(ProfileCall* x);
+  LIR_Opr maybe_mask_boolean(StoreIndexed* x, LIR_Opr array, LIR_Opr value, CodeEmitInfo*& null_check_info);
 
  public:
   Compilation*  compilation() const              { return _compilation; }

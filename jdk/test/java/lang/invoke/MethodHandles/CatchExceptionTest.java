@@ -41,6 +41,7 @@ import java.util.function.Supplier;
  * @library /lib/testlibrary/jsr292 /lib/testlibrary/
  * @compile CatchExceptionTest.java
  * @run main/othervm -esa test.java.lang.invoke.MethodHandles.CatchExceptionTest
+ * @key randomness
  */
 public class CatchExceptionTest {
 
@@ -168,6 +169,11 @@ public class CatchExceptionTest {
         try {
             returned = target.invokeWithArguments(args);
         } catch (Throwable ex) {
+            if (CodeCacheOverflowProcessor.isThrowableCausedByVME(ex)) {
+                // This error will be treated by CodeCacheOverflowProcessor
+                // to prevent the test from failing because of code cache overflow.
+                throw new Error(ex);
+            }
             testCase.assertCatch(ex);
             returned = ex;
         }

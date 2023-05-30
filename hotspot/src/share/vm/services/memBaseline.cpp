@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -59,6 +59,15 @@ int compare_malloc_site(const MallocSite& s1, const MallocSite& s2) {
   return s1.call_stack()->compare(*s2.call_stack());
 }
 
+// Sort into allocation site addresses and memory type order for baseline comparison
+int compare_malloc_site_and_type(const MallocSite& s1, const MallocSite& s2) {
+  int res = compare_malloc_site(s1, s2);
+  if (res == 0) {
+    res = (int)(s1.flag() - s2.flag());
+  }
+
+  return res;
+}
 
 int compare_virtual_memory_site(const VirtualMemoryAllocationSite& s1,
   const VirtualMemoryAllocationSite& s2) {
@@ -200,7 +209,7 @@ bool MemBaseline::aggregate_virtual_memory_allocation_sites() {
   const ReservedMemoryRegion* rgn;
   VirtualMemoryAllocationSite* site;
   while ((rgn = itr.next()) != NULL) {
-    VirtualMemoryAllocationSite tmp(*rgn->call_stack());
+    VirtualMemoryAllocationSite tmp(*rgn->call_stack(), rgn->flag());
     site = allocation_sites.find(tmp);
     if (site == NULL) {
       LinkedListNode<VirtualMemoryAllocationSite>* node =
@@ -224,6 +233,9 @@ MallocSiteIterator MemBaseline::malloc_sites(SortingOrder order) {
       break;
     case by_site:
       malloc_sites_to_allocation_site_order();
+      break;
+    case by_site_and_type:
+      malloc_sites_to_allocation_site_and_type_order();
       break;
     case by_address:
     default:
@@ -263,13 +275,24 @@ void MemBaseline::malloc_sites_to_size_order() {
 }
 
 void MemBaseline::malloc_sites_to_allocation_site_order() {
-  if (_malloc_sites_order != by_site) {
+  if (_malloc_sites_order != by_site && _malloc_sites_order != by_site_and_type) {
     SortedLinkedList<MallocSite, compare_malloc_site> tmp;
     // Add malloc sites to sorted linked list to sort into site (address) order
     tmp.move(&_malloc_sites);
     _malloc_sites.set_head(tmp.head());
     tmp.set_head(NULL);
     _malloc_sites_order = by_site;
+  }
+}
+
+void MemBaseline::malloc_sites_to_allocation_site_and_type_order() {
+  if (_malloc_sites_order != by_site_and_type) {
+    SortedLinkedList<MallocSite, compare_malloc_site_and_type> tmp;
+    // Add malloc sites to sorted linked list to sort into site (address) order
+    tmp.move(&_malloc_sites);
+    _malloc_sites.set_head(tmp.head());
+    tmp.set_head(NULL);
+    _malloc_sites_order = by_site_and_type;
   }
 }
 

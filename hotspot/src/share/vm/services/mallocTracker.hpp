@@ -69,8 +69,9 @@ class MemoryCounter VALUE_OBJ_CLASS_SPEC {
     }
   }
 
-  inline void resize(long sz) {
+  inline void resize(ssize_t sz) {
     if (sz != 0) {
+      assert(sz >= 0 || _size >= size_t(-sz), "Must be");
       Atomic::add((MemoryCounterType)sz, (volatile MemoryCounterType*)&_size);
       DEBUG_ONLY(_peak_size = MAX2(_size, _peak_size);)
     }
@@ -112,7 +113,7 @@ class MallocMemory VALUE_OBJ_CLASS_SPEC {
     _arena.deallocate(0);
   }
 
-  inline void record_arena_size_change(long sz) {
+  inline void record_arena_size_change(ssize_t sz) {
     _arena.resize(sz);
   }
 
@@ -202,7 +203,7 @@ class MallocMemorySummary : AllStatic {
      as_snapshot()->by_type(flag)->record_arena_free();
    }
 
-   static inline void record_arena_size_change(long size, MEMFLAGS flag) {
+   static inline void record_arena_size_change(ssize_t size, MEMFLAGS flag) {
      as_snapshot()->by_type(flag)->record_arena_size_change(size);
    }
 
@@ -268,7 +269,7 @@ class MallocHeader VALUE_OBJ_CLASS_SPEC {
     if (level == NMT_detail) {
       size_t bucket_idx;
       size_t pos_idx;
-      if (record_malloc_site(stack, size, &bucket_idx, &pos_idx)) {
+      if (record_malloc_site(stack, size, &bucket_idx, &pos_idx, flags)) {
         assert(bucket_idx <= MAX_MALLOCSITE_TABLE_SIZE, "Overflow bucket index");
         assert(pos_idx <= MAX_BUCKET_LENGTH, "Overflow bucket position index");
         _bucket_idx = bucket_idx;
@@ -292,7 +293,7 @@ class MallocHeader VALUE_OBJ_CLASS_SPEC {
     _size = size;
   }
   bool record_malloc_site(const NativeCallStack& stack, size_t size,
-    size_t* bucket_idx, size_t* pos_idx) const;
+    size_t* bucket_idx, size_t* pos_idx, MEMFLAGS flags) const;
 };
 
 
@@ -356,7 +357,7 @@ class MallocTracker : AllStatic {
     MallocMemorySummary::record_arena_free(flags);
   }
 
-  static inline void record_arena_size_change(int size, MEMFLAGS flags) {
+  static inline void record_arena_size_change(ssize_t size, MEMFLAGS flags) {
     MallocMemorySummary::record_arena_size_change(size, flags);
   }
  private:

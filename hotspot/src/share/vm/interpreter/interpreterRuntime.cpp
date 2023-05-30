@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -58,6 +58,9 @@
 #include "utilities/events.hpp"
 #ifdef TARGET_ARCH_x86
 # include "vm_version_x86.hpp"
+#endif
+#ifdef TARGET_ARCH_aarch64
+# include "vm_version_aarch64.hpp"
 #endif
 #ifdef TARGET_ARCH_sparc
 # include "vm_version_sparc.hpp"
@@ -320,6 +323,8 @@ IRT_ENTRY(void, InterpreterRuntime::throw_StackOverflowError(JavaThread* thread)
   Handle exception = get_preinitialized_exception(
                                  SystemDictionary::StackOverflowError_klass(),
                                  CHECK);
+  // Increment counter for hs_err file reporting
+  Atomic::inc(&Exceptions::_stack_overflow_errors);
   THROW_HANDLE(exception);
 IRT_END
 
@@ -445,9 +450,18 @@ IRT_ENTRY(address, InterpreterRuntime::exception_handler_for_exception(JavaThrea
 
     // tracing
     if (TraceExceptions) {
-      ttyLocker ttyl;
       ResourceMark rm(thread);
-      tty->print_cr("Exception <%s> (" INTPTR_FORMAT ")", h_exception->print_value_string(), (address)h_exception());
+      Symbol* message = java_lang_Throwable::detail_message(h_exception());
+      ttyLocker ttyl;  // Lock after getting the detail message
+      if (message != NULL) {
+        tty->print_cr("Exception <%s: %s> (" INTPTR_FORMAT ")",
+                      h_exception->print_value_string(), message->as_C_string(),
+                      (address)h_exception());
+      } else {
+        tty->print_cr("Exception <%s> (" INTPTR_FORMAT ")",
+                      h_exception->print_value_string(),
+                      (address)h_exception());
+      }
       tty->print_cr(" thrown in interpreter method <%s>", h_method->print_value_string());
       tty->print_cr(" at bci %d for thread " INTPTR_FORMAT, current_bci, thread);
     }
@@ -690,7 +704,8 @@ IRT_END
 IRT_ENTRY(void, InterpreterRuntime::resolve_invoke(JavaThread* thread, Bytecodes::Code bytecode)) {
   // extract receiver from the outgoing argument list if necessary
   Handle receiver(thread, NULL);
-  if (bytecode == Bytecodes::_invokevirtual || bytecode == Bytecodes::_invokeinterface) {
+  if (bytecode == Bytecodes::_invokevirtual || bytecode == Bytecodes::_invokeinterface ||
+      bytecode == Bytecodes::_invokespecial) {
     ResourceMark rm(thread);
     methodHandle m (thread, method(thread));
     Bytecode_invoke call(m, bci(thread));
@@ -756,16 +771,25 @@ IRT_ENTRY(void, InterpreterRuntime::resolve_invoke(JavaThread* thread, Bytecodes
       int index = info.resolved_method()->itable_index();
       assert(info.itable_index() == index, "");
     }
+  } else if (bytecode == Bytecodes::_invokespecial) {
+    assert(info.call_kind() == CallInfo::direct_call, "must be direct call");
   } else {
     assert(info.call_kind() == CallInfo::direct_call ||
            info.call_kind() == CallInfo::vtable_call, "");
   }
 #endif
+  // Get sender or sender's host_klass, and only set cpCache entry to resolved if
+  // it is not an interface.  The receiver for invokespecial calls within interface
+  // methods must be checked for every call.
+  InstanceKlass* sender = pool->pool_holder();
+  sender = sender->has_host_klass() ? InstanceKlass::cast(sender->host_klass()) : sender;
+
   switch (info.call_kind()) {
   case CallInfo::direct_call:
     cache_entry(thread)->set_direct_call(
       bytecode,
-      info.resolved_method());
+      info.resolved_method(),
+      sender->is_interface());
     break;
   case CallInfo::vtable_call:
     cache_entry(thread)->set_vtable_call(
@@ -776,6 +800,7 @@ IRT_ENTRY(void, InterpreterRuntime::resolve_invoke(JavaThread* thread, Bytecodes
   case CallInfo::itable_call:
     cache_entry(thread)->set_itable_call(
       bytecode,
+      info.resolved_klass(),
       info.resolved_method(),
       info.itable_index());
     break;
@@ -969,6 +994,7 @@ IRT_ENTRY(void, InterpreterRuntime::update_mdp_for_ret(JavaThread* thread, int r
   // ProfileData is essentially a wrapper around a derived oop, so we
   // need to take the lock before making any ProfileData structures.
   ProfileData* data = h_mdo->data_at(h_mdo->dp_to_di(fr.interpreter_frame_mdp()));
+  guarantee(data != NULL, "profile data must be valid");
   RetData* rdata = data->as_RetData();
   address new_mdp = rdata->fixup_ret(return_bci, h_mdo);
   fr.interpreter_frame_set_mdp(new_mdp);
@@ -1011,6 +1037,7 @@ ConstantPoolCacheEntry *cp_entry))
 
   switch(cp_entry->flag_state()) {
     case btos:    // fall through
+    case ztos:    // fall through
     case ctos:    // fall through
     case stos:    // fall through
     case itos:    // fall through
@@ -1047,7 +1074,8 @@ IRT_ENTRY(void, InterpreterRuntime::post_field_modification(JavaThread *thread,
   char sig_type = '\0';
 
   switch(cp_entry->flag_state()) {
-    case btos: sig_type = 'Z'; break;
+    case btos: sig_type = 'B'; break;
+    case ztos: sig_type = 'Z'; break;
     case ctos: sig_type = 'C'; break;
     case stos: sig_type = 'S'; break;
     case itos: sig_type = 'I'; break;
@@ -1178,6 +1206,7 @@ void SignatureHandlerLibrary::add(methodHandle method) {
         } else {
           // debugging suppport
           if (PrintSignatureHandlers) {
+            ttyLocker ttyl;
             tty->cr();
             tty->print_cr("argument handler #%d for: %s %s (fingerprint = " UINT64_FORMAT ", %d bytes generated)",
                           _handlers->length(),
@@ -1261,7 +1290,7 @@ IRT_ENTRY(void, InterpreterRuntime::prepare_native_call(JavaThread* thread, Meth
   // preparing the same method will be sure to see non-null entry & mirror.
 IRT_END
 
-#if defined(IA32) || defined(AMD64) || defined(ARM)
+#if defined(IA32) || defined(AMD64) || defined(ARM) || defined(AARCH64)
 IRT_LEAF(void, InterpreterRuntime::popframe_move_outgoing_args(JavaThread* thread, void* src_address, void* dest_address))
   if (src_address == dest_address) {
     return;

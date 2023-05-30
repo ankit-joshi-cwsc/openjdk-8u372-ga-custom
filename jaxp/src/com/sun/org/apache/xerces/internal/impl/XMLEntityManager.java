@@ -1,15 +1,15 @@
 /*
- * Copyright (c) 2003, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
  */
-
 /*
- * Copyright 2005 The Apache Software Foundation.
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,12 +20,10 @@
 
 package com.sun.org.apache.xerces.internal.impl ;
 
-import com.sun.org.apache.xerces.internal.impl.Constants;
 import com.sun.org.apache.xerces.internal.impl.io.ASCIIReader;
 import com.sun.org.apache.xerces.internal.impl.io.UCSReader;
 import com.sun.org.apache.xerces.internal.impl.io.UTF8Reader;
 import com.sun.org.apache.xerces.internal.impl.msg.XMLMessageFormatter;
-import com.sun.org.apache.xerces.internal.impl.XMLEntityHandler;
 import com.sun.org.apache.xerces.internal.impl.validation.ValidationManager;
 import com.sun.org.apache.xerces.internal.util.*;
 import com.sun.org.apache.xerces.internal.util.URI;
@@ -47,13 +45,13 @@ import java.net.HttpURLConnection;
 import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.URLConnection;
-import java.util.Hashtable;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Stack;
-import javax.xml.XMLConstants;
 import javax.xml.stream.XMLInputFactory;
+import java.util.StringTokenizer;
 
 
 /**
@@ -83,7 +81,7 @@ import javax.xml.stream.XMLInputFactory;
  * @author K.Venugopal SUN Microsystems
  * @author Neeraj Bajaj SUN Microsystems
  * @author Sunitha Reddy SUN Microsystems
- * @version $Id: XMLEntityManager.java,v 1.17 2010-11-01 04:39:41 joehw Exp $
+ * @LastModified: Aug 2021
  */
 public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
 
@@ -368,10 +366,10 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
     // entities
 
     /** Entities. */
-    protected Hashtable fEntities = new Hashtable();
+    protected Map<String, Entity> fEntities = new HashMap<>();
 
     /** Entity stack. */
-    protected Stack fEntityStack = new Stack();
+    protected Stack<Entity> fEntityStack = new Stack<>();
 
     /** Current entity. */
     protected Entity.ScannedEntity fCurrentEntity = null;
@@ -405,6 +403,8 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
      * If this constructor is used to create the object, reset() should be invoked on this object
      */
     public XMLEntityManager() {
+        //for entity managers not created by parsers
+        fSecurityManager = new XMLSecurityManager(true);
         fEntityStorage = new XMLEntityStorage(this) ;
         setScannerVersion(Constants.XML_VERSION_1_0);
     } // <init>()
@@ -582,6 +582,8 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
     /**
      * This method uses the passed-in XMLInputSource to make
      * fCurrentEntity usable for reading.
+     *
+     * @param reference flag to indicate whether the entity is an Entity Reference.
      * @param name  name of the entity (XML is it's the document entity)
      * @param xmlInputSource    the input source, with sufficient information
      *      to begin scanning characters.
@@ -592,7 +594,7 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
      *  XNIException    If any parser-specific goes wrong.
      * @return the encoding of the new entity or null if a character stream was employed
      */
-    public String setupCurrentEntity(String name, XMLInputSource xmlInputSource,
+    public String setupCurrentEntity(boolean reference, String name, XMLInputSource xmlInputSource,
             boolean literal, boolean isExternal)
             throws IOException, XNIException {
         // get information
@@ -630,10 +632,10 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
                         final HTTPInputSource httpInputSource = (HTTPInputSource) xmlInputSource;
 
                         // set request properties
-                        Iterator propIter = httpInputSource.getHTTPRequestProperties();
+                        Iterator<Map.Entry<String, String>> propIter = httpInputSource.getHTTPRequestProperties();
                         while (propIter.hasNext()) {
-                            Map.Entry entry = (Map.Entry) propIter.next();
-                            urlConnection.setRequestProperty((String) entry.getKey(), (String) entry.getValue());
+                            Map.Entry<String, String> entry = propIter.next();
+                            urlConnection.setRequestProperty(entry.getKey(), entry.getValue());
                         }
 
                         // set preference for redirection
@@ -823,7 +825,7 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
 
         // We've seen a new Reader.
         // Push it on the stack so we can close it later.
-        //fOwnReaders.add(reader);
+        fReaderStack.push(reader);
 
         // push entity on stack
         if (fCurrentEntity != null) {
@@ -835,7 +837,9 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
          * in the prolog of the XML document is not considered. Hence, prolog can
          * be read in Chunks of data instead of byte by byte.
          */
-        fCurrentEntity = new com.sun.xml.internal.stream.Entity.ScannedEntity(name,new XMLResourceIdentifierImpl(publicId, literalSystemId, baseSystemId, expandedSystemId),stream, reader, encoding, literal, encodingExternallySpecified, isExternal);
+        fCurrentEntity = new Entity.ScannedEntity(reference, name,
+                new XMLResourceIdentifierImpl(publicId, literalSystemId, baseSystemId, expandedSystemId),
+                stream, reader, encoding, literal, encodingExternallySpecified, isExternal);
         fCurrentEntity.setEncodingExternallySpecified(encodingExternallySpecified);
         fEntityScanner.setCurrentEntity(fCurrentEntity);
         fResourceIdentifier.setValues(publicId, literalSystemId, baseSystemId, expandedSystemId);
@@ -855,7 +859,7 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
      */
     public boolean isExternalEntity(String entityName) {
 
-        Entity entity = (Entity)fEntities.get(entityName);
+        Entity entity = fEntities.get(entityName);
         if (entity == null) {
             return false;
         }
@@ -872,7 +876,7 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
      */
     public boolean isEntityDeclInExternalSubset(String entityName) {
 
-        Entity entity = (Entity)fEntities.get(entityName);
+        Entity entity = fEntities.get(entityName);
         if (entity == null) {
             return false;
         }
@@ -902,13 +906,13 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
 
     public boolean isDeclaredEntity(String entityName) {
 
-        Entity entity = (Entity)fEntities.get(entityName);
+        Entity entity = fEntities.get(entityName);
         return entity != null;
     }
 
     public boolean isUnparsedEntity(String entityName) {
 
-        Entity entity = (Entity)fEntities.get(entityName);
+        Entity entity = fEntities.get(entityName);
         if (entity == null) {
             return false;
         }
@@ -1003,12 +1007,14 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
         }
 
         // do default resolution
-        //this works for both stax & Xerces, if staxInputSource is null, it means parser need to revert to default resolution
+        //this works for both stax & Xerces, if staxInputSource is null,
+        //it means parser need to revert to default resolution
         if (staxInputSource == null) {
             // REVISIT: when systemId is null, I think we should return null.
             //          is this the right solution? -SG
             //if (systemId != null)
-            staxInputSource = new StaxXMLInputSource(new XMLInputSource(publicId, literalSystemId, baseSystemId));
+            staxInputSource = new StaxXMLInputSource(
+                    new XMLInputSource(publicId, literalSystemId, baseSystemId), false);
         }else if(staxInputSource.hasXMLStreamOrXMLEventReader()){
             //Waiting for the clarification from EG. - nb
         }
@@ -1050,7 +1056,6 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
         String literalSystemId = resourceIdentifier.getLiteralSystemId();
         String baseSystemId = resourceIdentifier.getBaseSystemId();
         String expandedSystemId = resourceIdentifier.getExpandedSystemId();
-        String namespace = resourceIdentifier.getNamespace();
 
         // if no base systemId given, assume that it's relative
         // to the systemId of the current scanned entity
@@ -1103,6 +1108,7 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
     /**
      * Starts a named entity.
      *
+     * @param isGE flag to indicate whether the entity is a General Entity
      * @param entityName The name of the entity to start.
      * @param literal    True if this entity is started within a literal
      *                   value.
@@ -1110,11 +1116,11 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
      * @throws IOException  Thrown on i/o error.
      * @throws XNIException Thrown by entity handler to signal an error.
      */
-    public void startEntity(String entityName, boolean literal)
+    public void startEntity(boolean isGE, String entityName, boolean literal)
     throws IOException, XNIException {
 
         // was entity declared?
-        Entity entity = (Entity)fEntityStorage.getEntity(entityName);
+        Entity entity = fEntityStorage.getEntity(entityName);
         if (entity == null) {
             if (fEntityHandler != null) {
                 String encoding = null;
@@ -1137,7 +1143,7 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
             externalEntity = (Entity.ExternalEntity)entity;
             extLitSysId = (externalEntity.entityLocation != null ? externalEntity.entityLocation.getLiteralSystemId() : null);
             extBaseSysId = (externalEntity.entityLocation != null ? externalEntity.entityLocation.getBaseSystemId() : null);
-            expandedSystemId = expandSystemId(extLitSysId, extBaseSysId);
+            expandedSystemId = expandSystemId(extLitSysId, extBaseSysId, fStrictURI);
             boolean unparsed = entity.isUnparsed();
             boolean parameter = entityName.startsWith("%");
             boolean general = !parameter;
@@ -1214,15 +1220,13 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
              */
             xmlInputSource = staxInputSource.getXMLInputSource() ;
             if (!fISCreatedByResolver) {
-                //let the not-LoadExternalDTD or not-SupportDTD process to handle the situation
-                if (fLoadExternalDTD) {
-                    String accessError = SecuritySupport.checkAccess(expandedSystemId, fAccessExternalDTD, Constants.ACCESS_EXTERNAL_ALL);
-                    if (accessError != null) {
-                        fErrorReporter.reportError(this.getEntityScanner(),XMLMessageFormatter.XML_DOMAIN,
-                                "AccessExternalEntity",
-                                new Object[] { SecuritySupport.sanitizePath(expandedSystemId), accessError },
-                                XMLErrorReporter.SEVERITY_FATAL_ERROR);
-                    }
+                String accessError = SecuritySupport.checkAccess(expandedSystemId,
+                        fAccessExternalDTD, Constants.ACCESS_EXTERNAL_ALL);
+                if (accessError != null) {
+                    fErrorReporter.reportError(this.getEntityScanner(),XMLMessageFormatter.XML_DOMAIN,
+                            "AccessExternalEntity",
+                            new Object[] { SecuritySupport.sanitizePath(expandedSystemId), accessError },
+                            XMLErrorReporter.SEVERITY_FATAL_ERROR);
                 }
             }
         }
@@ -1234,7 +1238,7 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
         }
 
         // start the entity
-        startEntity(entityName, xmlInputSource, literal, external);
+        startEntity(isGE, entityName, xmlInputSource, literal, external);
 
     } // startEntity(String,boolean)
 
@@ -1249,7 +1253,7 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
      */
     public void startDocumentEntity(XMLInputSource xmlInputSource)
     throws IOException, XNIException {
-        startEntity(XMLEntity, xmlInputSource, false, true);
+        startEntity(false, XMLEntity, xmlInputSource, false, true);
     } // startDocumentEntity(XMLInputSource)
 
     //xxx these methods are not required.
@@ -1264,7 +1268,7 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
      */
     public void startDTDEntity(XMLInputSource xmlInputSource)
     throws IOException, XNIException {
-        startEntity(DTDEntity, xmlInputSource, false, true);
+        startEntity(false, DTDEntity, xmlInputSource, false, true);
     } // startDTDEntity(XMLInputSource)
 
     // indicate start of external subset so that
@@ -1283,6 +1287,7 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
      * This method can be used to insert an application defined XML
      * entity stream into the parsing stream.
      *
+     * @param isGE flag to indicate whether the entity is a General Entity
      * @param name           The name of the entity.
      * @param xmlInputSource The input source of the entity.
      * @param literal        True if this entity is started within a
@@ -1292,12 +1297,12 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
      * @throws IOException  Thrown on i/o error.
      * @throws XNIException Thrown by entity handler to signal an error.
      */
-    public void startEntity(String name,
+    public void startEntity(boolean isGE, String name,
             XMLInputSource xmlInputSource,
             boolean literal, boolean isExternal)
             throws IOException, XNIException {
 
-        String encoding = setupCurrentEntity(name, xmlInputSource, literal, isExternal);
+        String encoding = setupCurrentEntity(isGE, name, xmlInputSource, literal, isExternal);
 
         //when entity expansion limit is set by the Application, we need to
         //check for the entity expansion limit set by the parser, if number of entity
@@ -1309,7 +1314,7 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
         }
         if( fSecurityManager != null && fSecurityManager.isOverLimit(entityExpansionIndex, fLimitAnalyzer)){
             fSecurityManager.debugPrint(fLimitAnalyzer);
-            fErrorReporter.reportError(XMLMessageFormatter.XML_DOMAIN,"EntityExpansionLimitExceeded",
+            fErrorReporter.reportError(XMLMessageFormatter.XML_DOMAIN,"EntityExpansionLimit",
                     new Object[]{fSecurityManager.getLimitValueByIndex(entityExpansionIndex)},
                                              XMLErrorReporter.SEVERITY_FATAL_ERROR );
             // is there anything better to do than reset the counter?
@@ -1343,16 +1348,21 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
             (fEntityStack.empty() ? null : fEntityStack.elementAt(0));
     }
 
+    // A stack containing all the open readers
+    protected Stack<Reader> fReaderStack = new Stack<>();
 
     /**
      * Close all opened InputStreams and Readers opened by this parser.
      */
     public void closeReaders() {
-        /** this call actually does nothing, readers are closed in the endEntity method
-         * through the current entity.
-         * The change seems to have happened during the jdk6 development with the
-         * addition of StAX
-        **/
+        // close all readers
+        while (!fReaderStack.isEmpty()) {
+            try {
+                (fReaderStack.pop()).close();
+            } catch (IOException e) {
+                // ignore
+            }
+        }
     }
 
     public void endEntity() throws IOException, XNIException {
@@ -1384,6 +1394,13 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
             }catch(IOException ex){
                 throw new XNIException(ex);
             }
+        }
+
+        // REVISIT: We should never encounter underflow if the calls
+        // to startEntity and endEntity are balanced, but guard
+        // against the EmptyStackException for now. -- mrglavas
+        if (!fReaderStack.isEmpty()) {
+            fReaderStack.pop();
         }
 
         if (fEntityHandler != null) {
@@ -1425,10 +1442,6 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
     // XMLComponent methods
     //
     public void reset(PropertyManager propertyManager){
-        //reset fEntityStorage
-        fEntityStorage.reset(propertyManager);
-        //reset XMLEntityReaderImpl
-        fEntityScanner.reset(propertyManager);
         // xerces properties
         fSymbolTable = (SymbolTable)propertyManager.getProperty(Constants.XERCES_PROPERTY_PREFIX + Constants.SYMBOL_TABLE_PROPERTY);
         fErrorReporter = (XMLErrorReporter)propertyManager.getProperty(Constants.XERCES_PROPERTY_PREFIX + Constants.ERROR_REPORTER_PROPERTY);
@@ -1450,6 +1463,12 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
         fAccessExternalDTD = spm.getValue(XMLSecurityPropertyManager.Property.ACCESS_EXTERNAL_DTD);
 
         fSecurityManager = (XMLSecurityManager)propertyManager.getProperty(SECURITY_MANAGER);
+
+        fLimitAnalyzer = new XMLLimitAnalyzer();
+        //reset fEntityStorage
+        fEntityStorage.reset(propertyManager);
+        //reset XMLEntityReaderImpl
+        fEntityScanner.reset(propertyManager);
 
         // initialize state
         //fStandalone = false;
@@ -1537,7 +1556,7 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
     // a class acting as a component manager but not
     // implementing that interface for whatever reason.
     public void reset() {
-
+        fLimitAnalyzer = new XMLLimitAnalyzer();
         // initialize state
         fStandalone = false;
         fEntities.clear();
@@ -1826,7 +1845,7 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
         userDir = userDir.replace(separator, '/');
 
         int len = userDir.length(), ch;
-        StringBuffer buffer = new StringBuffer(len*3);
+        StringBuilder buffer = new StringBuilder(len*3);
         // change C:/blah to /C:/blah
         if (len >= 2 && userDir.charAt(1) == ':') {
             ch = Character.toUpperCase(userDir.charAt(0));
@@ -1894,6 +1913,61 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
         gUserDirURI = new URI("file", "", buffer.toString(), null, null);
 
         return gUserDirURI;
+    }
+
+    public static OutputStream createOutputStream(String uri) throws IOException {
+        // URI was specified. Handle relative URIs.
+        final String expanded = XMLEntityManager.expandSystemId(uri, null, true);
+        final URL url = new URL(expanded != null ? expanded : uri);
+        OutputStream out = null;
+        String protocol = url.getProtocol();
+        String host = url.getHost();
+        // Use FileOutputStream if this URI is for a local file.
+        if (protocol.equals("file")
+                && (host == null || host.length() == 0 || host.equals("localhost"))) {
+            File file = new File(getPathWithoutEscapes(url.getPath()));
+            if (!file.exists()) {
+                File parent = file.getParentFile();
+                if (parent != null && !parent.exists()) {
+                    parent.mkdirs();
+                }
+            }
+            out = new FileOutputStream(file);
+        }
+        // Try to write to some other kind of URI. Some protocols
+        // won't support this, though HTTP should work.
+        else {
+            URLConnection urlCon = url.openConnection();
+            urlCon.setDoInput(false);
+            urlCon.setDoOutput(true);
+            urlCon.setUseCaches(false); // Enable tunneling.
+            if (urlCon instanceof HttpURLConnection) {
+                // The DOM L3 REC says if we are writing to an HTTP URI
+                // it is to be done with an HTTP PUT.
+                HttpURLConnection httpCon = (HttpURLConnection) urlCon;
+                httpCon.setRequestMethod("PUT");
+            }
+            out = urlCon.getOutputStream();
+        }
+        return out;
+    }
+
+    private static String getPathWithoutEscapes(String origPath) {
+        if (origPath != null && origPath.length() != 0 && origPath.indexOf('%') != -1) {
+            // Locate the escape characters
+            StringTokenizer tokenizer = new StringTokenizer(origPath, "%");
+            StringBuilder result = new StringBuilder(origPath.length());
+            int size = tokenizer.countTokens();
+            result.append(tokenizer.nextToken());
+            for(int i = 1; i < size; ++i) {
+                String token = tokenizer.nextToken();
+                // Decode the 2 digit hexadecimal number following % in '%nn'
+                result.append((char)Integer.valueOf(token.substring(0, 2), 16).intValue());
+                result.append(token.substring(2));
+            }
+            return result.toString();
+        }
+        return origPath;
     }
 
     /**
@@ -2001,14 +2075,6 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
 
         // system id has to be a valid URI
         if (strict) {
-
-
-            // check if there is a system id before
-            // trying to expand it.
-            if (systemId == null) {
-                return null;
-            }
-
             try {
                 // if it's already an absolute one, return it
                 new URI(systemId);
@@ -2916,7 +2982,7 @@ public class XMLEntityManager implements XMLComponent, XMLEntityResolver {
                     if (!fCurrentEntity.xmlDeclChunkRead)
                     {
                         fCurrentEntity.xmlDeclChunkRead = true;
-                        len = fCurrentEntity.DEFAULT_XMLDECL_BUFFER_SIZE;
+                        len = Entity.ScannedEntity.DEFAULT_XMLDECL_BUFFER_SIZE;
                     }
                     return fInputStream.read(b, off, len);
                 }

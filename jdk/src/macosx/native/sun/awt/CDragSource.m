@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -193,7 +193,7 @@ static BOOL                sNeedsEnter;
         fFormatMap = NULL;
     }
 
-    CFRelease(self); // GC
+    [self release];
 }
 
 - (void)dealloc
@@ -209,8 +209,6 @@ static BOOL                sNeedsEnter;
 
     [super dealloc];
 }
-//- (void)finalize { [super finalize]; }
-
 
 // Appropriated from Windows' awt_DataTransferer.cpp:
 //
@@ -318,8 +316,7 @@ static BOOL                sNeedsEnter;
 
                     // This is a good approximation if not perfect. A conclusive search would
                     // have to be done matching all defined strings in AppKit's commonStrings.h.
-                    if ([type hasPrefix:@"NS"] || [type hasPrefix:@"NeXT"])
-                        hasNSTypeData = true;
+                    hasNSTypeData = [type hasPrefix:@"NS"] || [type hasPrefix:@"NeXT"] || [type hasPrefix:@"public."];
                 }
             }
         }

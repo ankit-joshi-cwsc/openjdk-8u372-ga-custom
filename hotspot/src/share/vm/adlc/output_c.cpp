@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -31,23 +31,6 @@ static bool is_def(int usedef) {
   switch(usedef) {
   case Component::DEF:
   case Component::USE_DEF: return true; break;
-  }
-  return false;
-}
-
-static bool is_use(int usedef) {
-  switch(usedef) {
-  case Component::USE:
-  case Component::USE_DEF:
-  case Component::USE_KILL: return true; break;
-  }
-  return false;
-}
-
-static bool is_kill(int usedef) {
-  switch(usedef) {
-  case Component::KILL:
-  case Component::USE_KILL: return true; break;
   }
   return false;
 }
@@ -4177,11 +4160,11 @@ void ArchDesc::buildFrameMethods(FILE *fp_cpp) {
   fprintf(fp_cpp,"%s\n", _frame->_c_calling_convention);
   fprintf(fp_cpp,"}\n\n");
   // Java Return Value Location
-  fprintf(fp_cpp,"OptoRegPair Matcher::return_value(int ideal_reg, bool is_outgoing) {\n");
+  fprintf(fp_cpp,"OptoRegPair Matcher::return_value(uint ideal_reg, bool is_outgoing) {\n");
   fprintf(fp_cpp,"%s\n", _frame->_return_value);
   fprintf(fp_cpp,"}\n\n");
   // Native Return Value Location
-  fprintf(fp_cpp,"OptoRegPair Matcher::c_return_value(int ideal_reg, bool is_outgoing) {\n");
+  fprintf(fp_cpp,"OptoRegPair Matcher::c_return_value(uint ideal_reg, bool is_outgoing) {\n");
   fprintf(fp_cpp,"%s\n", _frame->_c_return_value);
   fprintf(fp_cpp,"}\n\n");
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2000, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -59,6 +59,9 @@
 #include "gc_implementation/concurrentMarkSweep/concurrentMarkSweepThread.hpp"
 #include "gc_implementation/concurrentMarkSweep/vmCMSOperations.hpp"
 #endif // INCLUDE_ALL_GCS
+#if INCLUDE_JFR
+#include "jfr/jfr.hpp"
+#endif // INCLUDE_JFR
 
 GenCollectedHeap* GenCollectedHeap::_gch;
 NOT_PRODUCT(size_t GenCollectedHeap::_skip_header_HeapWords = 0;)
@@ -619,7 +622,7 @@ void GenCollectedHeap::process_roots(bool activate_scope,
                                      OopClosure* weak_roots,
                                      CLDClosure* strong_cld_closure,
                                      CLDClosure* weak_cld_closure,
-                                     CodeBlobClosure* code_roots) {
+                                     CodeBlobToOopClosure* code_roots) {
   StrongRootsScope srs(this, activate_scope);
 
   // General roots.
@@ -638,7 +641,7 @@ void GenCollectedHeap::process_roots(bool activate_scope,
   // Don't process them if they will be processed during the ClassLoaderDataGraph phase.
   CLDClosure* roots_from_clds_p = (strong_cld_closure != weak_cld_closure) ? strong_cld_closure : NULL;
   // Only process code roots from thread stacks if we aren't visiting the entire CodeCache anyway
-  CodeBlobClosure* roots_from_code_p = (so & SO_AllCodeCache) ? NULL : code_roots;
+  CodeBlobToOopClosure* roots_from_code_p = (so & SO_AllCodeCache) ? NULL : code_roots;
 
   Threads::possibly_parallel_oops_do(strong_roots, roots_from_clds_p, roots_from_code_p);
 
@@ -745,14 +748,9 @@ void GenCollectedHeap::gen_process_roots(int level,
 }
 
 
-class AlwaysTrueClosure: public BoolObjectClosure {
-public:
-  bool do_object_b(oop p) { return true; }
-};
-static AlwaysTrueClosure always_true;
-
 void GenCollectedHeap::gen_process_weak_roots(OopClosure* root_closure) {
-  JNIHandles::weak_oops_do(&always_true, root_closure);
+  JNIHandles::weak_oops_do(root_closure);
+  JFR_ONLY(Jfr::weak_oops_do(root_closure));
   for (int i = 0; i < _n_gens; i++) {
     _gens[i]->ref_processor()->weak_oops_do(root_closure);
   }
@@ -802,8 +800,11 @@ void GenCollectedHeap::collect(GCCause::Cause cause) {
 #else  // INCLUDE_ALL_GCS
     ShouldNotReachHere();
 #endif // INCLUDE_ALL_GCS
-  } else if (cause == GCCause::_wb_young_gc) {
-    // minor collection for WhiteBox API
+  } else if ((cause == GCCause::_wb_young_gc) ||
+             (cause == GCCause::_gc_locker)) {
+    // minor collection for WhiteBox or GCLocker.
+    // _gc_locker collections upgraded by GCLockerInvokesConcurrent
+    // are handled above and never discarded.
     collect(cause, 0);
   } else {
 #ifdef ASSERT
@@ -841,6 +842,11 @@ void GenCollectedHeap::collect_locked(GCCause::Cause cause, int max_level) {
   // Read the GC count while holding the Heap_lock
   unsigned int gc_count_before      = total_collections();
   unsigned int full_gc_count_before = total_full_collections();
+
+  if (GC_locker::should_discard(cause, gc_count_before)) {
+    return;
+  }
+
   {
     MutexUnlocker mu(Heap_lock);  // give up heap lock, execute gets it back
     VM_GenCollectFull op(gc_count_before, full_gc_count_before,
@@ -893,24 +899,16 @@ void GenCollectedHeap::do_full_collection(bool clear_all_soft_refs) {
 
 void GenCollectedHeap::do_full_collection(bool clear_all_soft_refs,
                                           int max_level) {
-  int local_max_level;
-  if (!incremental_collection_will_fail(false /* don't consult_young */) &&
-      gc_cause() == GCCause::_gc_locker) {
-    local_max_level = 0;
-  } else {
-    local_max_level = max_level;
-  }
 
   do_collection(true                 /* full */,
                 clear_all_soft_refs  /* clear_all_soft_refs */,
                 0                    /* size */,
                 false                /* is_tlab */,
-                local_max_level      /* max_level */);
+                max_level            /* max_level */);
   // Hack XXX FIX ME !!!
   // A scavenge may not have been attempted, or may have
   // been attempted and failed, because the old gen was too full
-  if (local_max_level == 0 && gc_cause() == GCCause::_gc_locker &&
-      incremental_collection_will_fail(false /* don't consult_young */)) {
+  if (gc_cause() == GCCause::_gc_locker && incremental_collection_failed()) {
     if (PrintGCDetails) {
       gclog_or_tty->print_cr("GC locker: Trying a full collection "
                              "because scavenge failed");
@@ -1183,7 +1181,7 @@ GenCollectedHeap* GenCollectedHeap::heap() {
 
 
 void GenCollectedHeap::prepare_for_compaction() {
-  guarantee(_n_gens = 2, "Wrong number of generations");
+  guarantee(_n_gens == 2, "Wrong number of generations");
   Generation* old_gen = _gens[1];
   // Start by compacting into same gen.
   CompactPoint cp(old_gen);

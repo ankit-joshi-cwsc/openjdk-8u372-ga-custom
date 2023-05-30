@@ -49,6 +49,10 @@
 #include "sun_jvm_hotspot_debugger_sparc_SPARCThreadContext.h"
 #endif
 
+#ifdef aarch64
+#include "sun_jvm_hotspot_debugger_aarch64_AARCH64ThreadContext.h"
+#endif
+
 static jfieldID p_ps_prochandle_ID = 0;
 static jfieldID threadList_ID = 0;
 static jfieldID loadObjectList_ID = 0;
@@ -209,9 +213,12 @@ JNIEXPORT void JNICALL Java_sun_jvm_hotspot_debugger_linux_LinuxDebuggerLocal_at
   verifyBitness(env, (char *) &buf);
   CHECK_EXCEPTION;
 
+  char err_buf[200];
   struct ps_prochandle* ph;
-  if ( (ph = Pgrab(jpid)) == NULL) {
-    THROW_NEW_DEBUGGER_EXCEPTION("Can't attach to the process");
+  if ( (ph = Pgrab(jpid, err_buf, sizeof(err_buf))) == NULL) {
+    char msg[230];
+    snprintf(msg, sizeof(msg), "Can't attach to the process: %s", err_buf);
+    THROW_NEW_DEBUGGER_EXCEPTION(msg);
   }
   (*env)->SetLongField(env, this_obj, p_ps_prochandle_ID, (jlong)(intptr_t)ph);
   fillThreadsAndLoadObjects(env, this_obj, ph);
@@ -330,7 +337,7 @@ JNIEXPORT jbyteArray JNICALL Java_sun_jvm_hotspot_debugger_linux_LinuxDebuggerLo
   return (err == PS_OK)? array : 0;
 }
 
-#if defined(i386) || defined(amd64) || defined(sparc) || defined(sparcv9)
+#if defined(i386) || defined(amd64) || defined(sparc) || defined(sparcv9) || defined(aarch64)
 JNIEXPORT jlongArray JNICALL Java_sun_jvm_hotspot_debugger_linux_LinuxDebuggerLocal_getThreadIntegerRegisterSet0
   (JNIEnv *env, jobject this_obj, jint lwp_id) {
 
@@ -351,6 +358,9 @@ JNIEXPORT jlongArray JNICALL Java_sun_jvm_hotspot_debugger_linux_LinuxDebuggerLo
 #endif
 #ifdef amd64
 #define NPRGREG sun_jvm_hotspot_debugger_amd64_AMD64ThreadContext_NPRGREG
+#endif
+#ifdef aarch64
+#define NPRGREG sun_jvm_hotspot_debugger_aarch64_AARCH64ThreadContext_NPRGREG
 #endif
 #if defined(sparc) || defined(sparcv9)
 #define NPRGREG sun_jvm_hotspot_debugger_sparc_SPARCThreadContext_NPRGREG
@@ -446,6 +456,19 @@ JNIEXPORT jlongArray JNICALL Java_sun_jvm_hotspot_debugger_linux_LinuxDebuggerLo
   regs[REG_INDEX(R_O6)]  = gregs.u_regs[13];
   regs[REG_INDEX(R_O7)]  = gregs.u_regs[14];
 #endif /* sparc */
+
+#if defined(aarch64)
+
+#define REG_INDEX(reg) sun_jvm_hotspot_debugger_aarch64_AARCH64ThreadContext_##reg
+
+  {
+    int i;
+    for (i = 0; i < 31; i++)
+      regs[i] = gregs.regs[i];
+    regs[REG_INDEX(SP)] = gregs.sp;
+    regs[REG_INDEX(PC)] = gregs.pc;
+  }
+#endif /* aarch64 */
 
 
   (*env)->ReleaseLongArrayElements(env, array, regs, JNI_COMMIT);

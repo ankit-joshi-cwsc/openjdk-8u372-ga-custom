@@ -2318,6 +2318,13 @@ void Assembler::orl(Register dst, Register src) {
   emit_arith(0x0B, 0xC0, dst, src);
 }
 
+void Assembler::orl(Address dst, Register src) {
+  InstructionMark im(this);
+  prefix(dst, src);
+  emit_int8(0x09);
+  emit_operand(src, dst);
+}
+
 void Assembler::packuswb(XMMRegister dst, Address src) {
   NOT_LP64(assert(VM_Version::supports_sse2(), ""));
   assert((UseAVX > 0), "SSE mode requires address alignment 16 bytes");
@@ -2563,6 +2570,15 @@ void Assembler::psrldq(XMMRegister dst, int shift) {
   // Shift 128 bit value in xmm register by number of bytes.
   NOT_LP64(assert(VM_Version::supports_sse2(), ""));
   int encode = simd_prefix_and_encode(xmm3, dst, dst, VEX_SIMD_66);
+  emit_int8(0x73);
+  emit_int8((unsigned char)(0xC0 | encode));
+  emit_int8(shift);
+}
+
+void Assembler::pslldq(XMMRegister dst, int shift) {
+  // Shift left 128 bit value in xmm register by number of bytes.
+  NOT_LP64(assert(VM_Version::supports_sse2(), ""));
+  int encode = simd_prefix_and_encode(xmm7, dst, dst, VEX_SIMD_66);
   emit_int8(0x73);
   emit_int8((unsigned char)(0xC0 | encode));
   emit_int8(shift);
@@ -5609,6 +5625,19 @@ void Assembler::rclq(Register dst, int imm8) {
   } else {
     emit_int8((unsigned char)0xC1);
     emit_int8((unsigned char)(0xD0 | encode));
+    emit_int8(imm8);
+  }
+}
+
+void Assembler::rcrq(Register dst, int imm8) {
+  assert(isShiftCount(imm8 >> 1), "illegal shift count");
+  int encode = prefixq_and_encode(dst->encoding());
+  if (imm8 == 1) {
+    emit_int8((unsigned char)0xD1);
+    emit_int8((unsigned char)(0xD8 | encode));
+  } else {
+    emit_int8((unsigned char)0xC1);
+    emit_int8((unsigned char)(0xD8 | encode));
     emit_int8(imm8);
   }
 }

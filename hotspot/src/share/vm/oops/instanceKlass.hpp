@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -38,7 +38,9 @@
 #include "utilities/accessFlags.hpp"
 #include "utilities/bitMap.inline.hpp"
 #include "utilities/macros.hpp"
-#include "trace/traceMacros.hpp"
+#if INCLUDE_JFR
+#include "jfr/support/jfrKlassExtension.hpp"
+#endif
 
 // An InstanceKlass is the VM level representation of a Java class.
 // It contains all information needed for at class at execution runtime.
@@ -88,7 +90,6 @@ class BreakpointInfo;
 class fieldDescriptor;
 class DepChange;
 class nmethodBucket;
-class PreviousVersionNode;
 class JvmtiCachedClassFieldMap;
 class MemberNameTable;
 
@@ -226,6 +227,7 @@ class InstanceKlass: public Klass {
   // _is_marked_dependent can be set concurrently, thus cannot be part of the
   // _misc_flags.
   bool            _is_marked_dependent;  // used for marking during flushing and deoptimization
+  bool            _is_being_redefined;   // used for locking redefinition
   bool            _has_unloaded_dependent;
 
   enum {
@@ -235,12 +237,13 @@ class InstanceKlass: public Klass {
     _misc_is_anonymous             = 1 << 3, // has embedded _host_klass field
     _misc_is_contended             = 1 << 4, // marked with contended annotation
     _misc_has_default_methods      = 1 << 5, // class/superclass/implemented interfaces has default methods
-    _misc_declares_default_methods = 1 << 6  // directly declares default methods (any access)
+    _misc_declares_default_methods = 1 << 6, // directly declares default methods (any access)
+    _misc_has_been_redefined       = 1 << 7  // class has been redefined
   };
   u2              _misc_flags;
   u2              _minor_version;        // minor version number of class file
   u2              _major_version;        // major version number of class file
-  Thread*         _init_thread;          // Pointer to current thread doing initialization (to handle recusive initialization)
+  Thread*         _init_thread;          // Pointer to current thread doing initialization (to handle recursive initialization)
   int             _vtable_len;           // length of Java vtable (in words)
   int             _itable_len;           // length of Java itable (in words)
   OopMapCache*    volatile _oop_map_cache;   // OopMapCache for all methods in the klass (allocated lazily)
@@ -250,9 +253,8 @@ class InstanceKlass: public Klass {
   nmethodBucket*  _dependencies;         // list of dependent nmethods
   nmethod*        _osr_nmethods_head;    // Head of list of on-stack replacement nmethods for this class
   BreakpointInfo* _breakpoints;          // bpt lists, managed by Method*
-  // Array of interesting part(s) of the previous version(s) of this
-  // InstanceKlass. See PreviousVersionWalker below.
-  GrowableArray<PreviousVersionNode *>* _previous_versions;
+  // Linked instanceKlasses of previous versions
+  InstanceKlass* _previous_versions;
   // JVMTI fields can be moved to their own structure - see 6315920
   // JVMTI: cached class file, before retransformable agent modified it in CFLH
   JvmtiCachedClassFileData* _cached_class_file;
@@ -524,21 +526,42 @@ class InstanceKlass: public Klass {
   static Method* find_method(Array<Method*>* methods, Symbol* name, Symbol* signature);
 
   // find a local method, but skip static methods
-  Method* find_instance_method(Symbol* name, Symbol* signature);
-  static Method* find_instance_method(Array<Method*>* methods, Symbol* name, Symbol* signature);
+  Method* find_instance_method(Symbol* name, Symbol* signature,
+                               PrivateLookupMode private_mode);
+  static Method* find_instance_method(Array<Method*>* methods,
+                                      Symbol* name, Symbol* signature,
+                                      PrivateLookupMode private_mode);
+
+  // find a local method (returns NULL if not found)
+  Method* find_local_method(Symbol* name, Symbol* signature,
+                           OverpassLookupMode overpass_mode,
+                           StaticLookupMode static_mode,
+                           PrivateLookupMode private_mode) const;
+
+  // find a local method from given methods array (returns NULL if not found)
+  static Method* find_local_method(Array<Method*>* methods,
+                           Symbol* name, Symbol* signature,
+                           OverpassLookupMode overpass_mode,
+                           StaticLookupMode static_mode,
+                           PrivateLookupMode private_mode);
 
   // true if method matches signature and conforms to skipping_X conditions.
-  static bool method_matches(Method* m, Symbol* signature, bool skipping_overpass, bool skipping_static);
+  static bool method_matches(Method* m, Symbol* signature, bool skipping_overpass, bool skipping_static, bool skipping_private);
 
-  // find a local method index in default_methods (returns -1 if not found)
-  static int find_method_index(Array<Method*>* methods, Symbol* name, Symbol* signature, bool skipping_overpass, bool skipping_static);
+  // find a local method index in methods or default_methods (returns -1 if not found)
+  static int find_method_index(Array<Method*>* methods,
+                               Symbol* name, Symbol* signature,
+                               OverpassLookupMode overpass_mode,
+                               StaticLookupMode static_mode,
+                               PrivateLookupMode private_mode);
+
 
   // lookup operation (returns NULL if not found)
-  Method* uncached_lookup_method(Symbol* name, Symbol* signature, MethodLookupMode mode) const;
+  Method* uncached_lookup_method(Symbol* name, Symbol* signature, OverpassLookupMode overpass_mode) const;
 
   // lookup a method in all the interfaces that this class implements
   // (returns NULL if not found)
-  Method* lookup_method_in_all_interfaces(Symbol* name, Symbol* signature, MethodLookupMode mode) const;
+  Method* lookup_method_in_all_interfaces(Symbol* name, Symbol* signature, DefaultsLookupMode defaults_mode) const;
 
   // lookup a method in local defaults then in all interfaces
   // (returns NULL if not found)
@@ -565,9 +588,11 @@ class InstanceKlass: public Klass {
   Klass* host_klass() const              {
     Klass** hk = (Klass**)adr_host_klass();
     if (hk == NULL) {
+      assert(!is_anonymous(), "Anonymous classes have host klasses");
       return NULL;
     } else {
       assert(*hk != NULL, "host klass should always be set if the address is not null");
+      assert(is_anonymous(), "Only anonymous classes have host klasses");
       return *hk;
     }
   }
@@ -578,6 +603,9 @@ class InstanceKlass: public Klass {
     if (addr != NULL) {
       *addr = host;
     }
+  }
+  bool has_host_klass() const              {
+    return adr_host_klass() != NULL;
   }
   bool is_anonymous() const                {
     return (_misc_flags & _misc_is_anonymous) != 0;
@@ -645,22 +673,36 @@ class InstanceKlass: public Klass {
     _nonstatic_oop_map_size = words;
   }
 
+  // Redefinition locking.  Class can only be redefined by one thread at a time.
+  bool is_being_redefined() const          { return _is_being_redefined; }
+  void set_is_being_redefined(bool value)  { _is_being_redefined = value; }
+
   // RedefineClasses() support for previous versions:
-  void add_previous_version(instanceKlassHandle ikh, BitMap *emcp_methods,
-         int emcp_method_count);
-  // If the _previous_versions array is non-NULL, then this klass
-  // has been redefined at least once even if we aren't currently
-  // tracking a previous version.
-  bool has_been_redefined() const { return _previous_versions != NULL; }
-  bool has_previous_version() const;
+  void add_previous_version(instanceKlassHandle ikh, int emcp_method_count);
+
+  InstanceKlass* previous_versions() const { return _previous_versions; }
+
+  bool has_been_redefined() const {
+    return (_misc_flags & _misc_has_been_redefined) != 0;
+  }
+  void set_has_been_redefined() {
+    _misc_flags |= _misc_has_been_redefined;
+  }
+
   void init_previous_versions() {
     _previous_versions = NULL;
   }
-  GrowableArray<PreviousVersionNode *>* previous_versions() const {
-    return _previous_versions;
+
+
+  InstanceKlass* get_klass_version(int version) {
+    for (InstanceKlass* ik = this; ik != NULL; ik = ik->previous_versions()) {
+      if (ik->constants()->version() == version) {
+        return ik;
+      }
+    }
+    return NULL;
   }
 
-  InstanceKlass* get_klass_version(int version);
   static void purge_previous_versions(InstanceKlass* ik);
 
   // JVMTI: Support for caching a class file before it is modified by an agent that can do retransformation
@@ -785,7 +827,7 @@ class InstanceKlass: public Klass {
   // maintenance of deoptimization dependencies
   int mark_dependent_nmethods(DepChange& changes);
   void add_dependent_nmethod(nmethod* nm);
-  void remove_dependent_nmethod(nmethod* nm);
+  void remove_dependent_nmethod(nmethod* nm, bool delete_immediately);
 
   // On-stack replacement support
   nmethod* osr_nmethods_head() const         { return _osr_nmethods_head; };
@@ -801,12 +843,17 @@ class InstanceKlass: public Klass {
 
   // support for stub routines
   static ByteSize init_state_offset()  { return in_ByteSize(offset_of(InstanceKlass, _init_state)); }
-  TRACE_DEFINE_OFFSET;
+  JFR_ONLY(DEFINE_KLASS_TRACE_ID_OFFSET;)
   static ByteSize init_thread_offset() { return in_ByteSize(offset_of(InstanceKlass, _init_thread)); }
 
   // subclass/subinterface checks
   bool implements_interface(Klass* k) const;
   bool is_same_or_direct_interface(Klass* k) const;
+
+#ifdef ASSERT
+  // check whether this class or one of its superclasses was redefined
+  bool has_redefined_this_or_super() const;
+#endif
 
   // Access to the implementor of an interface.
   Klass* implementor() const
@@ -865,8 +912,8 @@ class InstanceKlass: public Klass {
 
   // Casting from Klass*
   static InstanceKlass* cast(Klass* k) {
-    assert(k->is_klass(), "must be");
-    assert(k->oop_is_instance(), "cast to InstanceKlass");
+    assert(k == NULL || k->is_klass(), "must be");
+    assert(k == NULL || k->oop_is_instance(), "cast to InstanceKlass");
     return (InstanceKlass*) k;
   }
 
@@ -969,6 +1016,7 @@ class InstanceKlass: public Klass {
   void oop_follow_contents(oop obj);
   int  oop_adjust_pointers(oop obj);
 
+  void clean_weak_instanceklass_links(BoolObjectClosure* is_alive);
   void clean_implementors_list(BoolObjectClosure* is_alive);
   void clean_method_data(BoolObjectClosure* is_alive);
   void clean_dependent_nmethods();
@@ -1083,11 +1131,22 @@ private:
   Klass* array_klass_impl(bool or_null, TRAPS);
 
   // find a local method (returns NULL if not found)
-  Method* find_method_impl(Symbol* name, Symbol* signature, bool skipping_overpass) const;
-  static Method* find_method_impl(Array<Method*>* methods, Symbol* name, Symbol* signature, bool skipping_overpass, bool skipping_static);
+  Method* find_method_impl(Symbol* name, Symbol* signature,
+                           OverpassLookupMode overpass_mode,
+                           StaticLookupMode static_mode,
+                           PrivateLookupMode private_mode) const;
+  static Method* find_method_impl(Array<Method*>* methods,
+                                  Symbol* name, Symbol* signature,
+                                  OverpassLookupMode overpass_mode,
+                                  StaticLookupMode static_mode,
+                                  PrivateLookupMode private_mode);
 
   // Free CHeap allocated fields.
   void release_C_heap_structures();
+
+  // RedefineClasses support
+  void link_previous_versions(InstanceKlass* pv) { _previous_versions = pv; }
+  void mark_newly_obsolete_methods(Array<Method*>* old_methods, int emcp_method_count);
 public:
   // CDS support - remove and restore oops from metadata. Oops are not shared.
   virtual void remove_unshareable_info();
@@ -1099,7 +1158,7 @@ public:
   // JSR-292 support
   MemberNameTable* member_names() { return _member_names; }
   void set_member_names(MemberNameTable* member_names) { _member_names = member_names; }
-  bool add_member_name(Handle member_name);
+  oop add_member_name(Handle member_name, bool intern);
 
 public:
   // JVMTI support
@@ -1183,62 +1242,6 @@ class JNIid: public CHeapObj<mtClass> {
   void set_is_static_field_id()   { _is_static_field_id = true; }
 #endif
   void verify(Klass* holder);
-};
-
-
-// If breakpoints are more numerous than just JVMTI breakpoints,
-// consider compressing this data structure.
-// It is currently a simple linked list defined in method.hpp.
-
-class BreakpointInfo;
-
-
-// A collection point for interesting information about the previous
-// version(s) of an InstanceKlass.  A GrowableArray of PreviousVersionNodes
-// is attached to the InstanceKlass as needed. See PreviousVersionWalker below.
-class PreviousVersionNode : public CHeapObj<mtClass> {
- private:
-  ConstantPool*    _prev_constant_pool;
-
-  // If the previous version of the InstanceKlass doesn't have any
-  // EMCP methods, then _prev_EMCP_methods will be NULL. If all the
-  // EMCP methods have been collected, then _prev_EMCP_methods can
-  // have a length of zero.
-  GrowableArray<Method*>* _prev_EMCP_methods;
-
-public:
-  PreviousVersionNode(ConstantPool* prev_constant_pool,
-                      GrowableArray<Method*>* prev_EMCP_methods);
-  ~PreviousVersionNode();
-  ConstantPool* prev_constant_pool() const {
-    return _prev_constant_pool;
-  }
-  GrowableArray<Method*>* prev_EMCP_methods() const {
-    return _prev_EMCP_methods;
-  }
-};
-
-
-// Helper object for walking previous versions.
-class PreviousVersionWalker : public StackObj {
- private:
-  Thread*                               _thread;
-  GrowableArray<PreviousVersionNode *>* _previous_versions;
-  int                                   _current_index;
-
-  // A pointer to the current node object so we can handle the deletes.
-  PreviousVersionNode*                  _current_p;
-
-  // The constant pool handle keeps all the methods in this class from being
-  // deallocated from the metaspace during class unloading.
-  constantPoolHandle                    _current_constant_pool_handle;
-
- public:
-  PreviousVersionWalker(Thread* thread, InstanceKlass *ik);
-
-  // Return the interesting information for the next previous version
-  // of the klass. Returns NULL if there are no more previous versions.
-  PreviousVersionNode* next_previous_version();
 };
 
 

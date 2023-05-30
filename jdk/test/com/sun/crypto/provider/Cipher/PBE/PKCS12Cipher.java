@@ -27,6 +27,7 @@
  * @summary basic test for PBEWithSHA1AndDESede, PBEWithSHA1AndRC2_40/128
  *          and PBEWithSHA1AndRC4_40/128
  * @author Valerie Peng
+ * @key randomness
  */
 
 import java.io.*;
@@ -105,7 +106,7 @@ class MyPBEKey implements PBEKey {
         this.salt = salt;
         this.iCount = iCount;
     }
-    public char[] getPassword() { return passwd; }
+    public char[] getPassword() { return passwd.clone(); }
     public byte[] getSalt() { return salt; }
     public int getIterationCount() { return iCount; }
     public String getAlgorithm() { return "PBE"; }

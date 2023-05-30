@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -74,6 +74,8 @@
 # include "adfiles/ad_x86_32.hpp"
 #elif defined TARGET_ARCH_MODEL_x86_64
 # include "adfiles/ad_x86_64.hpp"
+#elif defined TARGET_ARCH_MODEL_aarch64
+# include "adfiles/ad_aarch64.hpp"
 #elif defined TARGET_ARCH_MODEL_sparc
 # include "adfiles/ad_sparc.hpp"
 #elif defined TARGET_ARCH_MODEL_zero
@@ -92,7 +94,25 @@
 // At command line specify the parameters: -XX:+FullGCALot -XX:FullGCALotStart=100000000
 
 
+// GHASH block processing
+const TypeFunc* OptoRuntime::ghash_processBlocks_Type() {
+    int argcnt = 4;
 
+    const Type** fields = TypeTuple::fields(argcnt);
+    int argp = TypeFunc::Parms;
+    fields[argp++] = TypePtr::NOTNULL;    // state
+    fields[argp++] = TypePtr::NOTNULL;    // subkeyH
+    fields[argp++] = TypePtr::NOTNULL;    // data
+    fields[argp++] = TypeInt::INT;        // blocks
+    assert(argp == TypeFunc::Parms+argcnt, "correct decoding");
+    const TypeTuple* domain = TypeTuple::make(TypeFunc::Parms+argcnt, fields);
+
+    // result type needed
+    fields = TypeTuple::fields(1);
+    fields[TypeFunc::Parms+0] = NULL; // void
+    const TypeTuple* range = TypeTuple::make(TypeFunc::Parms, fields);
+    return TypeFunc::make(domain, range);
+}
 
 // Compiled code entry points
 address OptoRuntime::_new_instance_Java                           = NULL;
@@ -231,22 +251,17 @@ JRT_BLOCK_ENTRY(void, OptoRuntime::new_instance_C(Klass* klass, JavaThread* thre
 
   // These checks are cheap to make and support reflective allocation.
   int lh = klass->layout_helper();
-  if (Klass::layout_helper_needs_slow_path(lh)
-      || !InstanceKlass::cast(klass)->is_initialized()) {
-    KlassHandle kh(THREAD, klass);
-    kh->check_valid_for_instantiation(false, THREAD);
+  if (Klass::layout_helper_needs_slow_path(lh) || !InstanceKlass::cast(klass)->is_initialized()) {
+    Handle holder(THREAD, klass->klass_holder()); // keep the klass alive
+    klass->check_valid_for_instantiation(false, THREAD);
     if (!HAS_PENDING_EXCEPTION) {
-      InstanceKlass::cast(kh())->initialize(THREAD);
-    }
-    if (!HAS_PENDING_EXCEPTION) {
-      klass = kh();
-    } else {
-      klass = NULL;
+      InstanceKlass::cast(klass)->initialize(THREAD);
     }
   }
 
-  if (klass != NULL) {
+  if (!HAS_PENDING_EXCEPTION) {
     // Scavenge and allocate an instance.
+    Handle holder(THREAD, klass->klass_holder()); // keep the klass alive
     oop result = InstanceKlass::cast(klass)->allocate_instance(THREAD);
     thread->set_vm_result(result);
 
@@ -286,6 +301,7 @@ JRT_BLOCK_ENTRY(void, OptoRuntime::new_array_C(Klass* array_type, int len, JavaT
     // Although the oopFactory likes to work with the elem_type,
     // the compiler prefers the array_type, since it must already have
     // that latter value in hand for the fast path.
+    Handle holder(THREAD, array_type->klass_holder()); // keep the array klass alive
     Klass* elem_type = ObjArrayKlass::cast(array_type)->element_klass();
     result = oopFactory::new_objArray(elem_type, len, THREAD);
   }
@@ -364,6 +380,7 @@ JRT_ENTRY(void, OptoRuntime::multianewarray2_C(Klass* elem_type, int len1, int l
   jint dims[2];
   dims[0] = len1;
   dims[1] = len2;
+  Handle holder(THREAD, elem_type->klass_holder()); // keep the klass alive
   oop obj = ArrayKlass::cast(elem_type)->multi_allocate(2, dims, THREAD);
   deoptimize_caller_frame(thread, HAS_PENDING_EXCEPTION);
   thread->set_vm_result(obj);
@@ -380,6 +397,7 @@ JRT_ENTRY(void, OptoRuntime::multianewarray3_C(Klass* elem_type, int len1, int l
   dims[0] = len1;
   dims[1] = len2;
   dims[2] = len3;
+  Handle holder(THREAD, elem_type->klass_holder()); // keep the klass alive
   oop obj = ArrayKlass::cast(elem_type)->multi_allocate(3, dims, THREAD);
   deoptimize_caller_frame(thread, HAS_PENDING_EXCEPTION);
   thread->set_vm_result(obj);
@@ -397,6 +415,7 @@ JRT_ENTRY(void, OptoRuntime::multianewarray4_C(Klass* elem_type, int len1, int l
   dims[1] = len2;
   dims[2] = len3;
   dims[3] = len4;
+  Handle holder(THREAD, elem_type->klass_holder()); // keep the klass alive
   oop obj = ArrayKlass::cast(elem_type)->multi_allocate(4, dims, THREAD);
   deoptimize_caller_frame(thread, HAS_PENDING_EXCEPTION);
   thread->set_vm_result(obj);
@@ -415,6 +434,7 @@ JRT_ENTRY(void, OptoRuntime::multianewarray5_C(Klass* elem_type, int len1, int l
   dims[2] = len3;
   dims[3] = len4;
   dims[4] = len5;
+  Handle holder(THREAD, elem_type->klass_holder()); // keep the klass alive
   oop obj = ArrayKlass::cast(elem_type)->multi_allocate(5, dims, THREAD);
   deoptimize_caller_frame(thread, HAS_PENDING_EXCEPTION);
   thread->set_vm_result(obj);
@@ -432,6 +452,7 @@ JRT_ENTRY(void, OptoRuntime::multianewarrayN_C(Klass* elem_type, arrayOopDesc* d
   jint *c_dims = NEW_RESOURCE_ARRAY(jint, len);
   Copy::conjoint_jints_atomic(j_dims, c_dims, len);
 
+  Handle holder(THREAD, elem_type->klass_holder()); // keep the klass alive
   oop obj = ArrayKlass::cast(elem_type)->multi_allocate(len, c_dims, THREAD);
   deoptimize_caller_frame(thread, HAS_PENDING_EXCEPTION);
   thread->set_vm_result(obj);
@@ -845,13 +866,24 @@ const TypeFunc* OptoRuntime::aescrypt_block_Type() {
  */
 const TypeFunc* OptoRuntime::updateBytesCRC32_Type() {
   // create input type (domain)
-  int num_args      = 3;
+  int num_args = 3;
   int argcnt = num_args;
+  if (CCallingConventionRequiresIntsAsLongs) {
+    argcnt += 2;
+  }
   const Type** fields = TypeTuple::fields(argcnt);
   int argp = TypeFunc::Parms;
-  fields[argp++] = TypeInt::INT;        // crc
-  fields[argp++] = TypePtr::NOTNULL;    // src
-  fields[argp++] = TypeInt::INT;        // len
+  if (CCallingConventionRequiresIntsAsLongs) {
+    fields[argp++] = TypeLong::LONG;   // crc
+    fields[argp++] = Type::HALF;
+    fields[argp++] = TypePtr::NOTNULL; // src
+    fields[argp++] = TypeLong::LONG;   // len
+    fields[argp++] = Type::HALF;
+  } else {
+    fields[argp++] = TypeInt::INT;     // crc
+    fields[argp++] = TypePtr::NOTNULL; // src
+    fields[argp++] = TypeInt::INT;     // len
+  }
   assert(argp == TypeFunc::Parms+argcnt, "correct decoding");
   const TypeTuple* domain = TypeTuple::make(TypeFunc::Parms+argcnt, fields);
 
@@ -918,12 +950,24 @@ const TypeFunc* OptoRuntime::digestBase_implCompressMB_Type() {
   // create input type (domain)
   int num_args = 4;
   int argcnt = num_args;
+  if(CCallingConventionRequiresIntsAsLongs) {
+    argcnt += 2;
+  }
   const Type** fields = TypeTuple::fields(argcnt);
   int argp = TypeFunc::Parms;
-  fields[argp++] = TypePtr::NOTNULL; // buf
-  fields[argp++] = TypePtr::NOTNULL; // state
-  fields[argp++] = TypeInt::INT;     // ofs
-  fields[argp++] = TypeInt::INT;     // limit
+  if(CCallingConventionRequiresIntsAsLongs) {
+    fields[argp++] = TypePtr::NOTNULL; // buf
+    fields[argp++] = TypePtr::NOTNULL; // state
+    fields[argp++] = TypeLong::LONG;   // ofs
+    fields[argp++] = Type::HALF;
+    fields[argp++] = TypeLong::LONG;   // limit
+    fields[argp++] = Type::HALF;
+  } else {
+    fields[argp++] = TypePtr::NOTNULL; // buf
+    fields[argp++] = TypePtr::NOTNULL; // state
+    fields[argp++] = TypeInt::INT;     // ofs
+    fields[argp++] = TypeInt::INT;     // limit
+  }
   assert(argp == TypeFunc::Parms+argcnt, "correct decoding");
   const TypeTuple* domain = TypeTuple::make(TypeFunc::Parms+argcnt, fields);
 
@@ -956,6 +1000,110 @@ const TypeFunc* OptoRuntime::multiplyToLen_Type() {
   return TypeFunc::make(domain, range);
 }
 
+const TypeFunc* OptoRuntime::squareToLen_Type() {
+  // create input type (domain)
+  int num_args      = 4;
+  int argcnt = num_args;
+  const Type** fields = TypeTuple::fields(argcnt);
+  int argp = TypeFunc::Parms;
+  fields[argp++] = TypePtr::NOTNULL;    // x
+  fields[argp++] = TypeInt::INT;        // len
+  fields[argp++] = TypePtr::NOTNULL;    // z
+  fields[argp++] = TypeInt::INT;        // zlen
+  assert(argp == TypeFunc::Parms+argcnt, "correct decoding");
+  const TypeTuple* domain = TypeTuple::make(TypeFunc::Parms+argcnt, fields);
+
+  // no result type needed
+  fields = TypeTuple::fields(1);
+  fields[TypeFunc::Parms+0] = NULL;
+  const TypeTuple* range = TypeTuple::make(TypeFunc::Parms, fields);
+  return TypeFunc::make(domain, range);
+}
+
+// for mulAdd calls, 2 pointers and 3 ints, returning int
+const TypeFunc* OptoRuntime::mulAdd_Type() {
+  // create input type (domain)
+  int num_args      = 5;
+  int argcnt = num_args;
+  const Type** fields = TypeTuple::fields(argcnt);
+  int argp = TypeFunc::Parms;
+  fields[argp++] = TypePtr::NOTNULL;    // out
+  fields[argp++] = TypePtr::NOTNULL;    // in
+  fields[argp++] = TypeInt::INT;        // offset
+  fields[argp++] = TypeInt::INT;        // len
+  fields[argp++] = TypeInt::INT;        // k
+  assert(argp == TypeFunc::Parms+argcnt, "correct decoding");
+  const TypeTuple* domain = TypeTuple::make(TypeFunc::Parms+argcnt, fields);
+
+  // returning carry (int)
+  fields = TypeTuple::fields(1);
+  fields[TypeFunc::Parms+0] = TypeInt::INT;
+  const TypeTuple* range = TypeTuple::make(TypeFunc::Parms+1, fields);
+  return TypeFunc::make(domain, range);
+}
+
+const TypeFunc* OptoRuntime::montgomeryMultiply_Type() {
+  // create input type (domain)
+  int num_args      = 7;
+  int argcnt = num_args;
+  if (CCallingConventionRequiresIntsAsLongs) {
+    argcnt++;                           // additional placeholder
+  }
+  const Type** fields = TypeTuple::fields(argcnt);
+  int argp = TypeFunc::Parms;
+  fields[argp++] = TypePtr::NOTNULL;    // a
+  fields[argp++] = TypePtr::NOTNULL;    // b
+  fields[argp++] = TypePtr::NOTNULL;    // n
+  if (CCallingConventionRequiresIntsAsLongs) {
+    fields[argp++] = TypeLong::LONG;    // len
+    fields[argp++] = TypeLong::HALF;    // placeholder
+  } else {
+    fields[argp++] = TypeInt::INT;      // len
+  }
+  fields[argp++] = TypeLong::LONG;      // inv
+  fields[argp++] = Type::HALF;
+  fields[argp++] = TypePtr::NOTNULL;    // result
+  assert(argp == TypeFunc::Parms+argcnt, "correct decoding");
+  const TypeTuple* domain = TypeTuple::make(TypeFunc::Parms+argcnt, fields);
+
+  // result type needed
+  fields = TypeTuple::fields(1);
+  fields[TypeFunc::Parms+0] = TypePtr::NOTNULL;
+
+  const TypeTuple* range = TypeTuple::make(TypeFunc::Parms, fields);
+  return TypeFunc::make(domain, range);
+}
+
+const TypeFunc* OptoRuntime::montgomerySquare_Type() {
+  // create input type (domain)
+  int num_args      = 6;
+  int argcnt = num_args;
+  if (CCallingConventionRequiresIntsAsLongs) {
+    argcnt++;                           // additional placeholder
+  }
+  const Type** fields = TypeTuple::fields(argcnt);
+  int argp = TypeFunc::Parms;
+  fields[argp++] = TypePtr::NOTNULL;    // a
+  fields[argp++] = TypePtr::NOTNULL;    // n
+  if (CCallingConventionRequiresIntsAsLongs) {
+    fields[argp++] = TypeLong::LONG;    // len
+    fields[argp++] = TypeLong::HALF;    // placeholder
+  } else {
+    fields[argp++] = TypeInt::INT;      // len
+  }
+  fields[argp++] = TypeLong::LONG;      // inv
+  fields[argp++] = Type::HALF;
+  fields[argp++] = TypePtr::NOTNULL;    // result
+  assert(argp == TypeFunc::Parms+argcnt, "correct decoding");
+  const TypeTuple* domain = TypeTuple::make(TypeFunc::Parms+argcnt, fields);
+
+  // result type needed
+  fields = TypeTuple::fields(1);
+  fields[TypeFunc::Parms+0] = TypePtr::NOTNULL;
+
+  const TypeTuple* range = TypeTuple::make(TypeFunc::Parms, fields);
+  return TypeFunc::make(domain, range);
+}
 
 
 //------------- Interpreter state access for on stack replacement
@@ -1129,17 +1277,23 @@ JRT_ENTRY_NO_ASYNC(address, OptoRuntime::handle_exception_C_helper(JavaThread* t
         force_unwind ? NULL : nm->handler_for_exception_and_pc(exception, pc);
 
       if (handler_address == NULL) {
-        Handle original_exception(thread, exception());
-        handler_address = SharedRuntime::compute_compiled_exc_handler(nm, pc, exception, force_unwind, true);
+        bool recursive_exception = false;
+        handler_address = SharedRuntime::compute_compiled_exc_handler(nm, pc, exception, force_unwind, true, recursive_exception);
         assert (handler_address != NULL, "must have compiled handler");
         // Update the exception cache only when the unwind was not forced
         // and there didn't happen another exception during the computation of the
-        // compiled exception handler.
-        if (!force_unwind && original_exception() == exception()) {
+        // compiled exception handler. Checking for exception oop equality is not
+        // sufficient because some exceptions are pre-allocated and reused.
+        if (!force_unwind && !recursive_exception) {
           nm->add_handler_for_exception_and_pc(exception,pc,handler_address);
         }
       } else {
-        assert(handler_address == SharedRuntime::compute_compiled_exc_handler(nm, pc, exception, force_unwind, true), "Must be the same");
+#ifdef ASSERT
+        bool recursive_exception = false;
+        address computed_address = SharedRuntime::compute_compiled_exc_handler(nm, pc, exception, force_unwind, true, recursive_exception);
+        assert(recursive_exception || (handler_address == computed_address), err_msg("Handler address inconsistency: " PTR_FORMAT " != " PTR_FORMAT,
+                 p2i(handler_address), p2i(computed_address)));
+#endif
       }
     }
 

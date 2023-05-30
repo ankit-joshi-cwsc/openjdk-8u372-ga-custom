@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -33,6 +33,7 @@
 #include <netdb.h>
 #include <stdlib.h>
 #include <dlfcn.h>
+#include <sys/time.h>
 
 #ifndef _ALLBSD_SOURCE
 #include <values.h>
@@ -68,13 +69,6 @@
 
 #include "java_net_SocketOptions.h"
 
-/* needed from libsocket on Solaris 8 */
-
-getaddrinfo_f getaddrinfo_ptr = NULL;
-freeaddrinfo_f freeaddrinfo_ptr = NULL;
-gai_strerror_f gai_strerror_ptr = NULL;
-getnameinfo_f getnameinfo_ptr = NULL;
-
 /*
  * EXCLBIND socket options only on Solaris
  */
@@ -102,7 +96,9 @@ void setDefaultScopeID(JNIEnv *env, struct sockaddr *him)
     }
     int defaultIndex;
     struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)him;
-    if (sin6->sin6_family == AF_INET6 && (sin6->sin6_scope_id == 0)) {
+    if (sin6->sin6_family == AF_INET6 && (sin6->sin6_scope_id == 0) &&
+            (IN6_IS_ADDR_LINKLOCAL(&sin6->sin6_addr) ||
+             IN6_IS_ADDR_MULTICAST(&sin6->sin6_addr))) {
         defaultIndex = (*env)->GetStaticIntField(env, ni_class,
                                                  ni_defaultIndexID);
         sin6->sin6_scope_id = defaultIndex;
@@ -113,6 +109,8 @@ void setDefaultScopeID(JNIEnv *env, struct sockaddr *him)
 int getDefaultScopeID(JNIEnv *env) {
     static jclass ni_class = NULL;
     static jfieldID ni_defaultIndexID;
+    int defaultIndex = 0;
+
     if (ni_class == NULL) {
         jclass c = (*env)->FindClass(env, "java/net/NetworkInterface");
         CHECK_NULL_RETURN(c, 0);
@@ -123,7 +121,6 @@ int getDefaultScopeID(JNIEnv *env) {
         CHECK_NULL_RETURN(ni_defaultIndexID, 0);
         ni_class = c;
     }
-    int defaultIndex = 0;
     defaultIndex = (*env)->GetStaticIntField(env, ni_class,
                                              ni_defaultIndexID);
     return defaultIndex;
@@ -264,9 +261,7 @@ int cmpScopeID (unsigned int scope, struct sockaddr *him) {
 void
 NET_ThrowByNameWithLastError(JNIEnv *env, const char *name,
                    const char *defaultDetail) {
-    char errmsg[255];
-    sprintf(errmsg, "errno: %d, error: %s\n", errno, defaultDetail);
-    JNU_ThrowByNameWithLastError(env, name, errmsg);
+    JNU_ThrowByNameWithMessageAndLastError(env, name, defaultDetail);
 }
 
 void
@@ -341,6 +336,7 @@ jint  IPv6_supported()
     if (getsockname(0, (struct sockaddr *)&sa, &sa_len) == 0) {
         struct sockaddr *saP = (struct sockaddr *)&sa;
         if (saP->sa_family != AF_INET6) {
+            close(fd);
             return JNI_FALSE;
         }
     }
@@ -434,8 +430,7 @@ void ThrowUnknownHostExceptionWithGaiError(JNIEnv *env,
     int size;
     char *buf;
     const char *format = "%s: %s";
-    const char *error_string =
-        (gai_strerror_ptr == NULL) ? NULL : (*gai_strerror_ptr)(gai_error);
+    const char *error_string = gai_strerror(gai_error);
     if (error_string == NULL)
         error_string = "unknown error";
 
@@ -613,6 +608,8 @@ static void initLoopbackRoutes() {
 
                 if (loRoutesTemp == 0) {
                     free(loRoutes);
+                    loRoutes = NULL;
+                    nRoutes = 0;
                     fclose (f);
                     return;
                 }
@@ -793,6 +790,7 @@ NET_InetAddressToSockaddr(JNIEnv *env, jobject iaObj, int port, struct sockaddr 
                           int *len, jboolean v4MappedAddress) {
     jint family;
     family = getInetAddress_family(env, iaObj);
+    JNU_CHECK_EXCEPTION_RETURN(env, -1);
 #ifdef AF_INET6
     /* needs work. 1. family 2. clean up him6 etc deallocate memory */
     if (ipv6_available() && !(family == IPv4 && v4MappedAddress == JNI_FALSE)) {
@@ -804,6 +802,7 @@ NET_InetAddressToSockaddr(JNIEnv *env, jobject iaObj, int port, struct sockaddr 
         if (family == IPv4) { /* will convert to IPv4-mapped address */
             memset((char *) caddr, 0, 16);
             address = getInetAddress_addr(env, iaObj);
+            JNU_CHECK_EXCEPTION_RETURN(env, -1);
             if (address == INADDR_ANY) {
                 /* we would always prefer IPv6 wildcard address
                    caddr[10] = 0xff;
@@ -912,6 +911,7 @@ NET_InetAddressToSockaddr(JNIEnv *env, jobject iaObj, int port, struct sockaddr 
             }
             memset((char *) him4, 0, sizeof(struct sockaddr_in));
             address = getInetAddress_addr(env, iaObj);
+            JNU_CHECK_EXCEPTION_RETURN(env, -1);
             him4->sin_port = htons((short) port);
             him4->sin_addr.s_addr = (uint32_t) htonl(address);
             him4->sin_family = AF_INET;
@@ -1216,16 +1216,10 @@ NET_GetSockOpt(int fd, int level, int opt, void *result,
                int *len)
 {
     int rv;
+    socklen_t socklen = *len;
 
-#ifdef __solaris__
-    rv = getsockopt(fd, level, opt, result, len);
-#else
-    {
-        socklen_t socklen = *len;
-        rv = getsockopt(fd, level, opt, result, &socklen);
-        *len = socklen;
-    }
-#endif
+    rv = getsockopt(fd, level, opt, result, &socklen);
+    *len = socklen;
 
     if (rv < 0) {
         return rv;
@@ -1670,3 +1664,20 @@ NET_Wait(JNIEnv *env, jint fd, jint flags, jint timeout)
 
     return timeout;
 }
+
+#if !defined(__solaris__)
+long NET_GetCurrentTime() {
+    struct timeval time;
+    gettimeofday(&time, NULL);
+    return (time.tv_sec * 1000 + time.tv_usec / 1000);
+}
+
+int NET_TimeoutWithCurrentTime(int s, long timeout, long currentTime) {
+    return NET_Timeout0(s, timeout, currentTime);
+}
+
+int NET_Timeout(int s, long timeout) {
+    long currentTime = (timeout > 0) ? NET_GetCurrentTime() : 0;
+    return NET_Timeout0(s, timeout, currentTime);
+}
+#endif

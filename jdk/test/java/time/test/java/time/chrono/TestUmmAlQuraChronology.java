@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -30,6 +30,7 @@ import static java.time.temporal.ChronoField.DAY_OF_YEAR;
 import static java.time.temporal.ChronoField.MONTH_OF_YEAR;
 import static java.time.temporal.ChronoField.YEAR;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 
@@ -71,6 +72,7 @@ import org.testng.annotations.Test;
 /**
  * Tests for the Umm alQura chronology and data.
  * Note: The dates used for testing are just a sample of calendar data.
+ * @bug 8067800
  */
 @Test
 public class TestUmmAlQuraChronology {
@@ -530,6 +532,24 @@ public class TestUmmAlQuraChronology {
         assertEquals(date.isLeapYear(), leapyear);
     }
 
+    // Data provider to verify that a given hijrah year is outside the range of supported years
+    // The values are dependent on the currently configured UmmAlQura calendar data
+    @DataProvider(name="OutOfRangeLeapYears")
+    Object[][] data_invalid_leapyears() {
+        return new Object[][] {
+                {1299},
+                {1601},
+                {Integer.MAX_VALUE},
+                {Integer.MIN_VALUE},
+        };
+    }
+
+    @Test(dataProvider="OutOfRangeLeapYears")
+    public void test_notLeapYears(int y) {
+        assertFalse(HijrahChronology.INSTANCE.isLeapYear(y), "Out of range leap year");
+    }
+
+
     // Date samples to convert HijrahDate to LocalDate and vice versa
     @DataProvider(name="samples")
     Object[][] data_samples() {
@@ -755,8 +775,10 @@ public class TestUmmAlQuraChronology {
             {HijrahDate.of(1350,5,15), "Japanese Showa 6-09-28"},
             {HijrahDate.of(1434,5,1), "Japanese Heisei 25-03-13"},
             {HijrahDate.of(1436,1,1), "Japanese Heisei 26-10-25"},
-            {HijrahDate.of(1500,6,12), "Japanese Heisei 89-05-05"},
-            {HijrahDate.of(1550,3,11), "Japanese Heisei 137-08-11"},
+            {HijrahDate.of(1440,8,25), "Japanese Heisei 31-04-30"},
+            {HijrahDate.of(1440,8,26), "Japanese Reiwa 1-05-01"},
+            {HijrahDate.of(1500,6,12), "Japanese Reiwa 59-05-05"},
+            {HijrahDate.of(1550,3,11), "Japanese Reiwa 107-08-11"},
         };
     }
 

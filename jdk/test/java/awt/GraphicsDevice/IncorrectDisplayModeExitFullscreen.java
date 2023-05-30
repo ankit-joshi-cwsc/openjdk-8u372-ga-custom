@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -27,16 +27,17 @@ import java.awt.DisplayMode;
 import java.awt.Frame;
 import java.awt.GraphicsDevice;
 import java.awt.GraphicsEnvironment;
-import java.awt.Toolkit;
-
-import sun.awt.SunToolkit;
 
 /**
  * @test
  * @bug 8019587
  * @author Sergey Bylokhov
+ * @library ../../../lib/testlibrary/
+ * @build ExtendedRobot
+ * @run main IncorrectDisplayModeExitFullscreen
  */
 public class IncorrectDisplayModeExitFullscreen {
+    static ExtendedRobot robot;
 
     public static void main(final String[] args) {
 
@@ -44,6 +45,7 @@ public class IncorrectDisplayModeExitFullscreen {
                 GraphicsEnvironment.getLocalGraphicsEnvironment()
                                    .getScreenDevices();
         if (devices.length < 2 || devices[0].getDisplayModes().length < 2
+                || !devices[0].isDisplayChangeSupported()
                 || !devices[0].isFullScreenSupported()
                 || !devices[1].isFullScreenSupported()) {
             System.err.println("Testcase is not applicable");
@@ -62,6 +64,13 @@ public class IncorrectDisplayModeExitFullscreen {
         if (nonDefaultDM == null) {
             System.err.println("Testcase is not applicable");
             return;
+        }
+
+        try {
+            robot = new ExtendedRobot();
+        }catch(Exception ex) {
+            ex.printStackTrace();
+            throw new RuntimeException("Unexpected failure");
         }
 
         final Frame frame = new Frame();
@@ -85,10 +94,6 @@ public class IncorrectDisplayModeExitFullscreen {
         }
     }
     private static void sleep() {
-        ((SunToolkit) Toolkit.getDefaultToolkit()).realSync();
-        try {
-            Thread.sleep(1500);
-        } catch (InterruptedException ignored) {
-        }
+        robot.waitForIdle(1500);
     }
 }

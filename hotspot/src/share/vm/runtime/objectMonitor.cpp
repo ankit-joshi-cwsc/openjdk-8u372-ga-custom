@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2015, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,6 +24,8 @@
 
 #include "precompiled.hpp"
 #include "classfile/vmSymbols.hpp"
+#include "jfr/jfrEvents.hpp"
+#include "jfr/support/jfrThreadId.hpp"
 #include "memory/resourceArea.hpp"
 #include "oops/markOop.hpp"
 #include "oops/oop.inline.hpp"
@@ -37,8 +39,6 @@
 #include "runtime/stubRoutines.hpp"
 #include "runtime/thread.inline.hpp"
 #include "services/threadService.hpp"
-#include "trace/tracing.hpp"
-#include "trace/traceMacros.hpp"
 #include "utilities/dtrace.hpp"
 #include "utilities/macros.hpp"
 #include "utilities/preserveException.hpp"
@@ -53,6 +53,9 @@
 #endif
 #ifdef TARGET_OS_FAMILY_bsd
 # include "os_bsd.inline.hpp"
+#endif
+#if INCLUDE_JFR
+#include "jfr/support/jfrFlush.hpp"
 #endif
 
 #if defined(__GNUC__) && !defined(IA64) && !defined(PPC64)
@@ -226,7 +229,8 @@ static volatile int InitDone       = 0 ;
 //
 // * The monitor entry list operations avoid locks, but strictly speaking
 //   they're not lock-free.  Enter is lock-free, exit is not.
-//   See http://j2se.east/~dice/PERSIST/040825-LockFreeQueues.html
+//   For a description of 'Methods and apparatus providing non-blocking access
+//   to a resource,' see U.S. Pat. No. 7844973.
 //
 // * The cxq can have multiple concurrent "pushers" but only one concurrent
 //   detaching thread.  This mechanism is immune from the ABA corruption.
@@ -375,10 +379,17 @@ void ATTR ObjectMonitor::enter(TRAPS) {
   // Ensure the object-monitor relationship remains stable while there's contention.
   Atomic::inc_ptr(&_count);
 
+  JFR_ONLY(JfrConditionalFlushWithStacktrace<EventJavaMonitorEnter> flush(jt);)
   EventJavaMonitorEnter event;
+  if (event.should_commit()) {
+    event.set_monitorClass(((oop)this->object())->klass());
+    event.set_address((uintptr_t)(this->object_addr()));
+  }
 
   { // Change java thread status to indicate blocked on monitor enter.
     JavaThreadBlockedOnMonitorEnterState jtbmes(jt, this);
+
+    Self->set_current_pending_monitor(this);
 
     DTRACE_MONITOR_PROBE(contended__enter, this, object(), jt);
     if (JvmtiExport::should_post_monitor_contended_enter()) {
@@ -393,8 +404,6 @@ void ATTR ObjectMonitor::enter(TRAPS) {
 
     OSThreadContendState osts(Self->osthread());
     ThreadBlockInVM tbivm(jt);
-
-    Self->set_current_pending_monitor(this);
 
     // TODO-FIXME: change the following for(;;) loop to straight-line code.
     for (;;) {
@@ -464,9 +473,7 @@ void ATTR ObjectMonitor::enter(TRAPS) {
   }
 
   if (event.should_commit()) {
-    event.set_klass(((oop)this->object())->klass());
-    event.set_previousOwner((TYPE_JAVALANGTHREAD)_previous_owner_tid);
-    event.set_address((TYPE_ADDRESS)(uintptr_t)(this->object_addr()));
+    event.set_previousOwner((uintptr_t)_previous_owner_tid);
     event.commit();
   }
 
@@ -989,11 +996,11 @@ void ATTR ObjectMonitor::exit(bool not_suspended, TRAPS) {
       _Responsible = NULL ;
    }
 
-#if INCLUDE_TRACE
+#if INCLUDE_JFR
    // get the owner's thread id for the MonitorEnter event
    // if it is enabled and the thread isn't suspended
-   if (not_suspended && Tracing::is_event_enabled(TraceJavaMonitorEnterEvent)) {
-     _previous_owner_tid = SharedRuntime::get_java_tid(Self);
+   if (not_suspended && EventJavaMonitorEnter::is_enabled()) {
+    _previous_owner_tid = JFR_THREAD_ID(Self);
    }
 #endif
 
@@ -1442,15 +1449,17 @@ static int Adjust (volatile int * adr, int dx) {
 }
 
 // helper method for posting a monitor wait event
-void ObjectMonitor::post_monitor_wait_event(EventJavaMonitorWait* event,
-                                                           jlong notifier_tid,
-                                                           jlong timeout,
-                                                           bool timedout) {
-  event->set_klass(((oop)this->object())->klass());
-  event->set_timeout((TYPE_ULONG)timeout);
-  event->set_address((TYPE_ADDRESS)(uintptr_t)(this->object_addr()));
-  event->set_notifier((TYPE_OSTHREAD)notifier_tid);
-  event->set_timedOut((TYPE_BOOLEAN)timedout);
+static void post_monitor_wait_event(EventJavaMonitorWait* event,
+                                    ObjectMonitor* monitor,
+                                    jlong notifier_tid,
+                                    jlong timeout,
+                                    bool timedout) {
+  assert(monitor != NULL, "invariant");
+  event->set_monitorClass(((oop)monitor->object())->klass());
+  event->set_timeout(timeout);
+  event->set_address((uintptr_t)monitor->object_addr());
+  event->set_notifier((u8)notifier_tid);
+  event->set_timedOut(timedout);
   event->commit();
 }
 
@@ -1488,7 +1497,7 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
         // this ObjectMonitor.
      }
      if (event.should_commit()) {
-       post_monitor_wait_event(&event, 0, millis, false);
+       post_monitor_wait_event(&event, this, 0, millis, false);
      }
      TEVENT (Wait - Throw IEX) ;
      THROW(vmSymbols::java_lang_InterruptedException());
@@ -1632,7 +1641,7 @@ void ObjectMonitor::wait(jlong millis, bool interruptible, TRAPS) {
      }
 
      if (event.should_commit()) {
-       post_monitor_wait_event(&event, node._notifier_tid, millis, ret == OS_TIMEOUT);
+       post_monitor_wait_event(&event, this, node._notifier_tid, millis, ret == OS_TIMEOUT);
      }
 
      OrderAccess::fence() ;
@@ -1715,7 +1724,7 @@ void ObjectMonitor::notify(TRAPS) {
      }
      iterator->_notified = 1 ;
      Thread * Self = THREAD;
-     iterator->_notifier_tid = Self->osthread()->thread_id();
+     iterator->_notifier_tid = JFR_THREAD_ID(Self);
 
      ObjectWaiter * List = _EntryList ;
      if (List != NULL) {
@@ -1841,7 +1850,7 @@ void ObjectMonitor::notifyAll(TRAPS) {
      guarantee (iterator->_notified == 0, "invariant") ;
      iterator->_notified = 1 ;
      Thread * Self = THREAD;
-     iterator->_notifier_tid = Self->osthread()->thread_id();
+     iterator->_notifier_tid = JFR_THREAD_ID(Self);
      if (Policy != 4) {
         iterator->TState = ObjectWaiter::TS_ENTER ;
      }
@@ -1955,7 +1964,8 @@ void ObjectMonitor::notifyAll(TRAPS) {
 // (duration) or we can fix the count at approximately the duration of
 // a context switch and vary the frequency.   Of course we could also
 // vary both satisfying K == Frequency * Duration, where K is adaptive by monitor.
-// See http://j2se.east/~dice/PERSIST/040824-AdaptiveSpinning.html.
+// For a description of 'Adaptive spin-then-block mutual exclusion in
+// multi-threaded processing,' see U.S. Pat. No. 8046758.
 //
 // This implementation varies the duration "D", where D varies with
 // the success rate of recent spin attempts. (D is capped at approximately
@@ -2306,6 +2316,7 @@ ObjectWaiter::ObjectWaiter(Thread* thread) {
   _next     = NULL;
   _prev     = NULL;
   _notified = 0;
+  _notifier_tid = 0;
   TState    = TS_RUN ;
   _thread   = thread;
   _event    = thread->_ParkEvent ;
@@ -2527,6 +2538,10 @@ void ObjectMonitor::DeferredInitialize () {
   SETKNOB(FastHSSEC) ;
   #undef SETKNOB
 
+  if (Knob_Verbose) {
+    sanity_checks();
+  }
+
   if (os::is_MP()) {
      BackOffMask = (1 << Knob_SpinBackOff) - 1 ;
      if (Knob_ReportSettings) ::printf ("BackOffMask=%X\n", BackOffMask) ;
@@ -2545,6 +2560,66 @@ void ObjectMonitor::DeferredInitialize () {
   free (knobs) ;
   OrderAccess::fence() ;
   InitDone = 1 ;
+}
+
+void ObjectMonitor::sanity_checks() {
+  int error_cnt = 0;
+  int warning_cnt = 0;
+  bool verbose = Knob_Verbose != 0 NOT_PRODUCT(|| VerboseInternalVMTests);
+
+  if (verbose) {
+    tty->print_cr("INFO: sizeof(ObjectMonitor)=" SIZE_FORMAT,
+                  sizeof(ObjectMonitor));
+  }
+
+  uint cache_line_size = VM_Version::L1_data_cache_line_size();
+  if (verbose) {
+    tty->print_cr("INFO: L1_data_cache_line_size=%u", cache_line_size);
+  }
+
+  ObjectMonitor dummy;
+  u_char *addr_begin  = (u_char*)&dummy;
+  u_char *addr_header = (u_char*)&dummy._header;
+  u_char *addr_owner  = (u_char*)&dummy._owner;
+
+  uint offset_header = (uint)(addr_header - addr_begin);
+  if (verbose) tty->print_cr("INFO: offset(_header)=%u", offset_header);
+
+  uint offset_owner = (uint)(addr_owner - addr_begin);
+  if (verbose) tty->print_cr("INFO: offset(_owner)=%u", offset_owner);
+
+  if ((uint)(addr_header - addr_begin) != 0) {
+    tty->print_cr("ERROR: offset(_header) must be zero (0).");
+    error_cnt++;
+  }
+
+  if (cache_line_size != 0) {
+    // We were able to determine the L1 data cache line size so
+    // do some cache line specific sanity checks
+
+    if ((offset_owner - offset_header) < cache_line_size) {
+      tty->print_cr("WARNING: the _header and _owner fields are closer "
+                    "than a cache line which permits false sharing.");
+      warning_cnt++;
+    }
+
+    if ((sizeof(ObjectMonitor) % cache_line_size) != 0) {
+      tty->print_cr("WARNING: ObjectMonitor size is not a multiple of "
+                    "a cache line which permits false sharing.");
+      warning_cnt++;
+    }
+  }
+
+  ObjectSynchronizer::sanity_checks(verbose, cache_line_size, &error_cnt,
+                                    &warning_cnt);
+
+  if (verbose || error_cnt != 0 || warning_cnt != 0) {
+    tty->print_cr("INFO: error_cnt=%d", error_cnt);
+    tty->print_cr("INFO: warning_cnt=%d", warning_cnt);
+  }
+
+  guarantee(error_cnt == 0,
+            "Fatal error(s) found in ObjectMonitor::sanity_checks()");
 }
 
 #ifndef PRODUCT

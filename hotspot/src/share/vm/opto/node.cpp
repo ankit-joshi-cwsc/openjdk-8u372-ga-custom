@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -286,6 +286,10 @@ void DUIterator_Last::verify_step(uint num_edges) {
 #ifdef _MSC_VER // the IDX_INIT hack falls foul of warning C4355
 #pragma warning( disable:4355 ) // 'this' : used in base member initializer list
 #endif
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma GCC diagnostic ignored "-Wuninitialized"
+#endif
 
 // Out-of-line code from node constructors.
 // Executed only when extra debug info. is being passed around.
@@ -325,6 +329,9 @@ inline int Node::Init(int req, Compile* C) {
 // Create a Node, with a given number of required edges.
 Node::Node(uint req)
   : _idx(IDX_INIT(req))
+#ifdef ASSERT
+  , _parse_idx(_idx)
+#endif
 {
   assert( req < Compile::current()->max_node_limit() - NodeLimitFudgeFactor, "Input limit exceeded" );
   debug_only( verify_construction() );
@@ -344,6 +351,9 @@ Node::Node(uint req)
 //------------------------------Node-------------------------------------------
 Node::Node(Node *n0)
   : _idx(IDX_INIT(1))
+#ifdef ASSERT
+  , _parse_idx(_idx)
+#endif
 {
   debug_only( verify_construction() );
   NOT_PRODUCT(nodes_created++);
@@ -356,6 +366,9 @@ Node::Node(Node *n0)
 //------------------------------Node-------------------------------------------
 Node::Node(Node *n0, Node *n1)
   : _idx(IDX_INIT(2))
+#ifdef ASSERT
+  , _parse_idx(_idx)
+#endif
 {
   debug_only( verify_construction() );
   NOT_PRODUCT(nodes_created++);
@@ -370,6 +383,9 @@ Node::Node(Node *n0, Node *n1)
 //------------------------------Node-------------------------------------------
 Node::Node(Node *n0, Node *n1, Node *n2)
   : _idx(IDX_INIT(3))
+#ifdef ASSERT
+  , _parse_idx(_idx)
+#endif
 {
   debug_only( verify_construction() );
   NOT_PRODUCT(nodes_created++);
@@ -386,6 +402,9 @@ Node::Node(Node *n0, Node *n1, Node *n2)
 //------------------------------Node-------------------------------------------
 Node::Node(Node *n0, Node *n1, Node *n2, Node *n3)
   : _idx(IDX_INIT(4))
+#ifdef ASSERT
+  , _parse_idx(_idx)
+#endif
 {
   debug_only( verify_construction() );
   NOT_PRODUCT(nodes_created++);
@@ -404,6 +423,9 @@ Node::Node(Node *n0, Node *n1, Node *n2, Node *n3)
 //------------------------------Node-------------------------------------------
 Node::Node(Node *n0, Node *n1, Node *n2, Node *n3, Node *n4)
   : _idx(IDX_INIT(5))
+#ifdef ASSERT
+  , _parse_idx(_idx)
+#endif
 {
   debug_only( verify_construction() );
   NOT_PRODUCT(nodes_created++);
@@ -425,6 +447,9 @@ Node::Node(Node *n0, Node *n1, Node *n2, Node *n3, Node *n4)
 Node::Node(Node *n0, Node *n1, Node *n2, Node *n3,
                      Node *n4, Node *n5)
   : _idx(IDX_INIT(6))
+#ifdef ASSERT
+  , _parse_idx(_idx)
+#endif
 {
   debug_only( verify_construction() );
   NOT_PRODUCT(nodes_created++);
@@ -448,6 +473,9 @@ Node::Node(Node *n0, Node *n1, Node *n2, Node *n3,
 Node::Node(Node *n0, Node *n1, Node *n2, Node *n3,
                      Node *n4, Node *n5, Node *n6)
   : _idx(IDX_INIT(7))
+#ifdef ASSERT
+  , _parse_idx(_idx)
+#endif
 {
   debug_only( verify_construction() );
   NOT_PRODUCT(nodes_created++);
@@ -468,6 +496,10 @@ Node::Node(Node *n0, Node *n1, Node *n2, Node *n3,
   _in[5] = n5; if (n5 != NULL) n5->add_out((Node *)this);
   _in[6] = n6; if (n6 != NULL) n6->add_out((Node *)this);
 }
+
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
 
 
 //------------------------------clone------------------------------------------
@@ -497,6 +529,11 @@ Node *Node::clone() const {
     C->add_macro_node(n);
   if (is_expensive())
     C->add_expensive_node(n);
+  // If the cloned node is a range check dependent CastII, add it to the list.
+  CastIINode* cast = n->isa_CastII();
+  if (cast != NULL && cast->has_range_check()) {
+    C->add_range_check_cast(cast);
+  }
 
   n->set_idx(C->next_unique()); // Get new unique index as well
   debug_only( n->verify_construction() );
@@ -625,6 +662,11 @@ void Node::destruct() {
   if (is_expensive()) {
     compile->remove_expensive_node(this);
   }
+  CastIINode* cast = isa_CastII();
+  if (cast != NULL && cast->has_range_check()) {
+    compile->remove_range_check_cast(cast);
+  }
+
   if (is_SafePoint()) {
     as_SafePoint()->delete_replaced_nodes();
   }
@@ -776,8 +818,9 @@ void Node::del_req( uint idx ) {
   // First remove corresponding def-use edge
   Node *n = in(idx);
   if (n != NULL) n->del_out((Node *)this);
-  _in[idx] = in(--_cnt);  // Compact the array
-  _in[_cnt] = NULL;       // NULL out emptied slot
+  _in[idx] = in(--_cnt); // Compact the array
+  // Avoid spec violation: Gap in prec edges.
+  close_prec_gap_at(_cnt);
 }
 
 //------------------------------del_req_ordered--------------------------------
@@ -789,10 +832,11 @@ void Node::del_req_ordered( uint idx ) {
   // First remove corresponding def-use edge
   Node *n = in(idx);
   if (n != NULL) n->del_out((Node *)this);
-  if (idx < _cnt - 1) { // Not last edge ?
-    Copy::conjoint_words_to_lower((HeapWord*)&_in[idx+1], (HeapWord*)&_in[idx], ((_cnt-idx-1)*sizeof(Node*)));
+  if (idx < --_cnt) {    // Not last edge ?
+    Copy::conjoint_words_to_lower((HeapWord*)&_in[idx+1], (HeapWord*)&_in[idx], ((_cnt-idx)*sizeof(Node*)));
   }
-  _in[--_cnt] = NULL;   // NULL out emptied slot
+  // Avoid spec violation: Gap in prec edges.
+  close_prec_gap_at(_cnt);
 }
 
 //------------------------------ins_req----------------------------------------
@@ -823,10 +867,12 @@ int Node::replace_edge(Node* old, Node* neww) {
   uint nrep = 0;
   for (uint i = 0; i < len(); i++) {
     if (in(i) == old) {
-      if (i < req())
+      if (i < req()) {
         set_req(i, neww);
-      else
+      } else {
+        assert(find_prec_edge(neww) == -1, err_msg("spec violation: duplicated prec edge (node %d -> %d)", _idx, neww->_idx));
         set_prec(i, neww);
+      }
       nrep++;
     }
   }
@@ -891,6 +937,17 @@ Node* Node::uncast() const {
     return (Node*) this;
 }
 
+// Find out of current node that matches opcode.
+Node* Node::find_out_with(int opcode) {
+  for (DUIterator_Fast imax, i = fast_outs(imax); i < imax; i++) {
+    Node* use = fast_out(i);
+    if (use->Opcode() == opcode) {
+      return use;
+    }
+  }
+  return NULL;
+}
+
 //---------------------------uncast_helper-------------------------------------
 Node* Node::uncast_helper(const Node* p) {
 #ifdef ASSERT
@@ -932,24 +989,27 @@ void Node::add_prec( Node *n ) {
 
   // Find a precedence edge to move
   uint i = _cnt;
-  while( in(i) != NULL ) i++;
+  while( in(i) != NULL ) {
+    if (in(i) == n) return; // Avoid spec violation: duplicated prec edge.
+    i++;
+  }
   _in[i] = n;                                // Stuff prec edge over NULL
   if ( n != NULL) n->add_out((Node *)this);  // Add mirror edge
+
+#ifdef ASSERT
+  while ((++i)<_max) { assert(_in[i] == NULL, err_msg("spec violation: Gap in prec edges (node %d)", _idx)); }
+#endif
 }
 
 //------------------------------rm_prec----------------------------------------
 // Remove a precedence input.  Precedence inputs are unordered, with
 // duplicates removed and NULLs packed down at the end.
 void Node::rm_prec( uint j ) {
-
-  // Find end of precedence list to pack NULLs
-  uint i;
-  for( i=j; i<_max; i++ )
-    if( !_in[i] )               // Find the NULL at end of prec edge list
-      break;
-  if (_in[j] != NULL) _in[j]->del_out((Node *)this);
-  _in[j] = _in[--i];            // Move last element over removed guy
-  _in[i] = NULL;                // NULL out last element
+  assert(j < _max, err_msg("oob: i=%d, _max=%d", j, _max));
+  assert(j >= _cnt, "not a precedence edge");
+  if (_in[j] == NULL) return;   // Avoid spec violation: Gap in prec edges.
+  _in[j]->del_out((Node *)this);
+  close_prec_gap_at(j);
 }
 
 //------------------------------size_of----------------------------------------
@@ -1093,8 +1153,8 @@ bool Node::has_special_unique_user() const {
   if( this->is_Store() ) {
     // Condition for back-to-back stores folding.
     return n->Opcode() == op && n->in(MemNode::Memory) == this;
-  } else if (this->is_Load()) {
-    // Condition for removing an unused LoadNode from the MemBarAcquire precedence input
+  } else if (this->is_Load() || this->is_DecodeN()) {
+    // Condition for removing an unused LoadNode or DecodeNNode from the MemBarAcquire precedence input
     return n->Opcode() == Op_MemBarAcquire;
   } else if( op == Op_AddL ) {
     // Condition for convL2I(addL(x,y)) ==> addI(convL2I(x),convL2I(y))
@@ -1269,6 +1329,9 @@ static void kill_dead_code( Node *dead, PhaseIterGVN *igvn ) {
 
   while (nstack.size() > 0) {
     dead = nstack.pop();
+    if (dead->Opcode() == Op_SafePoint) {
+      dead->as_SafePoint()->disconnect_from_root(igvn);
+    }
     if (dead->outcnt() > 0) {
       // Keep dead node on stack until all uses are processed.
       nstack.push(dead);
@@ -1319,6 +1382,10 @@ static void kill_dead_code( Node *dead, PhaseIterGVN *igvn ) {
       }
       if (dead->is_expensive()) {
         igvn->C->remove_expensive_node(dead);
+      }
+      CastIINode* cast = dead->isa_CastII();
+      if (cast != NULL && cast->has_range_check()) {
+        igvn->C->remove_range_check_cast(cast);
       }
       igvn->C->record_dead_node(dead->_idx);
       // Kill all inputs to the dead guy
@@ -1749,7 +1816,7 @@ static void dump_nodes(const Node* start, int d, bool only_ctrl) {
   uint depth = (uint)ABS(d);
   int direction = d;
   Compile* C = Compile::current();
-  GrowableArray <Node *> nstack(C->unique());
+  GrowableArray <Node *> nstack(C->live_nodes());
 
   nstack.append(s);
   int begin = 0;
@@ -2079,6 +2146,17 @@ void Node_List::dump() const {
     if( _nodes[i] ) {
       tty->print("%5d--> ",i);
       _nodes[i]->dump();
+    }
+#endif
+}
+
+void Node_List::dump_simple() const {
+#ifndef PRODUCT
+  for( uint i = 0; i < _cnt; i++ )
+    if( _nodes[i] ) {
+      tty->print(" %d", _nodes[i]->_idx);
+    } else {
+      tty->print(" NULL");
     }
 #endif
 }

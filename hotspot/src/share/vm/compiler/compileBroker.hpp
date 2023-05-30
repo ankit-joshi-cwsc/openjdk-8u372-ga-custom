@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -173,7 +173,8 @@ class CompilerCounters : public CHeapObj<mtCompiler> {
     // these methods should be called in a thread safe context
 
     void set_current_method(const char* method) {
-      strncpy(_current_method, method, (size_t)cmname_buffer_length);
+      strncpy(_current_method, method, (size_t)cmname_buffer_length-1);
+      _current_method[cmname_buffer_length-1] = '\0';
       if (UsePerfData) _perf_current_method->set_value(method);
     }
 
@@ -339,7 +340,6 @@ class CompileBroker: AllStatic {
 
   static CompilerThread* make_compiler_thread(const char* name, CompileQueue* queue, CompilerCounters* counters, AbstractCompiler* comp, TRAPS);
   static void init_compiler_threads(int c1_compiler_count, int c2_compiler_count);
-  static bool compilation_is_complete  (methodHandle method, int osr_bci, int comp_level);
   static bool compilation_is_prohibited(methodHandle method, int osr_bci, int comp_level);
   static bool is_compile_blocking      ();
   static void preload_classes          (methodHandle method, TRAPS);
@@ -389,6 +389,7 @@ class CompileBroker: AllStatic {
     return NULL;
   }
 
+  static bool compilation_is_complete(methodHandle method, int osr_bci, int comp_level);
   static bool compilation_is_in_queue(methodHandle method);
   static int queue_size(int comp_level) {
     CompileQueue *q = compile_queue(comp_level);

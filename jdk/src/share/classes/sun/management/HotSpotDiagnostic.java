@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,6 +32,8 @@ import javax.management.ObjectName;
 
 import com.sun.management.HotSpotDiagnosticMXBean;
 import com.sun.management.VMOption;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
 
 /**
  * Implementation of the diagnostic MBean for Hotspot VM.
@@ -40,7 +42,16 @@ public class HotSpotDiagnostic implements HotSpotDiagnosticMXBean {
     public HotSpotDiagnostic() {
     }
 
+    @Override
     public void dumpHeap(String outputFile, boolean live) throws IOException {
+
+        String propertyName = "jdk.management.heapdump.allowAnyFileSuffix";
+        PrivilegedAction<Boolean> pa = () -> Boolean.parseBoolean(System.getProperty(propertyName, "false"));
+        boolean allowAnyFileSuffix = AccessController.doPrivileged(pa);
+        if (!allowAnyFileSuffix && !outputFile.endsWith(".hprof")) {
+            throw new IllegalArgumentException("heapdump file must have .hprof extention");
+        }
+
         SecurityManager security = System.getSecurityManager();
         if (security != null) {
             security.checkWrite(outputFile);
@@ -52,6 +63,7 @@ public class HotSpotDiagnostic implements HotSpotDiagnosticMXBean {
 
     private native void dumpHeap0(String outputFile, boolean live) throws IOException;
 
+    @Override
     public List<VMOption> getDiagnosticOptions() {
         List<Flag> allFlags = Flag.getAllFlags();
         List<VMOption> result = new ArrayList<>();
@@ -63,6 +75,7 @@ public class HotSpotDiagnostic implements HotSpotDiagnosticMXBean {
         return result;
     }
 
+    @Override
     public VMOption getVMOption(String name) {
         if (name == null) {
             throw new NullPointerException("name cannot be null");
@@ -76,6 +89,7 @@ public class HotSpotDiagnostic implements HotSpotDiagnosticMXBean {
         return f.getVMOption();
     }
 
+    @Override
     public void setVMOption(String name, String value) {
         if (name == null) {
             throw new NullPointerException("name cannot be null");
@@ -102,12 +116,18 @@ public class HotSpotDiagnostic implements HotSpotDiagnosticMXBean {
                 long l = Long.parseLong(value);
                 Flag.setLongValue(name, l);
             } catch (NumberFormatException e) {
-                IllegalArgumentException iae =
-                    new IllegalArgumentException("Invalid value:" +
+                throw new IllegalArgumentException("Invalid value:" +
                         " VM Option \"" + name + "\"" +
-                        " expects numeric value");
-                iae.initCause(e);
-                throw iae;
+                        " expects numeric value", e);
+            }
+        } else if (v instanceof Double) {
+            try {
+                double d = Double.parseDouble(value);
+                Flag.setDoubleValue(name, d);
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("Invalid value:" +
+                        " VM Option \"" + name + "\"" +
+                        " expects numeric value", e);
             }
         } else if (v instanceof Boolean) {
             if (!value.equalsIgnoreCase("true") &&
@@ -126,6 +146,7 @@ public class HotSpotDiagnostic implements HotSpotDiagnosticMXBean {
         }
     }
 
+    @Override
     public ObjectName getObjectName() {
         return Util.newObjectName("com.sun.management:type=HotSpotDiagnostic");
     }

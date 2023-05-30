@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -51,7 +51,7 @@ PRAGMA_FORMAT_MUTE_WARNINGS_FOR_GCC
 Dict* Type::_shared_type_dict = NULL;
 
 // Array which maps compiler types to Basic Types
-Type::TypeInfo Type::_type_info[Type::lastype] = {
+const Type::TypeInfo Type::_type_info[Type::lastype] = {
   { Bad,             T_ILLEGAL,    "bad",           false, Node::NotAMachineReg, relocInfo::none          },  // Bad
   { Control,         T_ILLEGAL,    "control",       false, 0,                    relocInfo::none          },  // Control
   { Bottom,          T_VOID,       "top",           false, 0,                    relocInfo::none          },  // Top
@@ -147,6 +147,33 @@ BasicType Type::array_element_basic_type() const {
     return T_VOID;
   }
   return bt;
+}
+
+// For two instance arrays of same dimension, return the base element types.
+// Otherwise or if the arrays have different dimensions, return NULL.
+void Type::get_arrays_base_elements(const Type *a1, const Type *a2,
+                                    const TypeInstPtr **e1, const TypeInstPtr **e2) {
+
+  if (e1) *e1 = NULL;
+  if (e2) *e2 = NULL;
+  const TypeAryPtr* a1tap = (a1 == NULL) ? NULL : a1->isa_aryptr();
+  const TypeAryPtr* a2tap = (a2 == NULL) ? NULL : a2->isa_aryptr();
+
+  if (a1tap != NULL && a2tap != NULL) {
+    // Handle multidimensional arrays
+    const TypePtr* a1tp = a1tap->elem()->make_ptr();
+    const TypePtr* a2tp = a2tap->elem()->make_ptr();
+    while (a1tp && a1tp->isa_aryptr() && a2tp && a2tp->isa_aryptr()) {
+      a1tap = a1tp->is_aryptr();
+      a2tap = a2tp->is_aryptr();
+      a1tp = a1tap->elem()->make_ptr();
+      a2tp = a2tap->elem()->make_ptr();
+    }
+    if (a1tp && a1tp->isa_instptr() && a2tp && a2tp->isa_instptr()) {
+      if (e1) *e1 = a1tp->is_instptr();
+      if (e2) *e2 = a2tp->is_instptr();
+    }
+  }
 }
 
 //---------------------------get_typeflow_type---------------------------------
@@ -641,6 +668,35 @@ bool Type::interface_vs_oop(const Type *t) const {
 
 #endif
 
+void Type::check_symmetrical(const Type *t, const Type *mt) const {
+#ifdef ASSERT
+  assert(mt == t->xmeet(this), "meet not commutative");
+  const Type* dual_join = mt->_dual;
+  const Type *t2t    = dual_join->xmeet(t->_dual);
+  const Type *t2this = dual_join->xmeet(this->_dual);
+
+  // Interface meet Oop is Not Symmetric:
+  // Interface:AnyNull meet Oop:AnyNull == Interface:AnyNull
+  // Interface:NotNull meet Oop:NotNull == java/lang/Object:NotNull
+
+  if( !interface_vs_oop(t) && (t2t != t->_dual || t2this != this->_dual) ) {
+    tty->print_cr("=== Meet Not Symmetric ===");
+    tty->print("t   =                   ");              t->dump(); tty->cr();
+    tty->print("this=                   ");                 dump(); tty->cr();
+    tty->print("mt=(t meet this)=       ");             mt->dump(); tty->cr();
+
+    tty->print("t_dual=                 ");       t->_dual->dump(); tty->cr();
+    tty->print("this_dual=              ");          _dual->dump(); tty->cr();
+    tty->print("mt_dual=                ");      mt->_dual->dump(); tty->cr();
+
+    tty->print("mt_dual meet t_dual=    "); t2t           ->dump(); tty->cr();
+    tty->print("mt_dual meet this_dual= "); t2this        ->dump(); tty->cr();
+
+    fatal("meet not symmetric" );
+  }
+#endif
+}
+
 //------------------------------meet-------------------------------------------
 // Compute the MEET of two types.  NOT virtual.  It enforces that meet is
 // commutative and the lattice is symmetric.
@@ -658,33 +714,28 @@ const Type *Type::meet_helper(const Type *t, bool include_speculative) const {
   t = t->maybe_remove_speculative(include_speculative);
 
   const Type *mt = this_t->xmeet(t);
+#ifdef ASSERT
   if (isa_narrowoop() || t->isa_narrowoop()) return mt;
   if (isa_narrowklass() || t->isa_narrowklass()) return mt;
-#ifdef ASSERT
-  assert(mt == t->xmeet(this_t), "meet not commutative");
-  const Type* dual_join = mt->_dual;
-  const Type *t2t    = dual_join->xmeet(t->_dual);
-  const Type *t2this = dual_join->xmeet(this_t->_dual);
-
-  // Interface meet Oop is Not Symmetric:
-  // Interface:AnyNull meet Oop:AnyNull == Interface:AnyNull
-  // Interface:NotNull meet Oop:NotNull == java/lang/Object:NotNull
-
-  if( !interface_vs_oop(t) && (t2t != t->_dual || t2this != this_t->_dual) ) {
-    tty->print_cr("=== Meet Not Symmetric ===");
-    tty->print("t   =                   ");              t->dump(); tty->cr();
-    tty->print("this=                   ");         this_t->dump(); tty->cr();
-    tty->print("mt=(t meet this)=       ");             mt->dump(); tty->cr();
-
-    tty->print("t_dual=                 ");       t->_dual->dump(); tty->cr();
-    tty->print("this_dual=              ");  this_t->_dual->dump(); tty->cr();
-    tty->print("mt_dual=                ");      mt->_dual->dump(); tty->cr();
-
-    tty->print("mt_dual meet t_dual=    "); t2t           ->dump(); tty->cr();
-    tty->print("mt_dual meet this_dual= "); t2this        ->dump(); tty->cr();
-
-    fatal("meet not symmetric" );
+  Compile* C = Compile::current();
+  if (!C->_type_verify_symmetry) {
+    return mt;
   }
+  this_t->check_symmetrical(t, mt);
+  // In the case of an array, computing the meet above, caused the
+  // computation of the meet of the elements which at verification
+  // time caused the computation of the meet of the dual of the
+  // elements. Computing the meet of the dual of the arrays here
+  // causes the meet of the dual of the elements to be computed which
+  // would cause the meet of the dual of the dual of the elements,
+  // that is the meet of the elements already computed above to be
+  // computed. Avoid redundant computations by requesting no
+  // verification.
+  C->_type_verify_symmetry = false;
+  const Type *mt_dual = this_t->_dual->xmeet(t->_dual);
+  this_t->_dual->check_symmetrical(t->_dual, mt_dual);
+  assert(!C->_type_verify_symmetry, "shouldn't have changed");
+  C->_type_verify_symmetry = true;
 #endif
   return mt;
 }
@@ -858,6 +909,13 @@ void Type::dump_on(outputStream *st) const {
     st->print(" [narrowklass]");
   }
 }
+
+//-----------------------------------------------------------------------------
+const char* Type::str(const Type* t) {
+  stringStream ss;
+  t->dump_on(&ss);
+  return ss.as_string();
+}
 #endif
 
 //------------------------------singleton--------------------------------------
@@ -974,21 +1032,10 @@ const Type *TypeF::xdual() const {
 
 //------------------------------eq---------------------------------------------
 // Structural equality check for Type representations
-bool TypeF::eq( const Type *t ) const {
-  if( g_isnan(_f) ||
-      g_isnan(t->getf()) ) {
-    // One or both are NANs.  If both are NANs return true, else false.
-    return (g_isnan(_f) && g_isnan(t->getf()));
-  }
-  if (_f == t->getf()) {
-    // (NaN is impossible at this point, since it is not equal even to itself)
-    if (_f == 0.0) {
-      // difference between positive and negative zero
-      if (jint_cast(_f) != jint_cast(t->getf()))  return false;
-    }
-    return true;
-  }
-  return false;
+bool TypeF::eq(const Type *t) const {
+  // Bitwise comparison to distinguish between +/-0. These values must be treated
+  // as different to be consistent with C1 and the interpreter.
+  return (jint_cast(_f) == jint_cast(t->getf()));
 }
 
 //------------------------------hash-------------------------------------------
@@ -1089,21 +1136,10 @@ const Type *TypeD::xdual() const {
 
 //------------------------------eq---------------------------------------------
 // Structural equality check for Type representations
-bool TypeD::eq( const Type *t ) const {
-  if( g_isnan(_d) ||
-      g_isnan(t->getd()) ) {
-    // One or both are NANs.  If both are NANs return true, else false.
-    return (g_isnan(_d) && g_isnan(t->getd()));
-  }
-  if (_d == t->getd()) {
-    // (NaN is impossible at this point, since it is not equal even to itself)
-    if (_d == 0.0) {
-      // difference between positive and negative zero
-      if (jlong_cast(_d) != jlong_cast(t->getd()))  return false;
-    }
-    return true;
-  }
-  return false;
+bool TypeD::eq(const Type *t) const {
+  // Bitwise comparison to distinguish between +/-0. These values must be treated
+  // as different to be consistent with C1 and the interpreter.
+  return (jlong_cast(_d) == jlong_cast(t->getd()));
 }
 
 //------------------------------hash-------------------------------------------
@@ -1317,8 +1353,8 @@ const Type *TypeInt::narrow( const Type *old ) const {
 
   // The new type narrows the old type, so look for a "death march".
   // See comments on PhaseTransform::saturate.
-  juint nrange = _hi - _lo;
-  juint orange = ohi - olo;
+  juint nrange = (juint)_hi - _lo;
+  juint orange = (juint)ohi - olo;
   if (nrange < max_juint - 1 && nrange > (orange >> 1) + (SMALLINT*2)) {
     // Use the new type only if the range shrinks a lot.
     // We do not want the optimizer computing 2^31 point by point.
@@ -1351,7 +1387,7 @@ bool TypeInt::eq( const Type *t ) const {
 //------------------------------hash-------------------------------------------
 // Type-specific hashing function.
 int TypeInt::hash(void) const {
-  return _lo+_hi+_widen+(int)Type::Int;
+  return java_add(java_add(_lo, _hi), java_add(_widen, (int)Type::Int));
 }
 
 //------------------------------is_finite--------------------------------------
@@ -1532,7 +1568,7 @@ const Type *TypeLong::widen( const Type *old, const Type* limit ) const {
         // If neither endpoint is extremal yet, push out the endpoint
         // which is closer to its respective limit.
         if (_lo >= 0 ||                 // easy common case
-            (julong)(_lo - min) >= (julong)(max - _hi)) {
+            ((julong)_lo - min) >= ((julong)max - _hi)) {
           // Try to widen to an unsigned range type of 32/63 bits:
           if (max >= max_juint && _hi < max_juint)
             return make(_lo, max_juint, WidenMax);
@@ -1767,13 +1803,15 @@ const TypeTuple *TypeTuple::make_domain(ciInstanceKlass* recv, ciSignature* sig)
       break;
     case T_OBJECT:
     case T_ARRAY:
-    case T_BOOLEAN:
-    case T_CHAR:
     case T_FLOAT:
-    case T_BYTE:
-    case T_SHORT:
     case T_INT:
       field_array[pos++] = get_const_type(type);
+      break;
+    case T_BOOLEAN:
+    case T_CHAR:
+    case T_BYTE:
+    case T_SHORT:
+      field_array[pos++] = TypeInt::INT;
       break;
     default:
       ShouldNotReachHere();
@@ -1982,7 +2020,11 @@ const Type* TypeAry::remove_speculative() const {
 bool TypeAry::interface_vs_oop(const Type *t) const {
   const TypeAry* t_ary = t->is_ary();
   if (t_ary) {
-    return _elem->interface_vs_oop(t_ary->_elem);
+    const TypePtr* this_ptr = _elem->make_ptr(); // In case we have narrow_oops
+    const TypePtr*    t_ptr = t_ary->_elem->make_ptr();
+    if(this_ptr != NULL && t_ptr != NULL) {
+      return this_ptr->interface_vs_oop(t_ptr);
+    }
   }
   return false;
 }
@@ -2296,7 +2338,7 @@ bool TypePtr::eq( const Type *t ) const {
 //------------------------------hash-------------------------------------------
 // Type-specific hashing function.
 int TypePtr::hash(void) const {
-  return _ptr + _offset;
+  return java_add(_ptr, _offset);
 }
 
 //------------------------------dump2------------------------------------------
@@ -2834,8 +2876,17 @@ const Type *TypeOopPtr::filter_helper(const Type *kills, bool include_speculativ
     // be 'I' or 'j/l/O'.  Thus we'll pick 'j/l/O'.  If this then flows
     // into a Phi which "knows" it's an Interface type we'll have to
     // uplift the type.
-    if (!empty() && ktip != NULL && ktip->is_loaded() && ktip->klass()->is_interface())
-      return kills;             // Uplift to interface
+    if (!empty()) {
+      if (ktip != NULL && ktip->is_loaded() && ktip->klass()->is_interface()) {
+        return kills;           // Uplift to interface
+      }
+      // Also check for evil cases of 'this' being a class array
+      // and 'kills' expecting an array of interfaces.
+      Type::get_arrays_base_elements(ft, kills, NULL, &ktip);
+      if (ktip != NULL && ktip->is_loaded() && ktip->klass()->is_interface()) {
+        return kills;           // Uplift to array of interface
+      }
+    }
 
     return Type::TOP;           // Canonical empty value
   }
@@ -2877,12 +2928,8 @@ bool TypeOopPtr::eq( const Type *t ) const {
 // Type-specific hashing function.
 int TypeOopPtr::hash(void) const {
   return
-    (const_oop() ? const_oop()->hash() : 0) +
-    _klass_is_exact +
-    _instance_id +
-    hash_speculative() +
-    _inline_depth +
-    TypePtr::hash();
+    java_add(java_add(java_add(const_oop() ? const_oop()->hash() : 0, _klass_is_exact),
+                      java_add(_instance_id , hash_speculative())), java_add(_inline_depth , TypePtr::hash()));
 }
 
 //------------------------------dump2------------------------------------------
@@ -3608,7 +3655,7 @@ bool TypeInstPtr::eq( const Type *t ) const {
 //------------------------------hash-------------------------------------------
 // Type-specific hashing function.
 int TypeInstPtr::hash(void) const {
-  int hash = klass()->hash() + TypeOopPtr::hash();
+  int hash = java_add(klass()->hash(), TypeOopPtr::hash());
   return hash;
 }
 
@@ -3730,29 +3777,22 @@ const TypeOopPtr *TypeAryPtr::cast_to_instance_id(int instance_id) const {
   return make(_ptr, const_oop(), _ary, klass(), _klass_is_exact, _offset, instance_id, _speculative, _inline_depth);
 }
 
-//-----------------------------narrow_size_type-------------------------------
-// Local cache for arrayOopDesc::max_array_length(etype),
-// which is kind of slow (and cached elsewhere by other users).
-static jint max_array_length_cache[T_CONFLICT+1];
-static jint max_array_length(BasicType etype) {
-  jint& cache = max_array_length_cache[etype];
-  jint res = cache;
-  if (res == 0) {
-    switch (etype) {
-    case T_NARROWOOP:
+//-----------------------------max_array_length-------------------------------
+// A wrapper around arrayOopDesc::max_array_length(etype) with some input normalization.
+jint TypeAryPtr::max_array_length(BasicType etype) {
+  if (!is_java_primitive(etype) && !is_reference_type(etype)) {
+    if (etype == T_NARROWOOP) {
       etype = T_OBJECT;
-      break;
-    case T_NARROWKLASS:
-    case T_CONFLICT:
-    case T_ILLEGAL:
-    case T_VOID:
-      etype = T_BYTE;           // will produce conservatively high value
+    } else if (etype == T_ILLEGAL) { // bottom[]
+      etype = T_BYTE; // will produce conservatively high value
+    } else {
+      fatal(err_msg("not an element type: %s", type2name(etype)));
     }
-    cache = res = arrayOopDesc::max_array_length(etype);
   }
-  return res;
+  return arrayOopDesc::max_array_length(etype);
 }
 
+//-----------------------------narrow_size_type-------------------------------
 // Narrow the given size type to the index range for the given array base type.
 // Return NULL if the resulting int type becomes empty.
 const TypeInt* TypeAryPtr::narrow_size_type(const TypeInt* size) const {
@@ -3950,10 +3990,10 @@ const Type *TypeAryPtr::xmeet_helper(const Type *t) const {
            (tap->_klass_is_exact && !tap->klass()->is_subtype_of(klass())) ||
            // 'this' is exact and super or unrelated:
            (this->_klass_is_exact && !klass()->is_subtype_of(tap->klass())))) {
-      if (above_centerline(ptr)) {
+      if (above_centerline(ptr) || (tary->_elem->make_ptr() && above_centerline(tary->_elem->make_ptr()->_ptr))) {
         tary = TypeAry::make(Type::BOTTOM, tary->_size, tary->_stable);
       }
-      return make(NotNull, NULL, tary, lazy_klass, false, off, InstanceBot);
+      return make(NotNull, NULL, tary, lazy_klass, false, off, InstanceBot, speculative, depth);
     }
 
     bool xk = false;
@@ -4503,7 +4543,7 @@ bool TypeKlassPtr::eq( const Type *t ) const {
 //------------------------------hash-------------------------------------------
 // Type-specific hashing function.
 int TypeKlassPtr::hash(void) const {
-  return klass()->hash() + TypePtr::hash();
+  return java_add(klass()->hash(), TypePtr::hash());
 }
 
 //------------------------------singleton--------------------------------------

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2017 Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,11 +25,10 @@
  * @bug 8024061
  * @summary Checks that no exception is thrown if dragGestureRecognized
  *          takes a while to complete.
+ * @library ../../../../lib/testlibrary
+ * @build jdk.testlibrary.OSInfo
+ * @run main bug8024061
  */
-import sun.awt.OSInfo;
-import sun.awt.OSInfo.OSType;
-import sun.awt.SunToolkit;
-
 import java.awt.*;
 import java.awt.datatransfer.DataFlavor;
 import java.awt.datatransfer.Transferable;
@@ -55,6 +54,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import javax.swing.*;
+import jdk.testlibrary.OSInfo;
+
 
 /**
  * If dragGestureRecognized() takes a while to complete and if user performs a drag quickly,
@@ -67,9 +68,14 @@ public class bug8024061 {
     private static final DataFlavor DropObjectFlavor;
     private static final int DELAY = 1000;
 
-    private final DnDPanel panel1 = new DnDPanel(Color.yellow);
-    private final DnDPanel panel2 = new DnDPanel(Color.pink);
+    static final DnDPanel panel1 = new DnDPanel(Color.yellow);
+    static final DnDPanel panel2 = new DnDPanel(Color.pink);
     private final JFrame frame;
+    static Point here;
+    static Point there;
+    static Dimension d;
+
+
 
     private static final CountDownLatch lock = new CountDownLatch(1);
     private static volatile Exception dragEnterException = null;
@@ -88,7 +94,7 @@ public class bug8024061 {
         frame = new JFrame("DnDWithRobot");
         frame.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
 
-        Dimension d = new Dimension(100, 100);
+        d = new Dimension(100, 100);
 
         panel1.setPreferredSize(d);
         panel2.setPreferredSize(d);
@@ -106,8 +112,8 @@ public class bug8024061 {
     }
 
     public static void main(String[] args) throws AWTException, InvocationTargetException, InterruptedException {
-        OSType type = OSInfo.getOSType();
-        if (type != OSType.LINUX && type != OSType.SOLARIS) {
+        OSInfo.OSType type = OSInfo.getOSType();
+        if (type != OSInfo.OSType.LINUX && type != OSInfo.OSType.SOLARIS) {
             System.out.println("This test is for Linux and Solaris only... " +
                                "skipping!");
             return;
@@ -122,14 +128,16 @@ public class bug8024061 {
         });
         final Robot robot = new Robot();
         robot.setAutoDelay(10);
-        SunToolkit toolkit = (SunToolkit) Toolkit.getDefaultToolkit();
-        toolkit.realSync();
+        robot.waitForIdle();
+        robot.delay(200);
 
         JFrame frame = dnd[0].frame;
-        Point point = frame.getLocationOnScreen();
-        Point here = new Point(point.x + 35, point.y + 45);
-        Point there = new Point(point.x + 120, point.y + 45);
-        here.x += 25;
+        SwingUtilities.invokeAndWait(() -> {
+            here = panel1.getLocationOnScreen();
+            there = panel2.getLocationOnScreen();
+        });
+        here.translate(d.width / 2, d.height / 2);
+        there.translate(d.width / 2, d.height / 2);
         robot.mouseMove(here.x, here.y);
         robot.mousePress(InputEvent.BUTTON1_MASK);
         while (here.x < there.x) {
@@ -138,7 +146,7 @@ public class bug8024061 {
             System.out.println("x = " + here.x);
         }
         robot.mouseRelease(InputEvent.BUTTON1_MASK);
-        toolkit.realSync();
+        robot.waitForIdle();
         robot.mousePress(InputEvent.BUTTON1_MASK);
         robot.mouseRelease(InputEvent.BUTTON1_MASK);
         System.out.println("finished");
@@ -157,7 +165,7 @@ public class bug8024061 {
                 throw new RuntimeException("Timed out waiting for dragEnter()");
             }
         } finally {
-            frame.dispose();
+            SwingUtilities.invokeLater(frame::dispose);
         }
     }
 
@@ -218,7 +226,7 @@ public class bug8024061 {
         }
     }
 
-    class DnDPanel extends JPanel {
+    static class DnDPanel extends JPanel {
         DropObject dropObject;
         final DragSource dragSource;
         final DropTarget dropTarget;

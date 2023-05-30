@@ -82,7 +82,8 @@ public class HSDB implements ObjectHistogramPanel.Listener, SAListener {
   private String coreFilename;
 
   private void doUsage() {
-    System.out.println("Usage:  java HSDB [[pid] | [path-to-java-executable [path-to-corefile]] | help ]");
+    // With JDK-8059038 launchers for this class exist. Print usage for those launchers.
+    System.out.println("Usage:  hsdb [[pid] | [path-to-java-executable [path-to-corefile]] | help | -help ]");
     System.out.println("           pid:                     attach to the process whose id is 'pid'");
     System.out.println("           path-to-java-executable: Debug a core file produced by this program");
     System.out.println("           path-to-corefile:        Debug this corefile.  The default is 'core'");
@@ -127,10 +128,14 @@ public class HSDB implements ObjectHistogramPanel.Listener, SAListener {
     }
   }
 
-  // close this tool without calling System.exit
-  protected void closeUI() {
-      workerThread.shutdown();
-      frame.dispose();
+  private class CloseUI extends WindowAdapter {
+
+      @Override
+      public void windowClosing(WindowEvent e) {
+          workerThread.shutdown();
+          frame.dispose();
+      }
+
   }
 
   public void run() {
@@ -146,7 +151,8 @@ public class HSDB implements ObjectHistogramPanel.Listener, SAListener {
 
     frame = new JFrame("HSDB - HotSpot Debugger");
     frame.setSize(800, 600);
-    frame.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
+    frame.setDefaultCloseOperation(WindowConstants.DO_NOTHING_ON_CLOSE);
+    frame.addWindowListener(new CloseUI());
 
     JMenuBar menuBar = new JMenuBar();
 
@@ -209,7 +215,8 @@ public class HSDB implements ObjectHistogramPanel.Listener, SAListener {
     item = createMenuItem("Exit",
                             new ActionListener() {
                                 public void actionPerformed(ActionEvent e) {
-                                  closeUI();
+                                  workerThread.shutdown();
+                                  frame.dispose();
                                 }
                               });
     item.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_X, ActionEvent.ALT_MASK));
@@ -985,7 +992,8 @@ public class HSDB implements ObjectHistogramPanel.Listener, SAListener {
                                                      curFrame.getFP(),
                                                      anno));
             } else {
-              if (VM.getVM().getCPU().equals("x86") || VM.getVM().getCPU().equals("amd64")) {
+              if (VM.getVM().getCPU().equals("x86") || VM.getVM().getCPU().equals("amd64") ||
+                  VM.getVM().getCPU().equals("aarch64")) {
                 // For C2, which has null frame pointers on x86/amd64
                 CodeBlob cb = VM.getVM().getCodeCache().findBlob(curFrame.getPC());
                 Address sp = curFrame.getSP();

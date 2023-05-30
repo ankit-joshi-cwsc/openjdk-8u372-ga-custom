@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -680,7 +680,7 @@ address InterpreterGenerator::generate_accessor_entry(void) {
                     ConstantPoolCache::base_offset() +
                     ConstantPoolCacheEntry::flags_offset()));
 
-    Label notObj, notInt, notByte, notShort;
+    Label notObj, notInt, notByte, notBool, notShort;
     const Address field_address(rax, rcx, Address::times_1);
 
     // Need to differentiate between igetfield, agetfield, bgetfield etc.
@@ -711,6 +711,13 @@ address InterpreterGenerator::generate_accessor_entry(void) {
     __ jmp(xreturn_path);
 
     __ bind(notByte);
+    __ cmpl(rdx, ztos);
+    __ jcc(Assembler::notEqual, notBool);
+    // ztos
+    __ load_signed_byte(rax, field_address);
+    __ jmp(xreturn_path);
+
+    __ bind(notBool);
     __ cmpl(rdx, stos);
     __ jcc(Assembler::notEqual, notShort);
     // stos
@@ -1255,7 +1262,7 @@ address InterpreterGenerator::generate_native_entry(bool synchronized) {
   __ movl(Address(r15_thread, JavaThread::thread_state_offset()), _thread_in_Java);
 
   // reset_last_Java_frame
-  __ reset_last_Java_frame(true, true);
+  __ reset_last_Java_frame(r15_thread, true);
 
   // reset handle block
   __ movptr(t, Address(r15_thread, JavaThread::active_handles_offset()));
@@ -1265,16 +1272,16 @@ address InterpreterGenerator::generate_native_entry(bool synchronized) {
   // and result handler will pick it up
 
   {
-    Label no_oop, store_result;
+    Label no_oop;
     __ lea(t, ExternalAddress(AbstractInterpreter::result_handler(T_OBJECT)));
     __ cmpptr(t, Address(rbp, frame::interpreter_frame_result_handler_offset*wordSize));
     __ jcc(Assembler::notEqual, no_oop);
     // retrieve result
     __ pop(ltos);
-    __ testptr(rax, rax);
-    __ jcc(Assembler::zero, store_result);
-    __ movptr(rax, Address(rax, 0));
-    __ bind(store_result);
+    // Unbox oop result, e.g. JNIHandles::resolve value.
+    __ resolve_jobject(rax /* value */,
+                       r15_thread /* thread */,
+                       t /* tmp */);
     __ movptr(Address(rbp, frame::interpreter_frame_oop_temp_offset*wordSize), rax);
     // keep stack depth as expected by pushing oop which will eventually be discarde
     __ push(ltos);
@@ -1830,7 +1837,7 @@ void TemplateInterpreterGenerator::generate_throw_exception() {
   // PC must point into interpreter here
   __ set_last_Java_frame(noreg, rbp, __ pc());
   __ super_call_VM_leaf(CAST_FROM_FN_PTR(address, InterpreterRuntime::popframe_move_outgoing_args), r15_thread, c_rarg1, c_rarg2);
-  __ reset_last_Java_frame(true, true);
+  __ reset_last_Java_frame(r15_thread, true);
   // Restore the last_sp and null it out
   __ movptr(rsp, Address(rbp, frame::interpreter_frame_last_sp_offset * wordSize));
   __ movptr(Address(rbp, frame::interpreter_frame_last_sp_offset * wordSize), (int32_t)NULL_WORD);

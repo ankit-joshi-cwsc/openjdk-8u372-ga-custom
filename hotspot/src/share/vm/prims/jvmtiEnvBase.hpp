@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,6 +32,7 @@
 #include "runtime/fieldDescriptor.hpp"
 #include "runtime/frame.hpp"
 #include "runtime/handles.inline.hpp"
+#include "runtime/orderAccess.hpp"
 #include "runtime/thread.hpp"
 #include "runtime/vm_operations.hpp"
 #include "utilities/growableArray.hpp"
@@ -97,7 +98,7 @@ class JvmtiEnvBase : public CHeapObj<mtInternal> {
   const void *_env_local_storage;     // per env agent allocated data.
   jvmtiEventCallbacks _event_callbacks;
   jvmtiExtEventCallbacks _ext_event_callbacks;
-  JvmtiTagMap* _tag_map;
+  JvmtiTagMap* volatile _tag_map;
   JvmtiEnvEventEnable _env_event_enable;
   jvmtiCapabilities _current_capabilities;
   jvmtiCapabilities _prohibited_capabilities;
@@ -251,6 +252,13 @@ class JvmtiEnvBase : public CHeapObj<mtInternal> {
     return _tag_map;
   }
 
+  JvmtiTagMap* tag_map_acquire() {
+    return (JvmtiTagMap*)OrderAccess::load_ptr_acquire(&_tag_map);
+  }
+
+  void release_set_tag_map(JvmtiTagMap* tag_map) {
+    OrderAccess::release_store_ptr(&_tag_map, tag_map);
+  }
 
   // return true if event is enabled globally or for any thread
   // True only if there is a callback for it.
@@ -356,8 +364,12 @@ public:
   }
   VMOp_Type type() const { return VMOp_GetOwnedMonitorInfo; }
   void doit() {
-    ((JvmtiEnvBase *)_env)->get_owned_monitors(_calling_thread, _java_thread,
-                                                         _owned_monitors_list);
+    _result = JVMTI_ERROR_THREAD_NOT_ALIVE;
+    if (Threads::includes(_java_thread) && !_java_thread->is_exiting()
+                                        && _java_thread->threadObj() != NULL) {
+      _result = ((JvmtiEnvBase *)_env)->get_owned_monitors(_calling_thread, _java_thread,
+                                                            _owned_monitors_list);
+    }
   }
   jvmtiError result() { return _result; }
 };
@@ -439,9 +451,13 @@ public:
   jvmtiError result() { return _result; }
   VMOp_Type type() const { return VMOp_GetStackTrace; }
   void doit() {
-    _result = ((JvmtiEnvBase *)_env)->get_stack_trace(_java_thread,
-                                                      _start_depth, _max_count,
-                                                      _frame_buffer, _count_ptr);
+    _result = JVMTI_ERROR_THREAD_NOT_ALIVE;
+    if (Threads::includes(_java_thread) && !_java_thread->is_exiting()
+                                        && _java_thread->threadObj() != NULL) {
+      _result = ((JvmtiEnvBase *)_env)->get_stack_trace(_java_thread,
+                                                        _start_depth, _max_count,
+                                                        _frame_buffer, _count_ptr);
+    }
   }
 };
 

@@ -45,6 +45,7 @@ public interface Config {
 
     final int NREGION                   = 10;
     final int MAX_BACKREF_NUM           = 1000;
+    final int MAX_CAPTURE_GROUP_NUM     = 0x8000;
     final int MAX_REPEAT_NUM            = 100000;
     final int MAX_MULTI_BYTE_RANGES_NUM = 10000;
 
@@ -65,7 +66,7 @@ public interface Config {
 
     final boolean DONT_OPTIMIZE                     = false;
 
-    final boolean USE_STRING_TEMPLATES              = true; // use embeded string templates in Regex object as byte arrays instead of compiling them into int bytecode array
+    final boolean USE_STRING_TEMPLATES              = true; // use embedded string templates in Regex object as byte arrays instead of compiling them into int bytecode array
 
     final boolean NON_UNICODE_SDW                   = true;
 

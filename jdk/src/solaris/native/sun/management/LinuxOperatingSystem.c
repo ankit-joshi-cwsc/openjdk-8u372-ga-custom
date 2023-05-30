@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <dlfcn.h>
 #include <pthread.h>
+#include <inttypes.h>
 #include "sun_management_OperatingSystemImpl.h"
 
 struct ticks {
@@ -57,7 +58,8 @@ static struct perfbuf {
     ticks *cpus;
 } counters;
 
-#define DEC_64 "%lld"
+#define DEC_64 "%"SCNd64
+#define NS_PER_SEC 1000000000
 
 static void next_line(FILE *f) {
     while (fgetc(f) != '\n');
@@ -76,14 +78,17 @@ static void next_line(FILE *f) {
 static int get_totalticks(int which, ticks *pticks) {
     FILE         *fh;
     uint64_t        userTicks, niceTicks, systemTicks, idleTicks;
+    uint64_t        iowTicks = 0, irqTicks = 0, sirqTicks= 0;
     int             n;
 
     if((fh = fopen("/proc/stat", "r")) == NULL) {
         return -1;
     }
 
-    n = fscanf(fh, "cpu " DEC_64 " " DEC_64 " " DEC_64 " " DEC_64,
-           &userTicks, &niceTicks, &systemTicks, &idleTicks);
+    n = fscanf(fh, "cpu " DEC_64 " " DEC_64 " " DEC_64 " " DEC_64 " " DEC_64 " "
+                   DEC_64 " " DEC_64,
+           &userTicks, &niceTicks, &systemTicks, &idleTicks,
+           &iowTicks, &irqTicks, &sirqTicks);
 
     // Move to next line
     next_line(fh);
@@ -92,24 +97,30 @@ static int get_totalticks(int which, ticks *pticks) {
     if (which != -1) {
         int i;
         for (i = 0; i < which; i++) {
-            if (fscanf(fh, "cpu%*d " DEC_64 " " DEC_64 " " DEC_64 " " DEC_64, &userTicks, &niceTicks, &systemTicks, &idleTicks) != 4) {
+            if (fscanf(fh, "cpu%*d " DEC_64 " " DEC_64 " " DEC_64 " " DEC_64 " "
+                            DEC_64 " " DEC_64 " " DEC_64,
+                   &userTicks, &niceTicks, &systemTicks, &idleTicks,
+                   &iowTicks, &irqTicks, &sirqTicks) < 4) {
                 fclose(fh);
                 return -2;
             }
             next_line(fh);
         }
-        n = fscanf(fh, "cpu%*d " DEC_64 " " DEC_64 " " DEC_64 " " DEC_64 "\n",
-           &userTicks, &niceTicks, &systemTicks, &idleTicks);
+        n = fscanf(fh, "cpu%*d " DEC_64 " " DEC_64 " " DEC_64 " " DEC_64 " "
+                       DEC_64 " " DEC_64 " " DEC_64 "\n",
+           &userTicks, &niceTicks, &systemTicks, &idleTicks,
+           &iowTicks, &irqTicks, &sirqTicks);
     }
 
     fclose(fh);
-    if (n != 4) {
+    if (n < 4) {
         return -2;
     }
 
     pticks->used       = userTicks + niceTicks;
-    pticks->usedKernel = systemTicks;
-    pticks->total      = userTicks + niceTicks + systemTicks + idleTicks;
+    pticks->usedKernel = systemTicks + irqTicks + sirqTicks;
+    pticks->total      = userTicks + niceTicks + systemTicks + idleTicks +
+                         iowTicks + irqTicks + sirqTicks;
 
     return 0;
 }
@@ -188,17 +199,20 @@ static int get_jvmticks(ticks *pticks) {
  * This method must be called first, before any data can be gathererd.
  */
 int perfInit() {
-    static int initialized=1;
+    static int initialized = 0;
 
     if (!initialized) {
         int  i;
 
-        int n = sysconf(_SC_NPROCESSORS_ONLN);
+        // We need to allocate counters for all CPUs, including ones that
+        // are currently offline as they could be turned online later.
+        int n = sysconf(_SC_NPROCESSORS_CONF);
         if (n <= 0) {
             n = 1;
         }
 
         counters.cpus = calloc(n,sizeof(ticks));
+        counters.nProcs = n;
         if (counters.cpus != NULL)  {
             // For the CPU load
             get_totalticks(-1, &counters.cpuTicks);
@@ -310,10 +324,10 @@ double get_process_load() {
 }
 
 JNIEXPORT jdouble JNICALL
-Java_sun_management_OperatingSystemImpl_getSystemCpuLoad
+Java_sun_management_OperatingSystemImpl_getSystemCpuLoad0
 (JNIEnv *env, jobject dummy)
 {
-    if(perfInit() == 0) {
+    if (perfInit() == 0) {
         return get_cpu_load(-1);
     } else {
         return -1.0;
@@ -321,12 +335,70 @@ Java_sun_management_OperatingSystemImpl_getSystemCpuLoad
 }
 
 JNIEXPORT jdouble JNICALL
-Java_sun_management_OperatingSystemImpl_getProcessCpuLoad
+Java_sun_management_OperatingSystemImpl_getProcessCpuLoad0
 (JNIEnv *env, jobject dummy)
 {
-    if(perfInit() == 0) {
+    if (perfInit() == 0) {
         return get_process_load();
     } else {
         return -1.0;
     }
+}
+
+JNIEXPORT jdouble JNICALL
+Java_sun_management_OperatingSystemImpl_getSingleCpuLoad0
+(JNIEnv *env, jobject mbean, jint cpu_number)
+{
+    if (perfInit() == 0 && cpu_number >= 0 && cpu_number < counters.nProcs) {
+        return get_cpu_load(cpu_number);
+    } else {
+        return -1.0;
+    }
+}
+
+JNIEXPORT jint JNICALL
+Java_sun_management_OperatingSystemImpl_getHostConfiguredCpuCount0
+(JNIEnv *env, jobject mbean)
+{
+    if (perfInit() == 0) {
+        return counters.nProcs;
+    } else {
+       return -1;
+    }
+}
+
+// Return the host cpu ticks since boot in nanoseconds
+JNIEXPORT jlong JNICALL
+Java_sun_management_OperatingSystemImpl_getHostTotalCpuTicks0
+(JNIEnv *env, jobject mbean)
+{
+    if (perfInit() == 0) {
+        if (get_totalticks(-1, &counters.cpuTicks) < 0) {
+            return -1;
+        } else {
+            long ticks_per_sec = sysconf(_SC_CLK_TCK);
+            jlong result = (jlong)counters.cpuTicks.total;
+            if (ticks_per_sec <= NS_PER_SEC) {
+                long scale_factor = NS_PER_SEC/ticks_per_sec;
+                result = result * scale_factor;
+            } else {
+                long scale_factor = ticks_per_sec/NS_PER_SEC;
+                result = result / scale_factor;
+            }
+            return result;
+        }
+    } else {
+        return -1;
+    }
+}
+
+JNIEXPORT jint JNICALL
+Java_sun_management_OperatingSystemImpl_getHostOnlineCpuCount0
+(JNIEnv *env, jobject mbean)
+{
+    int n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n <= 0) {
+        n = 1;
+    }
+    return n;
 }

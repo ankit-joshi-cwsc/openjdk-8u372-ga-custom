@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -995,7 +995,9 @@ void JvmtiExport::post_class_unload(Klass* klass) {
         // Before we call the JVMTI agent, we have to set the state in the
         // thread for which we are proxying.
         JavaThreadState prev_state = real_thread->thread_state();
-        assert(prev_state == _thread_blocked, "JavaThread should be at safepoint");
+        assert(((Thread *)real_thread)->is_ConcurrentGC_thread() ||
+               (real_thread->is_Java_thread() && prev_state == _thread_blocked),
+               "should be ConcurrentGCThread or JavaThread at safepoint");
         real_thread->set_thread_state(_thread_in_native);
 
         jvmtiExtensionEvent callback = env->ext_callbacks()->ClassUnload;
@@ -1237,7 +1239,14 @@ void JvmtiExport::post_method_exit(JavaThread *thread, Method* method, frame cur
     }
   }
 
+#ifdef AARCH64
+  // FIXME: this is just a kludge to get JVMTI going.  Compiled
+  // MethodHandle code doesn't call the JVMTI notify routines, so the
+  // stack depth we see here is wrong.
+  state->invalidate_cur_stack_depth();
+#else
   state->decr_cur_stack_depth();
+#endif
 }
 
 
@@ -1586,7 +1595,7 @@ void JvmtiExport::post_raw_field_modification(JavaThread *thread, Method* method
   address location, KlassHandle field_klass, Handle object, jfieldID field,
   char sig_type, jvalue *value) {
 
-  if (sig_type == 'I' || sig_type == 'Z' || sig_type == 'C' || sig_type == 'S') {
+  if (sig_type == 'I' || sig_type == 'Z' || sig_type == 'B' || sig_type == 'C' || sig_type == 'S') {
     // 'I' instructions are used for byte, char, short and int.
     // determine which it really is, and convert
     fieldDescriptor fd;
@@ -1745,7 +1754,7 @@ jvmtiCompiledMethodLoadInlineRecord* create_inline_record(nmethod* nm) {
     int stackframe = 0;
     for(ScopeDesc* sd = nm->scope_desc_at(p->real_pc(nm));sd != NULL;sd = sd->sender()) {
       // sd->method() can be NULL for stubs but not for nmethods. To be completely robust, include an assert that we should never see a null sd->method()
-      assert(sd->method() != NULL, "sd->method() cannot be null.");
+      guarantee(sd->method() != NULL, "sd->method() cannot be null.");
       record->pcinfo[scope].methods[stackframe] = sd->method()->jmethod_id();
       record->pcinfo[scope].bcis[stackframe] = sd->bci();
       stackframe++;

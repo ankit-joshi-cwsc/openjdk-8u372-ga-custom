@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,7 +26,10 @@
 package sun.security.tools.jarsigner;
 
 import java.io.*;
+import java.security.cert.CertPathValidatorException;
+import java.security.cert.PKIXBuilderParameters;
 import java.util.*;
+import java.util.stream.Collectors;
 import java.util.zip.*;
 import java.util.jar.*;
 import java.math.BigInteger;
@@ -46,15 +49,19 @@ import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.security.cert.CertPath;
-import java.security.cert.CertPathValidator;
 import java.security.cert.CertificateExpiredException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.CertificateNotYetValidException;
-import java.security.cert.PKIXParameters;
 import java.security.cert.TrustAnchor;
 import java.util.Map.Entry;
+import sun.security.pkcs.PKCS7;
+import sun.security.pkcs.SignerInfo;
+import sun.security.provider.certpath.CertPathConstraintsParameters;
+import sun.security.timestamp.TimestampToken;
 import sun.security.tools.KeyStoreUtil;
 import sun.security.tools.PathList;
+import sun.security.validator.Validator;
+import sun.security.validator.ValidatorException;
 import sun.security.x509.*;
 import sun.security.util.*;
 import java.util.Base64;
@@ -96,6 +103,28 @@ public class Main {
     private static final String P11KEYSTORE = "PKCS11";
 
     private static final long SIX_MONTHS = 180*24*60*60*1000L; //milliseconds
+    private static final long ONE_YEAR = 366*24*60*60*1000L;
+
+    private static final DisabledAlgorithmConstraints DISABLED_CHECK =
+            new DisabledAlgorithmConstraints(
+                    DisabledAlgorithmConstraints.PROPERTY_JAR_DISABLED_ALGS);
+
+    private static final DisabledAlgorithmConstraints LEGACY_CHECK =
+            new DisabledAlgorithmConstraints(
+                    DisabledAlgorithmConstraints.PROPERTY_SECURITY_LEGACY_ALGS);
+
+    private static final Set<CryptoPrimitive> DIGEST_PRIMITIVE_SET = Collections
+            .unmodifiableSet(EnumSet.of(CryptoPrimitive.MESSAGE_DIGEST));
+    private static final Set<CryptoPrimitive> SIG_PRIMITIVE_SET = Collections
+            .unmodifiableSet(EnumSet.of(CryptoPrimitive.SIGNATURE));
+
+    static final String VERSION = "1.0";
+
+    static final int IN_KEYSTORE = 0x01;        // signer is in keystore
+    static final int IN_SCOPE = 0x02;
+    static final int NOT_ALIAS = 0x04;          // alias list is NOT empty and
+    // signer is not in alias list
+    static final int SIGNED_BY_ALIAS = 0x08;    // signer is in alias list
 
     // Attention:
     // This is the entry that get launched by the security tool jarsigner.
@@ -103,14 +132,6 @@ public class Main {
         Main js = new Main();
         js.run(args);
     }
-
-    static final String VERSION = "1.0";
-
-    static final int IN_KEYSTORE = 0x01;        // signer is in keystore
-    static final int IN_SCOPE = 0x02;
-    static final int NOT_ALIAS = 0x04;          // alias list is NOT empty and
-                                                // signer is not in alias list
-    static final int SIGNED_BY_ALIAS = 0x08;    // signer is in alias list
 
     X509Certificate[] certChain;    // signer's cert chain (when composing)
     PrivateKey privateKey;          // private key
@@ -139,6 +160,7 @@ public class Main {
     String tsaAlias; // alias for the Timestamping Authority's certificate
     String altCertChain; // file to read alternative cert chain from
     String tSAPolicyID;
+    String tSADigestAlg = "SHA-256";
     boolean verify = false; // verify the jar
     String verbose = null; // verbose output when signing/verifying
     boolean showcerts = false; // show certs when verifying
@@ -157,23 +179,51 @@ public class Main {
 
     // Informational warnings
     private boolean hasExpiringCert = false;
-    private boolean noTimestamp = false;
-    private Date expireDate = new Date(0L);     // used in noTimestamp warning
+    private boolean hasExpiringTsaCert = false;
+    private boolean noTimestamp = true;
 
-    // Severe warnings
+    // Expiration date. The value could be null if signed by a trusted cert.
+    private Date expireDate = null;
+    private Date tsaExpireDate = null;
+
+    // If there is a time stamp block inside the PKCS7 block file
+    boolean hasTimestampBlock = false;
+
+    private PublicKey weakPublicKey = null;
+    private boolean disabledAlgFound = false;
+    private String legacyDigestAlg = null;
+    private String legacyTsaDigestAlg = null;
+    private String legacySigAlg = null;
+
+    // Severe warnings.
+
+    // jarsigner used to check signer cert chain validity and key usages
+    // itself and set various warnings. Later CertPath validation is
+    // added but chainNotValidated is only flagged when no other existing
+    // warnings are set. TSA cert chain check is added separately and
+    // only tsaChainNotValidated is set, i.e. has no affect on hasExpiredCert,
+    // notYetValidCert, or any badXyzUsage.
+
+    private int legacyAlg = 0; // 1. digestalg, 2. sigalg, 4. tsadigestalg, 8. key
+    private int disabledAlg = 0; // 1. digestalg, 2. sigalg, 4. tsadigestalg, 8. key
     private boolean hasExpiredCert = false;
+    private boolean hasExpiredTsaCert = false;
     private boolean notYetValidCert = false;
     private boolean chainNotValidated = false;
+    private boolean tsaChainNotValidated = false;
     private boolean notSignedByAlias = false;
     private boolean aliasNotInStore = false;
     private boolean hasUnsignedEntry = false;
     private boolean badKeyUsage = false;
     private boolean badExtendedKeyUsage = false;
     private boolean badNetscapeCertType = false;
+    private boolean signerSelfSigned = false;
 
-    CertificateFactory certificateFactory;
-    CertPathValidator validator;
-    PKIXParameters pkixParameters;
+    private Throwable chainNotValidatedReason = null;
+    private Throwable tsaChainNotValidatedReason = null;
+
+    PKIXBuilderParameters pkixParameters;
+    Set<X509Certificate> trustedCerts = new HashSet<>();
 
     public void run(String args[]) {
         try {
@@ -260,7 +310,8 @@ public class Main {
 
         if (strict) {
             int exitCode = 0;
-            if (chainNotValidated || hasExpiredCert || notYetValidCert) {
+            if (disabledAlg != 0 || chainNotValidated || hasExpiredCert
+                    || hasExpiredTsaCert || notYetValidCert || signerSelfSigned) {
                 exitCode |= 4;
             }
             if (badKeyUsage || badExtendedKeyUsage || badNetscapeCertType) {
@@ -271,6 +322,9 @@ public class Main {
             }
             if (notSignedByAlias || aliasNotInStore) {
                 exitCode |= 32;
+            }
+            if (tsaChainNotValidated) {
+                exitCode |= 64;
             }
             if (exitCode != 0) {
                 System.exit(exitCode);
@@ -342,6 +396,9 @@ public class Main {
             } else if (collator.compare(flags, "-tsapolicyid") ==0) {
                 if (++n == args.length) usageNoArg();
                 tSAPolicyID = args[n];
+            } else if (collator.compare(flags, "-tsadigestalg") ==0) {
+                if (++n == args.length) usageNoArg();
+                tSADigestAlg = args[n];
             } else if (collator.compare(flags, "-debug") ==0) {
                 debug = true;
             } else if (collator.compare(flags, "-keypass") ==0) {
@@ -465,7 +522,8 @@ public class Main {
     }
 
     static char[] getPass(String modifier, String arg) {
-        char[] output = KeyStoreUtil.getPassWithModifier(modifier, arg, rb);
+        char[] output =
+            KeyStoreUtil.getPassWithModifier(modifier, arg, rb, collator);
         if (output != null) return output;
         usage();
         return null;    // Useless, usage() already exit
@@ -536,6 +594,9 @@ public class Main {
                 (".tsapolicyid.tsapolicyid.for.Timestamping.Authority"));
         System.out.println();
         System.out.println(rb.getString
+                (".tsadigestalg.algorithm.of.digest.data.in.timestamping.request"));
+        System.out.println();
+        System.out.println(rb.getString
                 (".altsigner.class.class.name.of.an.alternative.signing.mechanism"));
         System.out.println();
         System.out.println(rb.getString
@@ -570,6 +631,10 @@ public class Main {
     {
         boolean anySigned = false;  // if there exists entry inside jar signed
         JarFile jf = null;
+        Map<String,String> digestMap = new HashMap<>();
+        Map<String,PKCS7> sigMap = new HashMap<>();
+        Map<String,String> sigNameMap = new HashMap<>();
+        Map<String,String> unparsableSignatures = new HashMap<>();
 
         try {
             jf = new JarFile(jarName, true);
@@ -580,22 +645,50 @@ public class Main {
             while (entries.hasMoreElements()) {
                 JarEntry je = entries.nextElement();
                 entriesVec.addElement(je);
-                InputStream is = null;
+                try (InputStream is = jf.getInputStream(je)) {
+                    String name = je.getName();
+                    if (signatureRelated(name)
+                            && SignatureFileVerifier.isBlockOrSF(name)) {
+                        String alias = name.substring(name.lastIndexOf('/') + 1,
+                                name.lastIndexOf('.'));
                 try {
-                    is = jf.getInputStream(je);
-                    int n;
-                    while ((n = is.read(buffer, 0, buffer.length)) != -1) {
+                            if (name.endsWith(".SF")) {
+                                Manifest sf = new Manifest(is);
+                                boolean found = false;
+                                for (Object obj : sf.getMainAttributes().keySet()) {
+                                    String key = obj.toString();
+                                    if (key.endsWith("-Digest-Manifest")) {
+                                        digestMap.put(alias,
+                                                key.substring(0, key.length() - 16));
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                if (!found) {
+                                    unparsableSignatures.putIfAbsent(alias,
+                                        String.format(
+                                            rb.getString("history.unparsable"),
+                                            name));
+                                }
+                            } else {
+                                sigNameMap.put(alias, name);
+                                sigMap.put(alias, new PKCS7(is));
+                            }
+                        } catch (IOException ioe) {
+                            unparsableSignatures.putIfAbsent(alias, String.format(
+                                    rb.getString("history.unparsable"), name));
+                        }
+                    } else {
+                        while (is.read(buffer, 0, buffer.length) != -1) {
                         // we just read. this will throw a SecurityException
                         // if  a signature/digest check fails.
                     }
-                } finally {
-                    if (is != null) {
-                        is.close();
                     }
                 }
             }
 
             Manifest man = jf.getManifest();
+            boolean hasSignature = false;
 
             // The map to record display info, only used when -verbose provided
             //      key: signer info string
@@ -611,11 +704,19 @@ public class Main {
                 while (e.hasMoreElements()) {
                     JarEntry je = e.nextElement();
                     String name = je.getName();
+
+                    hasSignature = hasSignature
+                            || SignatureFileVerifier.isBlockOrSF(name);
+
                     CodeSigner[] signers = je.getCodeSigners();
                     boolean isSigned = (signers != null);
                     anySigned |= isSigned;
-                    hasUnsignedEntry |= !je.isDirectory() && !isSigned
-                                        && !signatureRelated(name);
+
+                    boolean unsignedEntry = !isSigned
+                            && ((!je.isDirectory() && !signatureRelated(name))
+                            // a directory entry but with a suspicious size
+                            || (je.isDirectory() && je.getSize() > 0));
+                    hasUnsignedEntry |= unsignedEntry;
 
                     int inStoreOrScope = inKeyStore(signers);
 
@@ -640,7 +741,9 @@ public class Main {
                           (inManifest ? rb.getString("m") : rb.getString("SPACE")) +
                           (inStore ? rb.getString("k") : rb.getString("SPACE")) +
                           (inScope ? rb.getString("i") : rb.getString("SPACE")) +
-                          ((inStoreOrScope & NOT_ALIAS) != 0 ?"X":" ") +
+                          ((inStoreOrScope & NOT_ALIAS) != 0 ?
+                          rb.getString("X") : rb.getString("SPACE")) +
+                          (unsignedEntry ? rb.getString("q") : rb.getString("SPACE")) +
                           rb.getString("SPACE"));
                         sb.append("|");
                     }
@@ -665,9 +768,13 @@ public class Main {
                         if (signatureRelated(name)) {
                             sb.append("\n" + tab + rb.getString(
                                     ".Signature.related.entries.") + "\n\n");
+                        } else if (unsignedEntry) {
+                            sb.append('\n').append(tab)
+                                    .append(rb.getString(".Unsigned.entries."))
+                                    .append("\n\n");
                         } else {
                             sb.append("\n" + tab + rb.getString(
-                                    ".Unsigned.entries.") + "\n\n");
+                                    ".Directory.entries.") + "\n\n");
                         }
                     }
 
@@ -744,100 +851,136 @@ public class Main {
                     System.out.println(rb.getString(
                         ".X.not.signed.by.specified.alias.es."));
                 }
+
+                if (hasUnsignedEntry) {
+                    System.out.println(rb.getString(
+                            ".q.unsigned.entry"));
+                }
+            }
+            if (man == null) {
+                System.out.println();
+                System.out.println(rb.getString("no.manifest."));
+            }
+
+            // Even if the verbose option is not specified, all out strings
+            // must be generated so disabledAlgFound can be updated.
+            if (!digestMap.isEmpty()
+                    || !sigMap.isEmpty()
+                    || !unparsableSignatures.isEmpty()) {
+                if (verbose != null) {
                 System.out.println();
             }
-            if (man == null)
-                System.out.println(rb.getString("no.manifest."));
+                for (String s : sigMap.keySet()) {
+                    if (!digestMap.containsKey(s)) {
+                        unparsableSignatures.putIfAbsent(s, String.format(
+                                rb.getString("history.nosf"), s));
+                    }
+                }
+                for (String s : digestMap.keySet()) {
+                    PKCS7 p7 = sigMap.get(s);
+                    if (p7 != null) {
+                        String history;
+                        try {
+                            SignerInfo si = p7.getSignerInfos()[0];
+                            ArrayList<X509Certificate> chain = si.getCertificateChain(p7);
+                            X509Certificate signer = chain.get(0);
+                            String digestAlg = digestMap.get(s);
+                            String sigAlg = AlgorithmId.makeSigAlg(
+                                    si.getDigestAlgorithmId().getName(),
+                                    si.getDigestEncryptionAlgorithmId().getName());
+                            PublicKey key = signer.getPublicKey();
+                            PKCS7 tsToken = si.getTsToken();
+                            if (tsToken != null) {
+                                hasTimestampBlock = true;
+                                SignerInfo tsSi = tsToken.getSignerInfos()[0];
+                                X509Certificate tsSigner = tsSi.getCertificate(tsToken);
+                                byte[] encTsTokenInfo = tsToken.getContentInfo().getData();
+                                TimestampToken tsTokenInfo = new TimestampToken(encTsTokenInfo);
+                                PublicKey tsKey = tsSigner.getPublicKey();
+                                String tsDigestAlg = tsTokenInfo.getHashAlgorithm().getName();
+                                String tsSigAlg = AlgorithmId.makeSigAlg(
+                                        tsSi.getDigestAlgorithmId().getName(),
+                                        tsSi.getDigestEncryptionAlgorithmId().getName());
+                                Calendar c = Calendar.getInstance(
+                                        TimeZone.getTimeZone("UTC"),
+                                        Locale.getDefault(Locale.Category.FORMAT));
+                                Date tsDate = tsTokenInfo.getDate();
+                                c.setTime(tsDate);
+                                JarConstraintsParameters jcp =
+                                    new JarConstraintsParameters(chain, tsDate);
+                                JarConstraintsParameters jcpts =
+                                    new JarConstraintsParameters(
+                                        tsSi.getCertificateChain(tsToken),
+                                        tsDate);
+                                history = String.format(
+                                        rb.getString("history.with.ts"),
+                                        signer.getSubjectX500Principal(),
+                                        verifyWithWeak(digestAlg, DIGEST_PRIMITIVE_SET, false, jcp),
+                                        verifyWithWeak(sigAlg, SIG_PRIMITIVE_SET, false, jcp),
+                                        verifyWithWeak(key, jcp),
+                                        c,
+                                        tsSigner.getSubjectX500Principal(),
+                                        verifyWithWeak(tsDigestAlg, DIGEST_PRIMITIVE_SET, true, jcpts),
+                                        verifyWithWeak(tsSigAlg, SIG_PRIMITIVE_SET, true, jcpts),
+                                        verifyWithWeak(tsKey, jcpts));
+                            } else {
+                                JarConstraintsParameters jcp =
+                                    new JarConstraintsParameters(chain, null);
+                                history = String.format(
+                                        rb.getString("history.without.ts"),
+                                        signer.getSubjectX500Principal(),
+                                        verifyWithWeak(digestAlg, DIGEST_PRIMITIVE_SET, false, jcp),
+                                        verifyWithWeak(sigAlg, SIG_PRIMITIVE_SET, false, jcp),
+                                        verifyWithWeak(key, jcp));
+                            }
+                        } catch (Exception e) {
+                            e.printStackTrace();
+                            // The only usage of sigNameMap, remember the name
+                            // of the block file if it's invalid.
+                            history = String.format(
+                                    rb.getString("history.unparsable"),
+                                    sigNameMap.get(s));
+                        }
+                        if (verbose != null) {
+                            System.out.println(history);
+                        }
+                    } else {
+                        unparsableSignatures.putIfAbsent(s, String.format(
+                                rb.getString("history.nobk"), s));
+                    }
+                }
+                if (verbose != null) {
+                    for (String s : unparsableSignatures.keySet()) {
+                        System.out.println(unparsableSignatures.get(s));
+                    }
+                }
+            }
+            System.out.println();
+
+            // If signer is a trusted cert or private entry in user's own
+            // keystore, it can be self-signed. Please note aliasNotInStore
+            // is always false when ~/.keystore is used.
+            if (!aliasNotInStore && keystore != null) {
+                signerSelfSigned = false;
+            }
 
             if (!anySigned) {
-                System.out.println(rb.getString(
-                      "jar.is.unsigned.signatures.missing.or.not.parsable."));
-            } else {
-                boolean warningAppeared = false;
-                boolean errorAppeared = false;
-                if (badKeyUsage || badExtendedKeyUsage || badNetscapeCertType ||
-                        notYetValidCert || chainNotValidated || hasExpiredCert ||
-                        hasUnsignedEntry ||
-                        aliasNotInStore || notSignedByAlias) {
-
-                    if (strict) {
-                        System.out.println(rb.getString("jar.verified.with.signer.errors."));
-                        System.out.println();
-                        System.out.println(rb.getString("Error."));
-                        errorAppeared = true;
+                if (disabledAlgFound) {
+                    if (verbose != null) {
+                        System.out.println(rb.getString("jar.treated.unsigned.see.weak.verbose"));
+                        System.out.println("\n  " +
+                                DisabledAlgorithmConstraints.PROPERTY_JAR_DISABLED_ALGS +
+                                "=" + Security.getProperty(DisabledAlgorithmConstraints.PROPERTY_JAR_DISABLED_ALGS));
                     } else {
-                        System.out.println(rb.getString("jar.verified."));
-                        System.out.println();
-                        System.out.println(rb.getString("Warning."));
-                        warningAppeared = true;
+                        System.out.println(rb.getString("jar.treated.unsigned.see.weak"));
                     }
-
-                    if (badKeyUsage) {
-                        System.out.println(
-                            rb.getString("This.jar.contains.entries.whose.signer.certificate.s.KeyUsage.extension.doesn.t.allow.code.signing."));
-                    }
-
-                    if (badExtendedKeyUsage) {
-                        System.out.println(
-                            rb.getString("This.jar.contains.entries.whose.signer.certificate.s.ExtendedKeyUsage.extension.doesn.t.allow.code.signing."));
-                    }
-
-                    if (badNetscapeCertType) {
-                        System.out.println(
-                            rb.getString("This.jar.contains.entries.whose.signer.certificate.s.NetscapeCertType.extension.doesn.t.allow.code.signing."));
-                    }
-
-                    if (hasUnsignedEntry) {
-                        System.out.println(rb.getString(
-                            "This.jar.contains.unsigned.entries.which.have.not.been.integrity.checked."));
-                    }
-                    if (hasExpiredCert) {
-                        System.out.println(rb.getString(
-                            "This.jar.contains.entries.whose.signer.certificate.has.expired."));
-                    }
-                    if (notYetValidCert) {
-                        System.out.println(rb.getString(
-                            "This.jar.contains.entries.whose.signer.certificate.is.not.yet.valid."));
-                    }
-
-                    if (chainNotValidated) {
-                        System.out.println(
-                                rb.getString("This.jar.contains.entries.whose.certificate.chain.is.not.validated."));
-                    }
-
-                    if (notSignedByAlias) {
-                        System.out.println(
-                                rb.getString("This.jar.contains.signed.entries.which.is.not.signed.by.the.specified.alias.es."));
-                    }
-
-                    if (aliasNotInStore) {
-                        System.out.println(rb.getString("This.jar.contains.signed.entries.that.s.not.signed.by.alias.in.this.keystore."));
-                    }
+                } else if (hasSignature) {
+                    System.out.println(rb.getString("jar.treated.unsigned"));
                 } else {
-                    System.out.println(rb.getString("jar.verified."));
+                    System.out.println(rb.getString("jar.is.unsigned"));
                 }
-                if (hasExpiringCert || noTimestamp) {
-                    if (!warningAppeared) {
-                        System.out.println();
-                        System.out.println(rb.getString("Warning."));
-                        warningAppeared = true;
-                    }
-                    if (hasExpiringCert) {
-                        System.out.println(rb.getString(
-                                "This.jar.contains.entries.whose.signer.certificate.will.expire.within.six.months."));
-                    }
-                    if (noTimestamp) {
-                        System.out.println(
-                                String.format(rb.getString("no.timestamp.verifying"), expireDate));
-                    }
-                }
-                if (warningAppeared || errorAppeared) {
-                    if (! (verbose != null && showcerts)) {
-                        System.out.println();
-                        System.out.println(rb.getString(
-                                "Re.run.with.the.verbose.and.certs.options.for.more.details."));
-                    }
-                }
+            } else {
+                displayMessagesAndResult(false);
             }
             return;
         } catch (Exception e) {
@@ -854,21 +997,395 @@ public class Main {
         System.exit(1);
     }
 
+    private void displayMessagesAndResult(boolean isSigning) {
+        String result;
+        List<String> errors = new ArrayList<>();
+        List<String> warnings = new ArrayList<>();
+        List<String> info = new ArrayList<>();
+
+        boolean signerNotExpired = expireDate == null
+                || expireDate.after(new Date());
+
+        if (badKeyUsage || badExtendedKeyUsage || badNetscapeCertType ||
+                notYetValidCert || chainNotValidated || hasExpiredCert ||
+                hasUnsignedEntry || signerSelfSigned || (legacyAlg != 0) ||
+                (disabledAlg != 0) || aliasNotInStore || notSignedByAlias ||
+                tsaChainNotValidated ||
+                (hasExpiredTsaCert && !signerNotExpired)) {
+
+            if (strict) {
+                result = rb.getString(isSigning
+                        ? "jar.signed.with.signer.errors."
+                        : "jar.verified.with.signer.errors.");
+            } else {
+                result = rb.getString(isSigning
+                        ? "jar.signed."
+                        : "jar.verified.");
+            }
+
+            if (badKeyUsage) {
+                errors.add(rb.getString(isSigning
+                        ? "The.signer.certificate.s.KeyUsage.extension.doesn.t.allow.code.signing."
+                        : "This.jar.contains.entries.whose.signer.certificate.s.KeyUsage.extension.doesn.t.allow.code.signing."));
+            }
+
+            if (badExtendedKeyUsage) {
+                errors.add(rb.getString(isSigning
+                        ? "The.signer.certificate.s.ExtendedKeyUsage.extension.doesn.t.allow.code.signing."
+                        : "This.jar.contains.entries.whose.signer.certificate.s.ExtendedKeyUsage.extension.doesn.t.allow.code.signing."));
+            }
+
+            if (badNetscapeCertType) {
+                errors.add(rb.getString(isSigning
+                        ? "The.signer.certificate.s.NetscapeCertType.extension.doesn.t.allow.code.signing."
+                        : "This.jar.contains.entries.whose.signer.certificate.s.NetscapeCertType.extension.doesn.t.allow.code.signing."));
+            }
+
+            // only in verifying
+            if (hasUnsignedEntry) {
+                errors.add(rb.getString(
+                        "This.jar.contains.unsigned.entries.which.have.not.been.integrity.checked."));
+            }
+            if (hasExpiredCert) {
+                errors.add(rb.getString(isSigning
+                        ? "The.signer.certificate.has.expired."
+                        : "This.jar.contains.entries.whose.signer.certificate.has.expired."));
+            }
+            if (notYetValidCert) {
+                errors.add(rb.getString(isSigning
+                        ? "The.signer.certificate.is.not.yet.valid."
+                        : "This.jar.contains.entries.whose.signer.certificate.is.not.yet.valid."));
+            }
+
+            if (chainNotValidated) {
+                errors.add(String.format(rb.getString(isSigning
+                                ? "The.signer.s.certificate.chain.is.invalid.reason.1"
+                                : "This.jar.contains.entries.whose.certificate.chain.is.invalid.reason.1"),
+                        chainNotValidatedReason.getLocalizedMessage()));
+            }
+
+            if (hasExpiredTsaCert) {
+                errors.add(rb.getString("The.timestamp.has.expired."));
+            }
+            if (tsaChainNotValidated) {
+                errors.add(String.format(rb.getString(isSigning
+                                ? "The.tsa.certificate.chain.is.invalid.reason.1"
+                                : "This.jar.contains.entries.whose.tsa.certificate.chain.is.invalid.reason.1"),
+                        tsaChainNotValidatedReason.getLocalizedMessage()));
+            }
+
+            // only in verifying
+            if (notSignedByAlias) {
+                errors.add(
+                        rb.getString("This.jar.contains.signed.entries.which.is.not.signed.by.the.specified.alias.es."));
+            }
+
+            // only in verifying
+            if (aliasNotInStore) {
+                errors.add(rb.getString("This.jar.contains.signed.entries.that.s.not.signed.by.alias.in.this.keystore."));
+            }
+
+            if (signerSelfSigned) {
+                errors.add(rb.getString(isSigning
+                        ? "The.signer.s.certificate.is.self.signed."
+                        : "This.jar.contains.entries.whose.signer.certificate.is.self.signed."));
+            }
+
+            if (isSigning) {
+                if ((legacyAlg & 1) == 1) {
+                    warnings.add(String.format(
+                            rb.getString("The.1.algorithm.specified.for.the.2.option.is.considered.a.security.risk..This.algorithm.will.be.disabled.in.a.future.update."),
+                            digestalg, "-digestalg"));
+                }
+
+                if ((disabledAlg & 1) == 1) {
+                    errors.add(String.format(
+                            rb.getString("The.1.algorithm.specified.for.the.2.option.is.considered.a.security.risk.and.is.disabled."),
+                            digestalg, "-digestalg"));
+                }
+
+                if ((legacyAlg & 2) == 2) {
+                    warnings.add(String.format(
+                            rb.getString("The.1.algorithm.specified.for.the.2.option.is.considered.a.security.risk..This.algorithm.will.be.disabled.in.a.future.update."),
+                            sigalg, "-sigalg"));
+                }
+                if ((disabledAlg & 2) == 2) {
+                    errors.add(String.format(
+                            rb.getString("The.1.algorithm.specified.for.the.2.option.is.considered.a.security.risk.and.is.disabled."),
+                            sigalg, "-sigalg"));
+                }
+
+                if ((legacyAlg & 4) == 4) {
+                    warnings.add(String.format(
+                            rb.getString("The.1.algorithm.specified.for.the.2.option.is.considered.a.security.risk..This.algorithm.will.be.disabled.in.a.future.update."),
+                            tSADigestAlg, "-tsadigestalg"));
+                }
+                if ((disabledAlg & 4) == 4) {
+                    errors.add(String.format(
+                            rb.getString("The.1.algorithm.specified.for.the.2.option.is.considered.a.security.risk.and.is.disabled."),
+                            tSADigestAlg, "-tsadigestalg"));
+                }
+
+                if ((legacyAlg & 8) == 8) {
+                    warnings.add(String.format(
+                            rb.getString("The.1.signing.key.has.a.keysize.of.2.which.is.considered.a.security.risk..This.key.size.will.be.disabled.in.a.future.update."),
+                            privateKey.getAlgorithm(), KeyUtil.getKeySize(privateKey)));
+                }
+                if ((disabledAlg & 8) == 8) {
+                    errors.add(String.format(
+                            rb.getString("The.1.signing.key.has.a.keysize.of.2.which.is.considered.a.security.risk.and.is.disabled."),
+                            privateKey.getAlgorithm(), KeyUtil.getKeySize(privateKey)));
+                }
+            } else {
+                if ((legacyAlg & 1) != 0) {
+                    warnings.add(String.format(
+                            rb.getString("The.digest.algorithm.1.is.considered.a.security.risk..This.algorithm.will.be.disabled.in.a.future.update."),
+                            legacyDigestAlg));
+                }
+
+                if ((legacyAlg & 2) == 2) {
+                     warnings.add(String.format(
+                             rb.getString("The.signature.algorithm.1.is.considered.a.security.risk..This.algorithm.will.be.disabled.in.a.future.update."),
+                             legacySigAlg));
+                }
+
+                if ((legacyAlg & 4) != 0) {
+                    warnings.add(String.format(
+                            rb.getString("The.digest.algorithm.1.is.considered.a.security.risk..This.algorithm.will.be.disabled.in.a.future.update."),
+                            legacyTsaDigestAlg));
+                }
+
+                if ((legacyAlg & 8) == 8) {
+                    warnings.add(String.format(
+                            rb.getString("The.1.signing.key.has.a.keysize.of.2.which.is.considered.a.security.risk..This.key.size.will.be.disabled.in.a.future.update."),
+                            weakPublicKey.getAlgorithm(), KeyUtil.getKeySize(weakPublicKey)));
+                }
+            }
+        } else {
+            result = rb.getString(isSigning ? "jar.signed." : "jar.verified.");
+        }
+
+        if (hasExpiredTsaCert) {
+            // No need to warn about expiring if already expired
+            hasExpiringTsaCert = false;
+        }
+
+        if (hasExpiringCert ||
+                (hasExpiringTsaCert  && expireDate != null) ||
+                (noTimestamp && expireDate != null) ||
+                (hasExpiredTsaCert && signerNotExpired)) {
+
+            if (hasExpiredTsaCert && signerNotExpired) {
+                if (expireDate != null) {
+                    warnings.add(String.format(
+                            rb.getString("The.timestamp.expired.1.but.usable.2"),
+                            tsaExpireDate,
+                            expireDate));
+                }
+                // Reset the flag so exit code is 0
+                hasExpiredTsaCert = false;
+            }
+            if (hasExpiringCert) {
+                warnings.add(rb.getString(isSigning
+                        ? "The.signer.certificate.will.expire.within.six.months."
+                        : "This.jar.contains.entries.whose.signer.certificate.will.expire.within.six.months."));
+            }
+            if (hasExpiringTsaCert && expireDate != null) {
+                if (expireDate.after(tsaExpireDate)) {
+                    warnings.add(String.format(rb.getString(
+                            "The.timestamp.will.expire.within.one.year.on.1.but.2"), tsaExpireDate, expireDate));
+                } else {
+                    warnings.add(String.format(rb.getString(
+                            "The.timestamp.will.expire.within.one.year.on.1"), tsaExpireDate));
+                }
+            }
+            if (noTimestamp && expireDate != null) {
+                if (hasTimestampBlock) {
+                    warnings.add(String.format(rb.getString(isSigning
+                            ? "invalid.timestamp.signing"
+                            : "bad.timestamp.verifying"), expireDate));
+                } else {
+                    warnings.add(String.format(rb.getString(isSigning
+                            ? "no.timestamp.signing"
+                            : "no.timestamp.verifying"), expireDate));
+                }
+            }
+        }
+
+        System.out.println(result);
+        if (strict) {
+            if (!errors.isEmpty()) {
+                System.out.println();
+                System.out.println(rb.getString("Error."));
+                errors.forEach(System.out::println);
+            }
+            if (!warnings.isEmpty()) {
+                System.out.println();
+                System.out.println(rb.getString("Warning."));
+                warnings.forEach(System.out::println);
+            }
+        } else {
+            if (!errors.isEmpty() || !warnings.isEmpty()) {
+                System.out.println();
+                System.out.println(rb.getString("Warning."));
+                errors.forEach(System.out::println);
+                warnings.forEach(System.out::println);
+            }
+        }
+        if (!isSigning && (!errors.isEmpty() || !warnings.isEmpty())) {
+            if (! (verbose != null && showcerts)) {
+                System.out.println();
+                System.out.println(rb.getString(
+                        "Re.run.with.the.verbose.and.certs.options.for.more.details."));
+            }
+        }
+
+        if (isSigning || verbose != null) {
+            // Always print out expireDate, unless expired or expiring.
+            if (!hasExpiringCert && !hasExpiredCert
+                    && expireDate != null && signerNotExpired) {
+                info.add(String.format(rb.getString(
+                        "The.signer.certificate.will.expire.on.1."), expireDate));
+            }
+            if (!noTimestamp) {
+                if (!hasExpiringTsaCert && !hasExpiredTsaCert && tsaExpireDate != null) {
+                    if (signerNotExpired) {
+                        info.add(String.format(rb.getString(
+                                "The.timestamp.will.expire.on.1."), tsaExpireDate));
+                    } else {
+                        info.add(String.format(rb.getString(
+                                "signer.cert.expired.1.but.timestamp.good.2."),
+                                expireDate,
+                                tsaExpireDate));
+                    }
+                }
+            }
+        }
+
+        if (!info.isEmpty()) {
+            System.out.println();
+            info.forEach(System.out::println);
+        }
+    }
+
+    private String verifyWithWeak(String alg, Set<CryptoPrimitive> primitiveSet,
+        boolean tsa, JarConstraintsParameters jcp) {
+
+        try {
+            DISABLED_CHECK.permits(alg, jcp, false);
+        } catch (CertPathValidatorException e) {
+            disabledAlgFound = true;
+            return String.format(rb.getString("with.disabled"), alg);
+        }
+        try {
+            LEGACY_CHECK.permits(alg, jcp, false);
+            return alg;
+        } catch (CertPathValidatorException e) {
+            if (primitiveSet == SIG_PRIMITIVE_SET) {
+                legacyAlg |= 2;
+                legacySigAlg = alg;
+            } else {
+                if (tsa) {
+                    legacyAlg |= 4;
+                    legacyTsaDigestAlg = alg;
+                } else {
+                    legacyAlg |= 1;
+                    legacyDigestAlg = alg;
+                }
+            }
+            return String.format(rb.getString("with.weak"), alg);
+        }
+    }
+
+    private String verifyWithWeak(PublicKey key, JarConstraintsParameters jcp) {
+        int kLen = KeyUtil.getKeySize(key);
+        try {
+            DISABLED_CHECK.permits(key.getAlgorithm(), jcp, true);
+        } catch (CertPathValidatorException e) {
+            disabledAlgFound = true;
+            return String.format(rb.getString("key.bit.disabled"), kLen);
+        }
+        try {
+            LEGACY_CHECK.permits(key.getAlgorithm(), jcp, true);
+            if (kLen >= 0) {
+                return String.format(rb.getString("key.bit"), kLen);
+            } else {
+                return rb.getString("unknown.size");
+            }
+        } catch (CertPathValidatorException e) {
+            weakPublicKey = key;
+            legacyAlg |= 8;
+            return String.format(rb.getString("key.bit.weak"), kLen);
+        }
+    }
+
+    private void checkWeakSign(String alg, Set<CryptoPrimitive> primitiveSet,
+        boolean tsa, JarConstraintsParameters jcp) {
+
+        try {
+            DISABLED_CHECK.permits(alg, jcp, false);
+            try {
+                LEGACY_CHECK.permits(alg, jcp, false);
+            } catch (CertPathValidatorException e) {
+                if (primitiveSet == SIG_PRIMITIVE_SET) {
+                    legacyAlg |= 2;
+                } else {
+                    if (tsa) {
+                        legacyAlg |= 4;
+                    } else {
+                        legacyAlg |= 1;
+                    }
+                }
+            }
+        } catch (CertPathValidatorException e) {
+           if (primitiveSet == SIG_PRIMITIVE_SET) {
+               disabledAlg |= 2;
+           } else {
+               if (tsa) {
+                   disabledAlg |= 4;
+               } else {
+                   disabledAlg |= 1;
+               }
+           }
+        }
+    }
+
+    private void checkWeakSign(PrivateKey key, JarConstraintsParameters jcp) {
+        try {
+            DISABLED_CHECK.permits(key.getAlgorithm(), jcp, true);
+            try {
+                LEGACY_CHECK.permits(key.getAlgorithm(), jcp, true);
+            } catch (CertPathValidatorException e) {
+                legacyAlg |= 8;
+            }
+        } catch (CertPathValidatorException e) {
+            disabledAlg |= 8;
+        }
+    }
+
     private static MessageFormat validityTimeForm = null;
     private static MessageFormat notYetTimeForm = null;
     private static MessageFormat expiredTimeForm = null;
     private static MessageFormat expiringTimeForm = null;
 
-    /*
-     * Display some details about a certificate:
+    /**
+     * Returns a string about a certificate:
      *
      * [<tab>] <cert-type> [", " <subject-DN>] [" (" <keystore-entry-alias> ")"]
      * [<validity-period> | <expiry-warning>]
+     * [<key-usage-warning>]
      *
-     * Note: no newline character at the end
+     * Note: no newline character at the end.
+     *
+     * This method sets global flags like hasExpiringCert, hasExpiredCert,
+     * notYetValidCert, badKeyUsage, badExtendedKeyUsage, badNetscapeCertType,
+     * hasExpiringTsaCert, hasExpiredTsaCert.
+     *
+     * @param isTsCert true if c is in the TSA cert chain, false otherwise.
+     * @param checkUsage true to check code signer keyUsage
      */
-    String printCert(String tab, Certificate c, boolean checkValidityPeriod,
-        Date timestamp, boolean checkUsage) {
+    String printCert(boolean isTsCert, String tab, Certificate c,
+        Date timestamp, boolean checkUsage, CertPathConstraintsParameters cpcp) throws Exception {
 
         StringBuilder certStr = new StringBuilder();
         String space = rb.getString("SPACE");
@@ -888,58 +1405,78 @@ public class Main {
             certStr.append(space).append(alias);
         }
 
-        if (checkValidityPeriod && x509Cert != null) {
+        if (x509Cert != null) {
 
             certStr.append("\n").append(tab).append("[");
-            Date notAfter = x509Cert.getNotAfter();
-            try {
-                boolean printValidity = true;
-                if (timestamp == null) {
-                    if (expireDate.getTime() == 0 || expireDate.after(notAfter)) {
-                        expireDate = notAfter;
-                    }
-                    x509Cert.checkValidity();
-                    // test if cert will expire within six months
-                    if (notAfter.getTime() < System.currentTimeMillis() + SIX_MONTHS) {
-                        hasExpiringCert = true;
-                        if (expiringTimeForm == null) {
-                            expiringTimeForm = new MessageFormat(
-                                rb.getString("certificate.will.expire.on"));
+
+            if (trustedCerts.contains(x509Cert)) {
+                certStr.append(rb.getString("trusted.certificate"));
+            } else {
+                Date notAfter = x509Cert.getNotAfter();
+                try {
+                    boolean printValidity = true;
+                    if (isTsCert) {
+                        if (tsaExpireDate == null || tsaExpireDate.after(notAfter)) {
+                            tsaExpireDate = notAfter;
                         }
-                        Object[] source = { notAfter };
-                        certStr.append(expiringTimeForm.format(source));
-                        printValidity = false;
+                    } else {
+                        if (expireDate == null || expireDate.after(notAfter)) {
+                            expireDate = notAfter;
+                        }
                     }
-                } else {
-                    x509Cert.checkValidity(timestamp);
-                }
-                if (printValidity) {
-                    if (validityTimeForm == null) {
-                        validityTimeForm = new MessageFormat(
-                            rb.getString("certificate.is.valid.from"));
+                    if (timestamp == null) {
+                        x509Cert.checkValidity();
+                        // test if cert will expire within six months (or one year for tsa)
+                        long age = isTsCert ? ONE_YEAR : SIX_MONTHS;
+                        if (notAfter.getTime() < System.currentTimeMillis() + age) {
+                            if (isTsCert) {
+                                hasExpiringTsaCert = true;
+                            } else {
+                                hasExpiringCert = true;
+                            }
+                            if (expiringTimeForm == null) {
+                                expiringTimeForm = new MessageFormat(
+                                        rb.getString("certificate.will.expire.on"));
+                            }
+                            Object[] source = {notAfter};
+                            certStr.append(expiringTimeForm.format(source));
+                            printValidity = false;
+                        }
+                    } else {
+                        x509Cert.checkValidity(timestamp);
                     }
-                    Object[] source = { x509Cert.getNotBefore(), notAfter };
-                    certStr.append(validityTimeForm.format(source));
-                }
-            } catch (CertificateExpiredException cee) {
-                hasExpiredCert = true;
+                    if (printValidity) {
+                        if (validityTimeForm == null) {
+                            validityTimeForm = new MessageFormat(
+                                    rb.getString("certificate.is.valid.from"));
+                        }
+                        Object[] source = {x509Cert.getNotBefore(), notAfter};
+                        certStr.append(validityTimeForm.format(source));
+                    }
+                } catch (CertificateExpiredException cee) {
+                    if (isTsCert) {
+                        hasExpiredTsaCert = true;
+                    } else {
+                        hasExpiredCert = true;
+                    }
 
-                if (expiredTimeForm == null) {
-                    expiredTimeForm = new MessageFormat(
-                        rb.getString("certificate.expired.on"));
-                }
-                Object[] source = { notAfter };
-                certStr.append(expiredTimeForm.format(source));
+                    if (expiredTimeForm == null) {
+                        expiredTimeForm = new MessageFormat(
+                                rb.getString("certificate.expired.on"));
+                    }
+                    Object[] source = {notAfter};
+                    certStr.append(expiredTimeForm.format(source));
 
-            } catch (CertificateNotYetValidException cnyve) {
-                notYetValidCert = true;
+                } catch (CertificateNotYetValidException cnyve) {
+                    if (!isTsCert) notYetValidCert = true;
 
-                if (notYetTimeForm == null) {
-                    notYetTimeForm = new MessageFormat(
-                        rb.getString("certificate.is.not.valid.until"));
+                    if (notYetTimeForm == null) {
+                        notYetTimeForm = new MessageFormat(
+                                rb.getString("certificate.is.not.valid.until"));
+                    }
+                    Object[] source = {x509Cert.getNotBefore()};
+                    certStr.append(notYetTimeForm.format(source));
                 }
-                Object[] source = { x509Cert.getNotBefore() };
-                certStr.append(notYetTimeForm.format(source));
             }
             certStr.append("]");
 
@@ -1045,7 +1582,24 @@ public class Main {
     }
 
     void signJar(String jarName, String alias, String[] args)
-        throws Exception {
+            throws Exception {
+
+        JarConstraintsParameters jcp =
+            new JarConstraintsParameters(Arrays.asList(certChain), null);
+        checkWeakSign(digestalg, DIGEST_PRIMITIVE_SET, false, jcp);
+
+        checkWeakSign(tSADigestAlg, DIGEST_PRIMITIVE_SET, true, jcp);
+        /*
+         * If no signature algorithm was specified, we choose a
+         * default that is compatible with the private key algorithm.
+         */
+        if (sigalg == null) {
+            sigalg = getDefaultSignatureAlgorithm(privateKey);
+        }
+        checkWeakSign(sigalg, SIG_PRIMITIVE_SET, false, jcp);
+
+        checkWeakSign(privateKey, jcp);
+
         boolean aliasUsed = false;
         X509Certificate tsaCert = null;
 
@@ -1270,8 +1824,8 @@ public class Main {
             try {
                 block =
                     sf.generateBlock(privateKey, sigalg, certChain,
-                        externalSF, tsaUrl, tsaCert, tSAPolicyID, signingMechanism, args,
-                        zipFile);
+                        externalSF, tsaUrl, tsaCert, tSAPolicyID, tSADigestAlg,
+                        signingMechanism, args, zipFile);
             } catch (SocketTimeoutException e) {
                 // Provide a helpful message when TSA is beyond a firewall
                 error(rb.getString("unable.to.sign.jar.") +
@@ -1320,8 +1874,10 @@ public class Main {
                         System.out.println(rb.getString("TSA.location.") +
                             tsaURI);
                     }
+                    CertPathConstraintsParameters cpcp =
+                        new CertPathConstraintsParameters(tsaCert, Validator.VAR_TSA_SERVER, null, null);
                     System.out.println(rb.getString("TSA.certificate.") +
-                        printCert("", tsaCert, false, null, false));
+                            printCert(true, "", tsaCert, null, false, cpcp));
                 }
                 if (signingMechanism != null) {
                     System.out.println(
@@ -1384,101 +1940,73 @@ public class Main {
             }
         }
 
-        // no IOException thrown in the follow try clause, so disable
-        // the try clause.
-        // try {
-            if (signedjar == null) {
-                // attempt an atomic rename. If that fails,
-                // rename the original jar file, then the signed
-                // one, then delete the original.
-                if (!signedJarFile.renameTo(jarFile)) {
-                    File origJar = new File(jarName+".orig");
+        // The JarSigner API always accepts the timestamp received.
+        // We need to extract the certs from the signed jar to
+        // validate it.
+        try (JarFile check = new JarFile(signedJarFile)) {
+            PKCS7 p7 = new PKCS7(check.getInputStream(check.getEntry(
+                    "META-INF/" + sigfile + "." + privateKey.getAlgorithm())));
+            Timestamp ts = null;
+            try {
+                SignerInfo si = p7.getSignerInfos()[0];
+                if (si.getTsToken() != null) {
+                    hasTimestampBlock = true;
+                }
+                ts = si.getTimestamp();
+            } catch (Exception e) {
+                tsaChainNotValidated = true;
+                tsaChainNotValidatedReason = e;
+            }
+            // Spaces before the ">>> Signer" and other lines are different
+            String result = certsAndTSInfo("", "    ", Arrays.asList(certChain), ts);
+            if (verbose != null) {
+                System.out.println(result);
+            }
+        } catch (Exception e) {
+            if (debug) {
+                e.printStackTrace();
+            }
+        }
 
-                    if (jarFile.renameTo(origJar)) {
-                        if (signedJarFile.renameTo(jarFile)) {
-                            origJar.delete();
-                        } else {
-                            MessageFormat form = new MessageFormat(rb.getString
-                        ("attempt.to.rename.signedJarFile.to.jarFile.failed"));
-                            Object[] source = {signedJarFile, jarFile};
-                            error(form.format(source));
-                        }
+        if (signedjar == null) {
+            // attempt an atomic rename. If that fails,
+            // rename the original jar file, then the signed
+            // one, then delete the original.
+            if (!signedJarFile.renameTo(jarFile)) {
+                File origJar = new File(jarName+".orig");
+
+                if (jarFile.renameTo(origJar)) {
+                    if (signedJarFile.renameTo(jarFile)) {
+                        origJar.delete();
                     } else {
                         MessageFormat form = new MessageFormat(rb.getString
-                            ("attempt.to.rename.jarFile.to.origJar.failed"));
-                        Object[] source = {jarFile, origJar};
+                    ("attempt.to.rename.signedJarFile.to.jarFile.failed"));
+                        Object[] source = {signedJarFile, jarFile};
                         error(form.format(source));
                     }
-                }
-            }
-
-            boolean warningAppeared = false;
-            if (badKeyUsage || badExtendedKeyUsage || badNetscapeCertType ||
-                    notYetValidCert || chainNotValidated || hasExpiredCert) {
-                if (strict) {
-                    System.out.println(rb.getString("jar.signed.with.signer.errors."));
-                    System.out.println();
-                    System.out.println(rb.getString("Error."));
                 } else {
-                    System.out.println(rb.getString("jar.signed."));
-                    System.out.println();
-                    System.out.println(rb.getString("Warning."));
-                    warningAppeared = true;
-                }
-
-                if (badKeyUsage) {
-                    System.out.println(
-                        rb.getString("The.signer.certificate.s.KeyUsage.extension.doesn.t.allow.code.signing."));
-                }
-
-                if (badExtendedKeyUsage) {
-                    System.out.println(
-                        rb.getString("The.signer.certificate.s.ExtendedKeyUsage.extension.doesn.t.allow.code.signing."));
-                }
-
-                if (badNetscapeCertType) {
-                    System.out.println(
-                        rb.getString("The.signer.certificate.s.NetscapeCertType.extension.doesn.t.allow.code.signing."));
-                }
-
-                if (hasExpiredCert) {
-                    System.out.println(
-                        rb.getString("The.signer.certificate.has.expired."));
-                } else if (notYetValidCert) {
-                    System.out.println(
-                        rb.getString("The.signer.certificate.is.not.yet.valid."));
-                }
-
-                if (chainNotValidated) {
-                    System.out.println(
-                            rb.getString("The.signer.s.certificate.chain.is.not.validated."));
-                }
-            } else {
-                System.out.println(rb.getString("jar.signed."));
-            }
-            if (hasExpiringCert || noTimestamp) {
-                if (!warningAppeared) {
-                    System.out.println();
-                    System.out.println(rb.getString("Warning."));
-                }
-
-                if (hasExpiringCert) {
-                    System.out.println(
-                            rb.getString("The.signer.certificate.will.expire.within.six.months."));
-                }
-
-                if (noTimestamp) {
-                    System.out.println(
-                            String.format(rb.getString("no.timestamp.signing"), expireDate));
+                    MessageFormat form = new MessageFormat(rb.getString
+                        ("attempt.to.rename.jarFile.to.origJar.failed"));
+                    Object[] source = {jarFile, origJar};
+                    error(form.format(source));
                 }
             }
-
-        // no IOException thrown in the above try clause, so disable
-        // the catch clause.
-        // } catch(IOException ioe) {
-        //     error(rb.getString("unable.to.sign.jar.")+ioe, ioe);
-        // }
+        }
+        displayMessagesAndResult(true);
     }
+
+    private static String getDefaultSignatureAlgorithm(PrivateKey privateKey) {
+        String keyAlgorithm = privateKey.getAlgorithm();
+        if (keyAlgorithm.equalsIgnoreCase("DSA"))
+            return "SHA256withDSA";
+        else if (keyAlgorithm.equalsIgnoreCase("RSA"))
+            return "SHA256withRSA";
+        else if (keyAlgorithm.equalsIgnoreCase("EC"))
+            return "SHA256withECDSA";
+        throw new RuntimeException("private key is not a DSA or "
+                                           + "RSA key");
+    }
+
 
     /**
      * Find the length of header inside bs. The header is a multiple (>=0)
@@ -1525,52 +2053,101 @@ public class Main {
     Map<CodeSigner,String> cacheForSignerInfo = new IdentityHashMap<>();
 
     /**
-     * Returns a string of singer info, with a newline at the end
+     * Returns a string of signer info, with a newline at the end.
+     * Called by verifyJar().
      */
-    private String signerInfo(CodeSigner signer, String tab) {
+    private String signerInfo(CodeSigner signer, String tab) throws Exception {
         if (cacheForSignerInfo.containsKey(signer)) {
             return cacheForSignerInfo.get(signer);
         }
-        StringBuffer s = new StringBuffer();
         List<? extends Certificate> certs = signer.getSignerCertPath().getCertificates();
-        // display the signature timestamp, if present
-        Date timestamp;
+        // signing time is only displayed on verification
         Timestamp ts = signer.getTimestamp();
+        String tsLine = "";
         if (ts != null) {
-            s.append(printTimestamp(tab, ts));
-            s.append('\n');
+            tsLine = printTimestamp(tab, ts) + "\n";
+        }
+        // Spaces before the ">>> Signer" and other lines are the same.
+
+        String result = certsAndTSInfo(tab, tab, certs, ts);
+        cacheForSignerInfo.put(signer, tsLine + result);
+        return result;
+    }
+
+    /**
+     * Fills info on certs and timestamp into a StringBuilder, sets
+     * warning flags (through printCert) and validates cert chains.
+     *
+     * @param tab1 spaces before the ">>> Signer" line
+     * @param tab2 spaces before the other lines
+     * @param certs the signer cert
+     * @param ts the timestamp, can be null
+     * @return the info as a string
+     */
+    private String certsAndTSInfo(
+            String tab1,
+            String tab2,
+            List<? extends Certificate> certs, Timestamp ts)
+            throws Exception {
+
+        Date timestamp;
+        if (ts != null) {
             timestamp = ts.getTimestamp();
+            noTimestamp = false;
         } else {
             timestamp = null;
-            noTimestamp = true;
         }
         // display the certificate(s). The first one is end-entity cert and
         // its KeyUsage should be checked.
         boolean first = true;
+        StringBuilder sb = new StringBuilder();
+        sb.append(tab1).append(rb.getString("...Signer")).append('\n');
+        @SuppressWarnings("unchecked")
+        List<X509Certificate> chain = (List<X509Certificate>)certs;
+        TrustAnchor anchor = findTrustAnchor(chain);
         for (Certificate c : certs) {
-            s.append(printCert(tab, c, true, timestamp, first));
-            s.append('\n');
+            CertPathConstraintsParameters cpcp =
+                new CertPathConstraintsParameters((X509Certificate)c, Validator.VAR_CODE_SIGNING, anchor, timestamp);
+            sb.append(printCert(false, tab2, c, timestamp, first, cpcp));
+            sb.append('\n');
             first = false;
         }
         try {
-            validateCertChain(certs);
+            validateCertChain(Validator.VAR_CODE_SIGNING, certs, ts);
         } catch (Exception e) {
-            if (debug) {
-                e.printStackTrace();
+            chainNotValidated = true;
+            chainNotValidatedReason = e;
+            sb.append(tab2).append(rb.getString(".Invalid.certificate.chain."))
+                    .append(e.getLocalizedMessage()).append("]\n");
+        }
+        if (ts != null) {
+            List<? extends Certificate> tscerts = ts.getSignerCertPath().getCertificates();
+            @SuppressWarnings("unchecked")
+            List<X509Certificate> tschain = (List<X509Certificate>)tscerts;
+            anchor = findTrustAnchor(chain);
+            sb.append(tab1).append(rb.getString("...TSA")).append('\n');
+            for (Certificate c : tschain) {
+                CertPathConstraintsParameters cpcp =
+                    new CertPathConstraintsParameters((X509Certificate)c, Validator.VAR_TSA_SERVER, anchor, timestamp);
+                sb.append(printCert(true, tab2, c, null, false, cpcp));
+                sb.append('\n');
             }
-            if (e.getCause() != null &&
-                    (e.getCause() instanceof CertificateExpiredException ||
-                     e.getCause() instanceof CertificateNotYetValidException)) {
-                // No more warning, we alreay have hasExpiredCert or notYetValidCert
-            } else {
-                chainNotValidated = true;
-                s.append(tab + rb.getString(".CertPath.not.validated.") +
-                        e.getLocalizedMessage() + "]\n");   // TODO
+            try {
+                validateCertChain(Validator.VAR_TSA_SERVER,
+                        ts.getSignerCertPath().getCertificates(), null);
+            } catch (Exception e) {
+                tsaChainNotValidated = true;
+                tsaChainNotValidatedReason = e;
+                sb.append(tab2).append(rb.getString(".Invalid.TSA.certificate.chain."))
+                        .append(e.getLocalizedMessage()).append("]\n");
             }
         }
-        String result = s.toString();
-        cacheForSignerInfo.put(signer, result);
-        return result;
+        if (certs.size() == 1
+                && KeyStoreUtil.isSelfSigned((X509Certificate)certs.get(0))) {
+            signerSelfSigned = true;
+        }
+
+        return sb.toString();
     }
 
     private void writeEntry(ZipFile zf, ZipOutputStream os, ZipEntry ze)
@@ -1612,6 +2189,15 @@ public class Main {
         }
     }
 
+    private TrustAnchor findTrustAnchor(List<X509Certificate> chain) {
+        X509Certificate last = chain.get(chain.size() - 1);
+        Optional<X509Certificate> trusted =
+            trustedCerts.stream()
+                        .filter(c -> c.getSubjectX500Principal().equals(last.getIssuerX500Principal()))
+                        .findFirst();
+        return trusted.isPresent() ? new TrustAnchor(trusted.get(), null) : null;
+    }
+
     void loadKeyStore(String keyStoreName, boolean prompt) {
 
         if (!nullStream && keyStoreName == null) {
@@ -1620,10 +2206,6 @@ public class Main {
         }
 
         try {
-
-            certificateFactory = CertificateFactory.getInstance("X.509");
-            validator = CertPathValidator.getInstance("PKIX");
-            Set<TrustAnchor> tas = new HashSet<>();
             try {
                 KeyStore caks = KeyStoreUtil.getCacertsKeyStore();
                 if (caks != null) {
@@ -1631,7 +2213,7 @@ public class Main {
                     while (aliases.hasMoreElements()) {
                         String a = aliases.nextElement();
                         try {
-                            tas.add(new TrustAnchor((X509Certificate)caks.getCertificate(a), null));
+                            trustedCerts.add((X509Certificate)caks.getCertificate(a));
                         } catch (Exception e2) {
                             // ignore, when a SecretkeyEntry does not include a cert
                         }
@@ -1690,7 +2272,7 @@ public class Main {
                         // PrivateKeyEntry
                         if (store.isCertificateEntry(a) ||
                                 c.getSubjectDN().equals(c.getIssuerDN())) {
-                            tas.add(new TrustAnchor(c, null));
+                            trustedCerts.add(c);
                         }
                     } catch (Exception e2) {
                         // ignore, when a SecretkeyEntry does not include a cert
@@ -1698,7 +2280,11 @@ public class Main {
                 }
             } finally {
                 try {
-                    pkixParameters = new PKIXParameters(tas);
+                    pkixParameters = new PKIXBuilderParameters(
+                            trustedCerts.stream()
+                                    .map(c -> new TrustAnchor(c, null))
+                                    .collect(Collectors.toSet()),
+                            null);
                     pkixParameters.setRevocationEnabled(false);
                 } catch (InvalidAlgorithmParameterException ex) {
                     // Only if tas is empty
@@ -1814,7 +2400,8 @@ public class Main {
         }
     }
 
-    void getAliasInfo(String alias) {
+    // Called by signJar().
+    void getAliasInfo(String alias) throws Exception {
 
         Key key = null;
 
@@ -1856,25 +2443,6 @@ public class Main {
                         ("found.non.X.509.certificate.in.signer.s.chain"));
                 }
                 certChain[i] = (X509Certificate)cs[i];
-            }
-
-            // We don't meant to print anything, the next call
-            // checks validity and keyUsage etc
-            printCert("", certChain[0], true, null, true);
-
-            try {
-                validateCertChain(Arrays.asList(certChain));
-            } catch (Exception e) {
-                if (debug) {
-                    e.printStackTrace();
-                }
-                if (e.getCause() != null &&
-                        (e.getCause() instanceof CertificateExpiredException ||
-                        e.getCause() instanceof CertificateNotYetValidException)) {
-                    // No more warning, we alreay have hasExpiredCert or notYetValidCert
-                } else {
-                    chainNotValidated = true;
-                }
             }
 
             try {
@@ -1928,19 +2496,69 @@ public class Main {
         System.exit(1);
     }
 
-    void validateCertChain(List<? extends Certificate> certs) throws Exception {
-        int cpLen = 0;
-        out: for (; cpLen<certs.size(); cpLen++) {
-            for (TrustAnchor ta: pkixParameters.getTrustAnchors()) {
-                if (ta.getTrustedCert().equals(certs.get(cpLen))) {
-                    break out;
+    /**
+     * Validates a cert chain.
+     *
+     * @param parameter this might be a timestamp
+     */
+    void validateCertChain(String variant, List<? extends Certificate> certs,
+                           Timestamp parameter)
+            throws Exception {
+        try {
+            Validator.getInstance(Validator.TYPE_PKIX,
+                    variant,
+                    pkixParameters)
+                    .validate(certs.toArray(new X509Certificate[certs.size()]),
+                            null, parameter);
+        } catch (Exception e) {
+            if (debug) {
+                e.printStackTrace();
+            }
+
+            // Exception might be dismissed if another warning flag
+            // is already set by printCert.
+
+            if (variant.equals(Validator.VAR_TSA_SERVER) &&
+                    e instanceof ValidatorException) {
+                // Throw cause if it's CertPathValidatorException,
+                if (e.getCause() != null &&
+                        e.getCause() instanceof CertPathValidatorException) {
+                    e = (Exception) e.getCause();
+                    Throwable t = e.getCause();
+                    if ((t instanceof CertificateExpiredException &&
+                            hasExpiredTsaCert)) {
+                        // we already have hasExpiredTsaCert
+                        return;
+                    }
                 }
             }
-        }
-        if (cpLen > 0) {
-            CertPath cp = certificateFactory.generateCertPath(
-                    (cpLen == certs.size())? certs: certs.subList(0, cpLen));
-            validator.validate(cp, pkixParameters);
+
+            if (variant.equals(Validator.VAR_CODE_SIGNING) &&
+                    e instanceof ValidatorException) {
+                // Throw cause if it's CertPathValidatorException,
+                if (e.getCause() != null &&
+                        e.getCause() instanceof CertPathValidatorException) {
+                    e = (Exception) e.getCause();
+                    Throwable t = e.getCause();
+                    if ((t instanceof CertificateExpiredException &&
+                                hasExpiredCert) ||
+                            (t instanceof CertificateNotYetValidException &&
+                                    notYetValidCert)) {
+                        // we already have hasExpiredCert and notYetValidCert
+                        return;
+                    }
+                }
+                if (e instanceof ValidatorException) {
+                    ValidatorException ve = (ValidatorException)e;
+                    if (ve.getErrorType() == ValidatorException.T_EE_EXTENSIONS &&
+                            (badKeyUsage || badExtendedKeyUsage || badNetscapeCertType)) {
+                        // We already have badKeyUsage, badExtendedKeyUsage
+                        // and badNetscapeCertType
+                        return;
+                    }
+                }
+            }
+            throw e;
         }
     }
 
@@ -2268,13 +2886,14 @@ class SignatureFile {
                                boolean externalSF, String tsaUrl,
                                X509Certificate tsaCert,
                                String tSAPolicyID,
+                               String tSADigestAlg,
                                ContentSigner signingMechanism,
                                String[] args, ZipFile zipFile)
         throws NoSuchAlgorithmException, InvalidKeyException, IOException,
             SignatureException, CertificateException
     {
         return new Block(this, privateKey, sigalg, certChain, externalSF,
-                tsaUrl, tsaCert, tSAPolicyID, signingMechanism, args, zipFile);
+                tsaUrl, tsaCert, tSAPolicyID, tSADigestAlg, signingMechanism, args, zipFile);
     }
 
 
@@ -2288,8 +2907,8 @@ class SignatureFile {
          */
         Block(SignatureFile sfg, PrivateKey privateKey, String sigalg,
             X509Certificate[] certChain, boolean externalSF, String tsaUrl,
-            X509Certificate tsaCert, String tSAPolicyID, ContentSigner signingMechanism,
-            String[] args, ZipFile zipFile)
+            X509Certificate tsaCert, String tSAPolicyID, String tSADigestAlg,
+            ContentSigner signingMechanism, String[] args, ZipFile zipFile)
             throws NoSuchAlgorithmException, InvalidKeyException, IOException,
             SignatureException, CertificateException {
 
@@ -2307,26 +2926,8 @@ class SignatureFile {
                 }
             BigInteger serial = certChain[0].getSerialNumber();
 
-            String signatureAlgorithm;
+            String signatureAlgorithm = sigalg;
             String keyAlgorithm = privateKey.getAlgorithm();
-            /*
-             * If no signature algorithm was specified, we choose a
-             * default that is compatible with the private key algorithm.
-             */
-            if (sigalg == null) {
-
-                if (keyAlgorithm.equalsIgnoreCase("DSA"))
-                    signatureAlgorithm = "SHA1withDSA";
-                else if (keyAlgorithm.equalsIgnoreCase("RSA"))
-                    signatureAlgorithm = "SHA256withRSA";
-                else if (keyAlgorithm.equalsIgnoreCase("EC"))
-                    signatureAlgorithm = "SHA256withECDSA";
-                else
-                    throw new RuntimeException("private key is not a DSA or "
-                                               + "RSA key");
-            } else {
-                signatureAlgorithm = sigalg;
-            }
 
             // check common invalid key/signature algorithm combinations
             String sigAlgUpperCase = signatureAlgorithm.toUpperCase(Locale.ENGLISH);
@@ -2371,7 +2972,8 @@ class SignatureFile {
 
             // Assemble parameters for the signing mechanism
             ContentSignerParameters params =
-                new JarSignerParameters(args, tsaUri, tsaCert, tSAPolicyID, signature,
+                new JarSignerParameters(args, tsaUri, tsaCert, tSAPolicyID,
+                        tSADigestAlg, signature,
                     signatureAlgorithm, certChain, content, zipFile);
 
             // Generate the signature block
@@ -2398,122 +3000,5 @@ class SignatureFile {
         {
             out.write(block);
         }
-    }
-}
-
-
-/*
- * This object encapsulates the parameters used to perform content signing.
- */
-class JarSignerParameters implements ContentSignerParameters {
-
-    private String[] args;
-    private URI tsa;
-    private X509Certificate tsaCertificate;
-    private byte[] signature;
-    private String signatureAlgorithm;
-    private X509Certificate[] signerCertificateChain;
-    private byte[] content;
-    private ZipFile source;
-    private String tSAPolicyID;
-
-    /**
-     * Create a new object.
-     */
-    JarSignerParameters(String[] args, URI tsa, X509Certificate tsaCertificate,
-        String tSAPolicyID,
-        byte[] signature, String signatureAlgorithm,
-        X509Certificate[] signerCertificateChain, byte[] content,
-        ZipFile source) {
-
-        if (signature == null || signatureAlgorithm == null ||
-            signerCertificateChain == null) {
-            throw new NullPointerException();
-        }
-        this.args = args;
-        this.tsa = tsa;
-        this.tsaCertificate = tsaCertificate;
-        this.tSAPolicyID = tSAPolicyID;
-        this.signature = signature;
-        this.signatureAlgorithm = signatureAlgorithm;
-        this.signerCertificateChain = signerCertificateChain;
-        this.content = content;
-        this.source = source;
-    }
-
-    /**
-     * Retrieves the command-line arguments.
-     *
-     * @return The command-line arguments. May be null.
-     */
-    public String[] getCommandLine() {
-        return args;
-    }
-
-    /**
-     * Retrieves the identifier for a Timestamping Authority (TSA).
-     *
-     * @return The TSA identifier. May be null.
-     */
-    public URI getTimestampingAuthority() {
-        return tsa;
-    }
-
-    /**
-     * Retrieves the certificate for a Timestamping Authority (TSA).
-     *
-     * @return The TSA certificate. May be null.
-     */
-    public X509Certificate getTimestampingAuthorityCertificate() {
-        return tsaCertificate;
-    }
-
-    public String getTSAPolicyID() {
-        return tSAPolicyID;
-    }
-
-    /**
-     * Retrieves the signature.
-     *
-     * @return The non-null signature bytes.
-     */
-    public byte[] getSignature() {
-        return signature;
-    }
-
-    /**
-     * Retrieves the name of the signature algorithm.
-     *
-     * @return The non-null string name of the signature algorithm.
-     */
-    public String getSignatureAlgorithm() {
-        return signatureAlgorithm;
-    }
-
-    /**
-     * Retrieves the signer's X.509 certificate chain.
-     *
-     * @return The non-null array of X.509 public-key certificates.
-     */
-    public X509Certificate[] getSignerCertificateChain() {
-        return signerCertificateChain;
-    }
-
-    /**
-     * Retrieves the content that was signed.
-     *
-     * @return The content bytes. May be null.
-     */
-    public byte[] getContent() {
-        return content;
-    }
-
-    /**
-     * Retrieves the original source ZIP file before it was signed.
-     *
-     * @return The original ZIP file. May be null.
-     */
-    public ZipFile getSource() {
-        return source;
     }
 }

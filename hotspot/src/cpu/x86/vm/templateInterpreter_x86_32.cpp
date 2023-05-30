@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -713,7 +713,7 @@ address InterpreterGenerator::generate_accessor_entry(void) {
                     rdx,
                     Address::times_ptr, ConstantPoolCache::base_offset() + ConstantPoolCacheEntry::flags_offset()));
 
-    Label notByte, notShort, notChar;
+    Label notByte, notBool, notShort, notChar;
     const Address field_address (rax, rcx, Address::times_1);
 
     // Need to differentiate between igetfield, agetfield, bgetfield etc.
@@ -728,6 +728,12 @@ address InterpreterGenerator::generate_accessor_entry(void) {
     __ jmp(xreturn_path);
 
     __ bind(notByte);
+    __ cmpl(rdx, ztos);
+    __ jcc(Assembler::notEqual, notBool);
+    __ load_signed_byte(rax, field_address);
+    __ jmp(xreturn_path);
+
+    __ bind(notBool);
     __ cmpl(rdx, stos);
     __ jcc(Assembler::notEqual, notShort);
     __ load_signed_short(rax, field_address);
@@ -1283,26 +1289,25 @@ address InterpreterGenerator::generate_native_entry(bool synchronized) {
   // change thread state
   __ movl(Address(thread, JavaThread::thread_state_offset()), _thread_in_Java);
 
-  __ reset_last_Java_frame(thread, true, true);
+  __ reset_last_Java_frame(thread, true);
 
   // reset handle block
   __ movptr(t, Address(thread, JavaThread::active_handles_offset()));
   __ movl(Address(t, JNIHandleBlock::top_offset_in_bytes()), NULL_WORD);
 
   // If result was an oop then unbox and save it in the frame
-  { Label L;
-    Label no_oop, store_result;
+  {
+    Label no_oop;
     ExternalAddress handler(AbstractInterpreter::result_handler(T_OBJECT));
     __ cmpptr(Address(rbp, frame::interpreter_frame_result_handler_offset*wordSize),
               handler.addr());
     __ jcc(Assembler::notEqual, no_oop);
     __ cmpptr(Address(rsp, 0), (int32_t)NULL_WORD);
     __ pop(ltos);
-    __ testptr(rax, rax);
-    __ jcc(Assembler::zero, store_result);
-    // unbox
-    __ movptr(rax, Address(rax, 0));
-    __ bind(store_result);
+    // Unbox oop result, e.g. JNIHandles::resolve value.
+    __ resolve_jobject(rax /* value */,
+                       thread /* thread */,
+                       t /* tmp */);
     __ movptr(Address(rbp, (frame::interpreter_frame_oop_temp_offset)*wordSize), rax);
     // keep stack depth as expected by pushing oop which will eventually be discarded
     __ push(ltos);
@@ -1813,7 +1818,7 @@ void TemplateInterpreterGenerator::generate_throw_exception() {
   __ set_last_Java_frame(thread, noreg, rbp, __ pc());
   __ super_call_VM_leaf(CAST_FROM_FN_PTR(address, InterpreterRuntime::popframe_move_outgoing_args), thread, rax, rbx);
   __ get_thread(thread);
-  __ reset_last_Java_frame(thread, true, true);
+  __ reset_last_Java_frame(thread, true);
   // Restore the last_sp and null it out
   __ movptr(rsp, Address(rbp, frame::interpreter_frame_last_sp_offset * wordSize));
   __ movptr(Address(rbp, frame::interpreter_frame_last_sp_offset * wordSize), NULL_WORD);

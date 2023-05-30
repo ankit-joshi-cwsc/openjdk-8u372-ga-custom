@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,6 +29,15 @@
 #include "compiler/oopMap.hpp"
 #include "runtime/frame.hpp"
 #include "runtime/handles.hpp"
+
+// CodeBlob Types
+// Used in the CodeCache to assign CodeBlobs to different CodeHeaps
+struct CodeBlobType {
+  enum {
+    All                 = 0,    // All types (No code cache segmentation)
+    NumTypes            = 1     // Number of CodeBlobTypes
+  };
+};
 
 // CodeBlob - superclass for all entries in the CodeCache.
 //
@@ -71,6 +80,7 @@ class CodeBlob VALUE_OBJ_CLASS_SPEC {
  public:
   // Returns the space needed for CodeBlob
   static unsigned int allocation_size(CodeBuffer* cb, int header_size);
+  static unsigned int align_code_offset(int offset);
 
   // Creation
   // a) simple CodeBlob
@@ -101,6 +111,7 @@ class CodeBlob VALUE_OBJ_CLASS_SPEC {
   virtual bool is_exception_stub() const         { return false; }
   virtual bool is_safepoint_stub() const              { return false; }
   virtual bool is_adapter_blob() const                { return false; }
+  virtual bool is_vtable_blob() const                 { return false; }
   virtual bool is_method_handles_adapter_blob() const { return false; }
 
   virtual bool is_compiled_by_c2() const         { return false; }
@@ -179,6 +190,7 @@ class CodeBlob VALUE_OBJ_CLASS_SPEC {
   void print() const                             { print_on(tty); }
   virtual void print_on(outputStream* st) const;
   virtual void print_value_on(outputStream* st) const;
+  void print_code();
 
   // Deal with Disassembler, VTune, Forte, JvmtiExport, MemoryService.
   static void trace_new_stub(CodeBlob* blob, const char* name1, const char* name2 = "");
@@ -202,7 +214,9 @@ class CodeBlob VALUE_OBJ_CLASS_SPEC {
 class BufferBlob: public CodeBlob {
   friend class VMStructs;
   friend class AdapterBlob;
+  friend class VtableBlob;
   friend class MethodHandlesAdapterBlob;
+  friend class WhiteBox;
 
  private:
   // Creation support
@@ -246,6 +260,18 @@ public:
   virtual bool is_adapter_blob() const { return true; }
 };
 
+//---------------------------------------------------------------------------------------------------
+class VtableBlob: public BufferBlob {
+private:
+  VtableBlob(const char*, int);
+
+public:
+  // Creation
+  static VtableBlob* create(const char* name, int buffer_size);
+
+  // Typing
+  virtual bool is_vtable_blob() const { return true; }
+};
 
 //----------------------------------------------------------------------------------------------------
 // MethodHandlesAdapterBlob: used to hold MethodHandles adapters

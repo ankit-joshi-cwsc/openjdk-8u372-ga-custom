@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2012, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -34,6 +34,8 @@ import javax.crypto.SecretKey;
 
 import sun.nio.ch.DirectBuffer;
 
+import sun.security.util.MessageDigestSpi2;
+
 import sun.security.pkcs11.wrapper.*;
 import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
 
@@ -49,7 +51,8 @@ import static sun.security.pkcs11.wrapper.PKCS11Constants.*;
  * @author  Andreas Sterbenz
  * @since   1.5
  */
-final class P11Digest extends MessageDigestSpi implements Cloneable {
+final class P11Digest extends MessageDigestSpi implements Cloneable,
+    MessageDigestSpi2 {
 
     /* fields initialized, no session acquired */
     private final static int S_BLANK    = 1;
@@ -100,9 +103,11 @@ final class P11Digest extends MessageDigestSpi implements Cloneable {
             digestLength = 20;
             break;
         case (int)CKM_SHA224:
+        case (int)CKM_SHA512_224:
             digestLength = 28;
             break;
         case (int)CKM_SHA256:
+        case (int)CKM_SHA512_256:
             digestLength = 32;
             break;
         case (int)CKM_SHA384:
@@ -140,7 +145,8 @@ final class P11Digest extends MessageDigestSpi implements Cloneable {
         token.ensureValid();
 
         if (session != null) {
-            if (state == S_INIT && token.explicitCancel == true) {
+            if (state == S_INIT && token.explicitCancel == true
+                    && session.hasObjects() == false) {
                 session = token.killSession(session);
             } else {
                 session = token.releaseSession(session);
@@ -233,10 +239,11 @@ final class P11Digest extends MessageDigestSpi implements Cloneable {
     }
 
     // Called by SunJSSE via reflection during the SSL 3.0 handshake if
-    // the master secret is sensitive. We may want to consider making this
-    // method public in a future release.
-    protected void implUpdate(SecretKey key) throws InvalidKeyException {
-
+    // the master secret is sensitive.
+    // Note: Change to protected after this method is moved from
+    // sun.security.util.MessageSpi2 interface to
+    // java.security.MessageDigestSpi class
+    public void engineUpdate(SecretKey key) throws InvalidKeyException {
         // SunJSSE calls this method only if the key does not have a RAW
         // encoding, i.e. if it is sensitive. Therefore, no point in calling
         // SecretKeyFactory to try to convert it. Just verify it ourselves.
@@ -250,6 +257,7 @@ final class P11Digest extends MessageDigestSpi implements Cloneable {
         }
 
         fetchSession();
+        long p11KeyID = p11Key.getKeyID();
         try {
             if (state == S_BUFFERED) {
                 token.p11.C_DigestInit(session.id(), mechanism);
@@ -260,10 +268,12 @@ final class P11Digest extends MessageDigestSpi implements Cloneable {
                 token.p11.C_DigestUpdate(session.id(), 0, buffer, 0, bufOfs);
                 bufOfs = 0;
             }
-            token.p11.C_DigestKey(session.id(), p11Key.keyID);
+            token.p11.C_DigestKey(session.id(), p11KeyID);
         } catch (PKCS11Exception e) {
             engineReset();
             throw new ProviderException("update(SecretKey) failed", e);
+        } finally {
+            p11Key.releaseKeyID();
         }
     }
 

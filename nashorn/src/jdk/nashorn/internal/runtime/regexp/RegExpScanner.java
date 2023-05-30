@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2010, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -80,8 +80,17 @@ final class RegExpScanner extends Scanner {
             this.negLookaheadLevel = negLookaheadLevel;
         }
 
-        boolean isContained(final int group, final int level) {
-            return group == this.negLookaheadGroup && level >= this.negLookaheadLevel;
+        /**
+         * Returns true if this Capture can be referenced from the position specified by the
+         * group and level parameters. This is the case if either the group is not within
+         * a negative lookahead, or the position of the referrer is in the same negative lookahead.
+         *
+         * @param group current negative lookahead group
+         * @param level current negative lokahead level
+         * @return true if this capture group can be referenced from the given position
+         */
+        boolean canBeReferencedFrom(final int group, final int level) {
+            return this.negLookaheadLevel == 0 || (group == this.negLookaheadGroup && level >= this.negLookaheadLevel);
         }
 
     }
@@ -132,13 +141,13 @@ final class RegExpScanner extends Scanner {
             throw new PatternSyntaxException(e.getMessage(), string, scanner.position);
         }
 
-        scanner.processForwardReferences();
-
         // Throw syntax error unless we parsed the entire JavaScript regexp without syntax errors
         if (scanner.position != string.length()) {
             final String p = scanner.getStringBuilder().toString();
             throw new PatternSyntaxException(string, p, p.length() + 1);
         }
+
+        scanner.processForwardReferences();
 
         return scanner;
     }
@@ -671,8 +680,9 @@ final class RegExpScanner extends Scanner {
 
                 } else if (decimalValue <= caps.size()) {
                     //  Captures inside a negative lookahead are undefined when referenced from the outside.
-                    if (!caps.get(decimalValue - 1).isContained(negLookaheadGroup, negLookaheadLevel)) {
-                        // Reference to capture in negative lookahead, omit from output buffer.
+                    final Capture capture = caps.get(decimalValue - 1);
+                    if (!capture.canBeReferencedFrom(negLookaheadGroup, negLookaheadLevel)) {
+                        // Outside reference to capture in negative lookahead, omit from output buffer.
                         sb.setLength(sb.length() - 1);
                     } else {
                         // Append backreference to output buffer.

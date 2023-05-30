@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2013, 2014, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2013, 2017, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -61,7 +61,6 @@ jdk = \
 # can be resolved in some cases by using tools from the compile-jdk.
 #
 needs_jdk = \
-  gc/TestG1ZeroPGCTJcmdThreadPrint.java \
   gc/metaspace/CompressedClassSpaceSizeInJmapHeap.java \
   gc/metaspace/TestMetaspacePerfCounters.java \
   gc/metaspace/TestPerfCountersAndMemoryPools.java \
@@ -96,7 +95,9 @@ needs_jdk = \
   runtime/Thread/TestThreadDumpMonitorContention.java \
   runtime/XCheckJniJsig/XCheckJSig.java \
   serviceability/attach/AttachWithStalePidFile.java \
-  serviceability/sa/jmap-hprof/JMapHProfLargeHeapTest.java
+  serviceability/sa/jmap-hprof/JMapHProfLargeHeapTest.java \
+  serviceability/dcmd/DynLibDcmdTest.java \
+  testlibrary_tests/
 
 
 # JRE adds further tests to compact3
@@ -123,7 +124,6 @@ compact3 = \
  -:needs_jre \
  -:needs_jdk
 
-
 # When called from top level the test suites use the hotspot_ prefix
 hotspot_wbapitest = \
   sanity/
@@ -146,6 +146,11 @@ hotspot_all = \
   :hotspot_gc \
   :hotspot_runtime \
   :hotspot_serviceability
+
+# Right now tier1 runs all hotspot tests
+hotspot_tier1 = \
+  :jdk
+
 # Tests that require compact3 API's
 #
 needs_compact3 = \
@@ -164,6 +169,7 @@ needs_compact3 = \
   gc/TestGCLogRotationViaJcmd.java \
   gc/g1/TestHumongousAllocInitialMark.java \
   gc/g1/TestHumongousShrinkHeap.java \
+  gc/arguments/TestAggressiveHeap.java \
   gc/arguments/TestG1HeapRegionSize.java \
   gc/metaspace/TestMetaspaceMemoryPool.java \
   gc/arguments/TestDynMinHeapFreeRatio.java \
@@ -215,6 +221,7 @@ needs_full_vm_compact1 = \
   runtime/NMT \
   gc/class_unloading/TestCMSClassUnloadingEnabledHWM.java \
   gc/class_unloading/TestG1ClassUnloadingHWM.java \
+  gc/ergonomics/TestDynamicNumberOfGCThreads.java \
   gc/g1/TestRegionAlignment.java \
   gc/g1/TestShrinkToOneRegion.java \
   gc/metaspace/G1AddMetaspaceDependency.java \
@@ -251,7 +258,6 @@ compact1_minimal = \
   serviceability/ \
   compiler/ \
   testlibrary/ \
-  testlibrary_tests/ \
   sanity/ \
   runtime/ \
   gc/ \

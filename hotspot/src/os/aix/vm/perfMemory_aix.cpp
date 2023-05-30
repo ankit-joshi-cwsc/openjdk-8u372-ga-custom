@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2001, 2018, Oracle and/or its affiliates. All rights reserved.
  * Copyright 2012, 2013 SAP AG. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -201,6 +201,7 @@ static pid_t filename_to_pid(const char* filename) {
 // the backing store files. Returns true if the directory is considered
 // a secure location. Returns false if the statbuf is a symbolic link or
 // if an error occurred.
+//
 static bool is_statbuf_secure(struct stat *statp) {
   if (S_ISLNK(statp->st_mode) || !S_ISDIR(statp->st_mode)) {
     // The path represents a link or some non-directory file type,
@@ -209,15 +210,18 @@ static bool is_statbuf_secure(struct stat *statp) {
     return false;
   }
   // We have an existing directory, check if the permissions are safe.
+  //
   if ((statp->st_mode & (S_IWGRP|S_IWOTH)) != 0) {
     // The directory is open for writing and could be subjected
     // to a symlink or a hard link attack. Declare it insecure.
+    //
     return false;
   }
-  // See if the uid of the directory matches the effective uid of the process.
-  //
-  if (statp->st_uid != geteuid()) {
+  // If user is not root then see if the uid of the directory matches the effective uid of the process.
+  uid_t euid = geteuid();
+  if ((euid != 0) && (statp->st_uid != euid)) {
     // The directory was not created by this user, declare it insecure.
+    //
     return false;
   }
   return true;
@@ -228,6 +232,7 @@ static bool is_statbuf_secure(struct stat *statp) {
 // the backing store files. Returns true if the directory exists
 // and is considered a secure location. Returns false if the path
 // is a symbolic link or if an error occurred.
+//
 static bool is_directory_secure(const char* path) {
   struct stat statbuf;
   int result = 0;
@@ -454,13 +459,27 @@ static DIR *open_directory_secure_cwd(const char* dirname, int *saved_cwd_fd) {
     *saved_cwd_fd = result;
   }
 
-  // Set the current directory to dirname by using the fd of the directory.
+  // Set the current directory to dirname by using the fd of the directory and
+  // handle errors, otherwise shared memory files will be created in cwd.
   result = fchdir(fd);
-
-  return dirp;
+  if (result == OS_ERR) {
+    if (PrintMiscellaneous && Verbose) {
+      warning("could not change to directory %s", dirname);
+    }
+    if (*saved_cwd_fd != -1) {
+      ::close(*saved_cwd_fd);
+      *saved_cwd_fd = -1;
+    }
+    // Close the directory.
+    os::closedir(dirp);
+    return NULL;
+  } else {
+    return dirp;
+  }
 }
 
 // Close the directory and restore the current working directory.
+//
 static void close_directory_secure_cwd(DIR* dirp, int saved_cwd_fd) {
 
   int result;
@@ -593,9 +612,8 @@ static char* get_user_name_slow(int vmid, TRAPS) {
   // to determine the user name for the process id.
   //
   struct dirent* dentry;
-  char* tdbuf = NEW_C_HEAP_ARRAY(char, os::readdir_buf_size(tmpdirname), mtInternal);
   errno = 0;
-  while ((dentry = os::readdir(tmpdirp, (struct dirent *)tdbuf)) != NULL) {
+  while ((dentry = os::readdir(tmpdirp)) != NULL) {
 
     // check if the directory entry is a hsperfdata file
     if (strncmp(dentry->d_name, PERFDATA_NAME, strlen(PERFDATA_NAME)) != 0) {
@@ -629,9 +647,8 @@ static char* get_user_name_slow(int vmid, TRAPS) {
     }
 
     struct dirent* udentry;
-    char* udbuf = NEW_C_HEAP_ARRAY(char, os::readdir_buf_size(usrdir_name), mtInternal);
     errno = 0;
-    while ((udentry = os::readdir(subdirp, (struct dirent *)udbuf)) != NULL) {
+    while ((udentry = os::readdir(subdirp)) != NULL) {
 
       if (filename_to_pid(udentry->d_name) == vmid) {
         struct stat statbuf;
@@ -675,11 +692,9 @@ static char* get_user_name_slow(int vmid, TRAPS) {
       }
     }
     os::closedir(subdirp);
-    FREE_C_HEAP_ARRAY(char, udbuf, mtInternal);
     FREE_C_HEAP_ARRAY(char, usrdir_name, mtInternal);
   }
   os::closedir(tmpdirp);
-  FREE_C_HEAP_ARRAY(char, tdbuf, mtInternal);
 
   return(oldest_user);
 }
@@ -687,7 +702,7 @@ static char* get_user_name_slow(int vmid, TRAPS) {
 // return the name of the user that owns the JVM indicated by the given vmid.
 //
 static char* get_user_name(int vmid, TRAPS) {
-  return get_user_name_slow(vmid, CHECK_NULL);
+  return get_user_name_slow(vmid, THREAD);
 }
 
 // return the file name of the backing store file for the named
@@ -755,10 +770,8 @@ static void cleanup_sharedmem_resources(const char* dirname) {
   // loop under these conditions is dependent upon the implementation of
   // opendir/readdir.
   struct dirent* entry;
-  char* dbuf = NEW_C_HEAP_ARRAY(char, os::readdir_buf_size(dirname), mtInternal);
-
   errno = 0;
-  while ((entry = os::readdir(dirp, (struct dirent *)dbuf)) != NULL) {
+  while ((entry = os::readdir(dirp)) != NULL) {
 
     pid_t pid = filename_to_pid(entry->d_name);
 
@@ -797,7 +810,6 @@ static void cleanup_sharedmem_resources(const char* dirname) {
   // Close the directory and reset the current working directory.
   close_directory_secure_cwd(dirp, saved_cwd_fd);
 
-  FREE_C_HEAP_ARRAY(char, dbuf, mtInternal);
 }
 
 // Make the user specific temporary directory. Returns true if

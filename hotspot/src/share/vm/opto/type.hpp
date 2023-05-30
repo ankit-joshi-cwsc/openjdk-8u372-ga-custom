@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -130,17 +130,17 @@ public:
 
 private:
   typedef struct {
-    const TYPES                dual_type;
-    const BasicType            basic_type;
-    const char*                msg;
-    const bool                 isa_oop;
-    const int                  ideal_reg;
-    const relocInfo::relocType reloc;
+    TYPES                dual_type;
+    BasicType            basic_type;
+    const char*          msg;
+    bool                 isa_oop;
+    uint                 ideal_reg;
+    relocInfo::relocType reloc;
   } TypeInfo;
 
   // Dictionary of types shared among compilations.
   static Dict* _shared_type_dict;
-  static TypeInfo _type_info[];
+  static const TypeInfo _type_info[];
 
   static int uhash( const Type *const t );
   // Structural equality check.  Assumes that cmp() has already compared
@@ -165,6 +165,7 @@ private:
 #endif
 
   const Type *meet_helper(const Type *t, bool include_speculative) const;
+  void check_symmetrical(const Type *t, const Type *mt) const;
 
 protected:
   // Each class of type is also identified by its base.
@@ -209,11 +210,11 @@ public:
   static int cmp( const Type *const t1, const Type *const t2 );
   // Test for higher or equal in lattice
   // Variant that drops the speculative part of the types
-  int higher_equal(const Type *t) const {
+  bool higher_equal(const Type *t) const {
     return !cmp(meet(t),t->remove_speculative());
   }
   // Variant that keeps the speculative part of the types
-  int higher_equal_speculative(const Type *t) const {
+  bool higher_equal_speculative(const Type *t) const {
     return !cmp(meet_speculative(t),t);
   }
 
@@ -358,6 +359,8 @@ public:
   }
   virtual void dump2( Dict &d, uint depth, outputStream *st ) const;
   static  void dump_stats();
+
+  static const char* str(const Type* t);
 #endif
   void typerr(const Type *t) const; // Mixing types error
 
@@ -366,6 +369,11 @@ public:
     assert((uint)type <= T_CONFLICT && _const_basic_type[type] != NULL, "bad type");
     return _const_basic_type[type];
   }
+
+  // For two instance arrays of same dimension, return the base element types.
+  // Otherwise or if the arrays have different dimensions, return NULL.
+  static void get_arrays_base_elements(const Type *a1, const Type *a2,
+                                       const TypeInstPtr **e1, const TypeInstPtr **e2);
 
   // Mapping to the array element's basic type.
   BasicType array_element_basic_type() const;
@@ -402,7 +410,7 @@ public:
 
   // Mapping from compiler type to VM BasicType
   BasicType basic_type() const       { return _type_info[_base].basic_type; }
-  int ideal_reg() const              { return _type_info[_base].ideal_reg; }
+  uint ideal_reg() const             { return _type_info[_base].ideal_reg; }
   const char* msg() const            { return _type_info[_base].msg; }
   bool isa_oop_ptr() const           { return _type_info[_base].isa_oop; }
   relocInfo::relocType reloc() const { return _type_info[_base].reloc; }
@@ -426,7 +434,6 @@ public:
 
 private:
   // support arrays
-  static const BasicType _basic_type[];
   static const Type*        _zero_type[T_CONFLICT+1];
   static const Type* _const_basic_type[T_CONFLICT+1];
 };
@@ -877,7 +884,7 @@ protected:
 
   // If not InstanceTop or InstanceBot, indicates that this is
   // a particular instance of this type which is distinct.
-  // This is the the node index of the allocation node creating this instance.
+  // This is the node index of the allocation node creating this instance.
   int           _instance_id;
 
   // Extra type information profiling gave us. We propagate it the
@@ -1146,6 +1153,8 @@ public:
 
   const TypeAryPtr* cast_to_stable(bool stable, int stable_dimension = 1) const;
   int stable_dimension() const;
+
+  static jint max_array_length(BasicType etype) ;
 
   // Convenience common pre-built types.
   static const TypeAryPtr *RANGE;

@@ -79,6 +79,7 @@ public class TrueTypeFont extends FileFont {
     public static final int GPOSTag = 0x47504F53; // 'GPOS'
     public static final int GSUBTag = 0x47535542; // 'GSUB'
     public static final int mortTag = 0x6D6F7274; // 'mort'
+    public static final int morxTag = 0x6D6F7278; // 'morx'
 
     /* -- Tags for non-standard tables */
     public static final int fdscTag = 0x66647363; // 'fdsc' - gxFont descriptor
@@ -171,6 +172,22 @@ public class TrueTypeFont extends FileFont {
     private String localeFamilyName;
     private String localeFullName;
 
+    /*
+     * Used on Windows to validate the font selected by GDI for (sub-pixel
+     * antialiased) rendering. For 'standalone' fonts it's equal to the font
+     * file size, for collection (TTC, OTC) members it's the number of bytes in
+     * the collection file from the start of this font's offset table till the
+     * end of the file.
+     */
+    int fontDataSize;
+
+    public TrueTypeFont(String platname, Object nativeNames, int fIndex,
+                 boolean javaRasterizer)
+        throws FontFormatException
+    {
+        this(platname, nativeNames, fIndex, javaRasterizer, true);
+    }
+
     /**
      * - does basic verification of the file
      * - reads the header table for this font (within a collection)
@@ -181,14 +198,17 @@ public class TrueTypeFont extends FileFont {
      * or fails verification,  or there's no usable cmap
      */
     public TrueTypeFont(String platname, Object nativeNames, int fIndex,
-                 boolean javaRasterizer)
+                 boolean javaRasterizer, boolean useFilePool)
         throws FontFormatException {
         super(platname, nativeNames);
         useJavaRasterizer = javaRasterizer;
         fontRank = Font2D.TTF_RANK;
         try {
-            verify();
+            verify(useFilePool);
             init(fIndex);
+            if (!useFilePool) {
+               close();
+            }
         } catch (Throwable t) {
             close();
             if (t instanceof FontFormatException) {
@@ -275,6 +295,10 @@ public class TrueTypeFont extends FileFont {
     }
 
 
+    private synchronized FileChannel open() throws FontFormatException {
+        return open(true);
+     }
+
     /* This is intended to be called, and the returned value used,
      * from within a block synchronized on this font object.
      * ie the channel returned may be nulled out at any time by "close()"
@@ -282,7 +306,8 @@ public class TrueTypeFont extends FileFont {
      * Deadlock warning: FontManager.addToPool(..) acquires a global lock,
      * which means nested locks may be in effect.
      */
-    private synchronized FileChannel open() throws FontFormatException {
+    private synchronized FileChannel open(boolean usePool)
+                                     throws FontFormatException {
         if (disposerRecord.channel == null) {
             if (FontUtilities.isLogging()) {
                 FontUtilities.getLogger().info("open TTF: " + platName);
@@ -301,9 +326,11 @@ public class TrueTypeFont extends FileFont {
                 });
                 disposerRecord.channel = raf.getChannel();
                 fileSize = (int)disposerRecord.channel.size();
-                FontManager fm = FontManagerFactory.getInstance();
-                if (fm instanceof SunFontManager) {
-                    ((SunFontManager) fm).addToPool(this);
+                if (usePool) {
+                    FontManager fm = FontManagerFactory.getInstance();
+                    if (fm instanceof SunFontManager) {
+                        ((SunFontManager) fm).addToPool(this);
+                    }
                 }
             } catch (NullPointerException e) {
                 close();
@@ -487,8 +514,8 @@ public class TrueTypeFont extends FileFont {
         }
     }
 
-    private void verify() throws FontFormatException {
-        open();
+    private void verify(boolean usePool) throws FontFormatException {
+        open(usePool);
     }
 
     /* sizes, in bytes, of TT/TTC header records */
@@ -511,11 +538,13 @@ public class TrueTypeFont extends FileFont {
                 fontIndex = fIndex;
                 buffer = readBlock(TTCHEADERSIZE+4*fIndex, 4);
                 headerOffset = buffer.getInt();
+                fontDataSize = Math.max(0, fileSize - headerOffset);
                 break;
 
             case v1ttTag:
             case trueTag:
             case ottoTag:
+                fontDataSize = fileSize;
                 break;
 
             default:
@@ -541,9 +570,11 @@ public class TrueTypeFont extends FileFont {
                 tableDirectory[i] = table = new DirectoryEntry();
                 table.tag   =  ibuffer.get();
                 /* checksum */ ibuffer.get();
-                table.offset = ibuffer.get();
-                table.length = ibuffer.get();
-                if (table.offset + table.length > fileSize) {
+                table.offset = ibuffer.get() & 0x7FFFFFFF;
+                table.length = ibuffer.get() & 0x7FFFFFFF;
+                if ((table.offset + table.length < table.length) ||
+                    (table.offset + table.length > fileSize))
+                {
                     throw new FontFormatException("bad table, tag="+table.tag);
                 }
             }
@@ -557,6 +588,10 @@ public class TrueTypeFont extends FileFont {
             if (getDirectoryEntry(hmtxTag) != null
                     && getDirectoryEntry(hheaTag) == null) {
                 throw new FontFormatException("missing hhea table");
+            }
+            ByteBuffer maxpTable = getTableBuffer(maxpTag);
+            if (maxpTable.getChar(4) == 0) {
+                throw new FontFormatException("zero glyphs");
             }
             initNames();
         } catch (Exception e) {
@@ -834,8 +869,11 @@ public class TrueTypeFont extends FileFont {
                 break;
             }
         }
+
         if (entry == null || entry.length == 0 ||
-            entry.offset+entry.length > fileSize) {
+            (entry.offset + entry.length < entry.length) ||
+            (entry.offset + entry.length > fileSize))
+        {
             return null;
         }
 
@@ -870,8 +908,8 @@ public class TrueTypeFont extends FileFont {
         }
     }
 
-    /* NB: is it better to move declaration to Font2D? */
-    long getLayoutTableCache() {
+    @Override
+    protected long getLayoutTableCache() {
         try {
           return getScaler().getLayoutTableCache();
         } catch(FontScalerException fe) {
@@ -880,7 +918,7 @@ public class TrueTypeFont extends FileFont {
     }
 
     @Override
-    byte[] getTableBytes(int tag) {
+    protected byte[] getTableBytes(int tag) {
         ByteBuffer buffer = getTableBuffer(tag);
         if (buffer == null) {
             return null;
@@ -933,6 +971,9 @@ public class TrueTypeFont extends FileFont {
             return false;
         }
         ByteBuffer eblcTable = getTableBuffer(EBLCTag);
+        if (eblcTable == null) {
+            return false;
+        }
         int numSizes = eblcTable.getInt(4);
         /* The bitmapSizeTable's start at offset of 8.
          * Each bitmapSizeTable entry is 48 bytes.
@@ -1037,24 +1078,36 @@ public class TrueTypeFont extends FileFont {
 
     private void setStrikethroughMetrics(ByteBuffer os_2Table, int upem) {
         if (os_2Table == null || os_2Table.capacity() < 30 || upem < 0) {
-            stSize = .05f;
-            stPos = -.4f;
+            stSize = 0.05f;
+            stPos = -0.4f;
             return;
         }
         ShortBuffer sb = os_2Table.asShortBuffer();
         stSize = sb.get(13) / (float)upem;
         stPos = -sb.get(14) / (float)upem;
+        if (stSize < 0f) {
+            stSize = 0.05f;
+        }
+        if (Math.abs(stPos) > 2.0f) {
+            stPos = -0.4f;
+        }
     }
 
     private void setUnderlineMetrics(ByteBuffer postTable, int upem) {
         if (postTable == null || postTable.capacity() < 12 || upem < 0) {
-            ulSize = .05f;
-            ulPos = .1f;
+            ulSize = 0.05f;
+            ulPos = 0.1f;
             return;
         }
         ShortBuffer sb = postTable.asShortBuffer();
         ulSize = sb.get(5) / (float)upem;
         ulPos = -sb.get(4) / (float)upem;
+        if (ulSize < 0f) {
+            ulSize = 0.05f;
+        }
+        if (Math.abs(ulPos) > 2.0f) {
+            ulPos = 0.1f;
+        }
     }
 
     @Override

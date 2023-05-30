@@ -35,6 +35,9 @@
 #ifdef TARGET_ARCH_x86
 # include "depChecker_x86.hpp"
 #endif
+#ifdef TARGET_ARCH_aarch64
+# include "depChecker_aarch64.hpp"
+#endif
 #ifdef TARGET_ARCH_sparc
 # include "depChecker_sparc.hpp"
 #endif
@@ -60,7 +63,7 @@ bool        Disassembler::_tried_to_load_library = false;
 Disassembler::decode_func_virtual Disassembler::_decode_instructions_virtual = NULL;
 Disassembler::decode_func Disassembler::_decode_instructions = NULL;
 
-static const char hsdis_library_name[] = "hsdis-"HOTSPOT_LIB_ARCH;
+static const char hsdis_library_name[] = "hsdis-" HOTSPOT_LIB_ARCH;
 static const char decode_instructions_virtual_name[] = "decode_instructions_virtual";
 static const char decode_instructions_name[] = "decode_instructions";
 static bool use_new_version = true;
@@ -86,7 +89,7 @@ bool Disassembler::load_library() {
   {
     // Match "jvm[^/]*" in jvm_path.
     const char* base = buf;
-    const char* p = strrchr(buf, '/');
+    const char* p = strrchr(buf, *os::file_separator());
     if (p != NULL) lib_offset = p - base + 1;
     p = strstr(p ? p : base, "jvm");
     if (p != NULL)  jvm_offset = p - base;
@@ -111,7 +114,7 @@ bool Disassembler::load_library() {
     if (_library == NULL) {
       // 3. <home>/jre/lib/<arch>/hsdis-<arch>.so
       buf[lib_offset - 1] = '\0';
-      const char* p = strrchr(buf, '/');
+      const char* p = strrchr(buf, *os::file_separator());
       if (p != NULL) {
         lib_offset = p - buf + 1;
         strcpy(&buf[lib_offset], hsdis_library_name);
@@ -244,18 +247,23 @@ class decode_env {
   const char* options() { return _option_buf; }
 };
 
-decode_env::decode_env(CodeBlob* code, outputStream* output, CodeStrings c) {
-  memset(this, 0, sizeof(*this)); // Beware, this zeroes bits of fields.
-  _output = output ? output : tty;
-  _code = code;
-  if (code != NULL && code->is_nmethod())
-    _nm = (nmethod*) code;
-  _strings.copy(c);
-
+decode_env::decode_env(CodeBlob* code, outputStream* output, CodeStrings c) :
+  _nm((code != NULL && code->is_nmethod()) ? (nmethod*)code : NULL),
+  _code(code),
+  _strings(),
+  _output(output ? output : tty),
+  _start(NULL),
+  _end(NULL),
+  _print_raw(0),
   // by default, output pc but not bytes:
-  _print_pc       = true;
-  _print_bytes    = false;
-  _bytes_per_line = Disassembler::pd_instruction_alignment();
+  _print_pc(true),
+  _print_bytes(false),
+  _cur_insn(NULL),
+  _total_ticks(0),
+  _bytes_per_line(Disassembler::pd_instruction_alignment())
+{
+  memset(_option_buf, 0, sizeof(_option_buf));
+  _strings.copy(c);
 
   // parse the global option string:
   collect_options(Disassembler::pd_cpu_opts());
@@ -295,6 +303,7 @@ address decode_env::handle_event(const char* event, address arg) {
         strlen((const char*)arg) > sizeof(buffer) - 1) {
       // Only print this when the mach changes
       strncpy(buffer, (const char*)arg, sizeof(buffer) - 1);
+      buffer[sizeof(buffer) - 1] = '\0';
       output()->print_cr("[Disassembling for mach='%s']", arg);
     }
   } else if (match(event, "format bytes-per-line")) {
@@ -495,6 +504,7 @@ address decode_env::decode_instructions(address start, address end) {
 
 
 void Disassembler::decode(CodeBlob* cb, outputStream* st) {
+  ttyLocker ttyl;
   if (!load_library())  return;
   decode_env env(cb, st);
   env.output()->print_cr("Decoding CodeBlob " PTR_FORMAT, cb);
@@ -502,12 +512,14 @@ void Disassembler::decode(CodeBlob* cb, outputStream* st) {
 }
 
 void Disassembler::decode(address start, address end, outputStream* st, CodeStrings c) {
+  ttyLocker ttyl;
   if (!load_library())  return;
   decode_env env(CodeCache::find_blob_unsafe(start), st, c);
   env.decode_instructions(start, end);
 }
 
 void Disassembler::decode(nmethod* nm, outputStream* st) {
+  ttyLocker ttyl;
   if (!load_library())  return;
   decode_env env(nm, st);
   env.output()->print_cr("Decoding compiled method " PTR_FORMAT ":", nm);

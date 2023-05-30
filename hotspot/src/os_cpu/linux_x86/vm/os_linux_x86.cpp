@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -222,7 +222,7 @@ JVM_handle_linux_signal(int sig,
 
   // Must do this before SignalHandlerMark, if crash protection installed we will longjmp away
   // (no destructors can be run)
-  os::WatcherThreadCrashProtection::check_crash_protection(sig, t);
+  os::ThreadCrashProtection::check_crash_protection(sig, t);
 
   SignalHandlerMark shm(t);
 
@@ -277,7 +277,7 @@ JVM_handle_linux_signal(int sig,
   if (info != NULL && uc != NULL && thread != NULL) {
     pc = (address) os::Linux::ucontext_get_pc(uc);
 
-    if (StubRoutines::is_safefetch_fault(pc)) {
+    if ((sig == SIGSEGV || sig == SIGBUS) && StubRoutines::is_safefetch_fault(pc)) {
       uc->uc_mcontext.gregs[REG_PC] = intptr_t(StubRoutines::continuation_for_safefetch_fault(pc));
       return 1;
     }
@@ -541,6 +541,7 @@ JVM_handle_linux_signal(int sig,
   err.report_and_die();
 
   ShouldNotReachHere();
+  return true; // Mute compiler
 }
 
 void os::Linux::init_thread_fpu_state(void) {
@@ -712,8 +713,8 @@ size_t os::Linux::default_guard_size(os::ThreadType thr_type) {
 //    pthread_attr_getstack()
 
 static void current_stack_region(address * bottom, size_t * size) {
-  if (os::Linux::is_initial_thread()) {
-     // initial thread needs special handling because pthread_getattr_np()
+  if (os::is_primordial_thread()) {
+     // primordial thread needs special handling because pthread_getattr_np()
      // may return bogus value.
      *bottom = os::Linux::initial_thread_stack_bottom();
      *size   = os::Linux::initial_thread_stack_size();
@@ -892,6 +893,27 @@ void os::verify_stack_alignment() {
 void os::workaround_expand_exec_shield_cs_limit() {
 #if defined(IA32)
   size_t page_size = os::vm_page_size();
+
+  /*
+   * JDK-8197429
+   *
+   * Expand the stack mapping to the end of the initial stack before
+   * attempting to install the codebuf.  This is needed because newer
+   * Linux kernels impose a distance of a megabyte between stack
+   * memory and other memory regions.  If we try to install the
+   * codebuf before expanding the stack the installation will appear
+   * to succeed but we'll get a segfault later if we expand the stack
+   * in Java code.
+   *
+   */
+  if (os::is_primordial_thread()) {
+    address limit = Linux::initial_thread_stack_bottom();
+    if (! DisablePrimordialThreadGuardPages) {
+      limit += (StackYellowPages + StackRedPages) * page_size;
+    }
+    os::Linux::expand_stack_to(limit);
+  }
+
   /*
    * Take the highest VA the OS will give us and exec
    *
@@ -910,6 +932,16 @@ void os::workaround_expand_exec_shield_cs_limit() {
   char* hint = (char*) (Linux::initial_thread_stack_bottom() -
                         ((StackYellowPages + StackRedPages + 1) * page_size));
   char* codebuf = os::attempt_reserve_memory_at(page_size, hint);
+
+  if (codebuf == NULL) {
+    // JDK-8197429: There may be a stack gap of one megabyte between
+    // the limit of the stack and the nearest memory region: this is a
+    // Linux kernel workaround for CVE-2017-1000364.  If we failed to
+    // map our codebuf, try again at an address one megabyte lower.
+    hint -= 1 * M;
+    codebuf = os::attempt_reserve_memory_at(page_size, hint);
+  }
+
   if ( (codebuf == NULL) || (!os::commit_memory(codebuf, page_size, true)) ) {
     return; // No matter, we tried, best effort.
   }

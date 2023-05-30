@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -104,6 +104,13 @@ JNU_ThrowInstantiationException(JNIEnv *env, const char *msg);
 JNIEXPORT void JNICALL
 JNU_ThrowByNameWithLastError(JNIEnv *env, const char *name,
                              const char *defaultMessage);
+
+/* Throw an exception by name, using a given message and the string
+ * returned by getLastErrorString to construct the detail string.
+ */
+JNIEXPORT void JNICALL
+JNU_ThrowByNameWithMessageAndLastError
+  (JNIEnv *env, const char *name, const char *message);
 
 /* Throw an IOException, using the last-error string for the detail
  * string.  If the last-error string is NULL, use the given default
@@ -290,6 +297,22 @@ JNU_NotifyAll(JNIEnv *env, jobject object);
         }                                       \
     } while (0)                                 \
 
+#define CHECK_NULL_THROW_NPE(env, x, msg)         \
+    do {                                        \
+        if ((x) == NULL) {                      \
+           JNU_ThrowNullPointerException((env), (msg));\
+           return;                              \
+        }                                       \
+    } while(0)                                  \
+
+#define CHECK_NULL_THROW_NPE_RETURN(env, x, msg, z)\
+    do {                                        \
+        if ((x) == NULL) {                      \
+           JNU_ThrowNullPointerException((env), (msg));\
+           return (z);                          \
+        }                                       \
+    } while(0)                                  \
+
 #define CHECK_NULL_RETURN(x, y)                 \
     do {                                        \
         if ((x) == NULL) {                      \
@@ -391,6 +414,7 @@ void* getProcessHandle();
 void buildJniFunctionName(const char *sym, const char *cname,
                           char *jniEntryName);
 
+extern int getErrorString(int err, char *buf, size_t len);
 #ifdef __cplusplus
 } /* extern "C" */
 #endif /* __cplusplus */

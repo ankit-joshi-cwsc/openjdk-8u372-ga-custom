@@ -206,6 +206,7 @@ JNIEXPORT void JNICALL
 Java_java_lang_UNIXProcess_init(JNIEnv *env, jclass clazz)
 {
     parentPathv = effectivePathv(env);
+    CHECK_NULL(parentPathv);
     setSIGCHLDHandler(env);
 }
 
@@ -292,12 +293,13 @@ throwIOException(JNIEnv *env, int errnum, const char *defaultDetail)
     static const char * const format = "error=%d, %s";
     const char *detail = defaultDetail;
     char *errmsg;
+    char tmpbuf[1024];
     jstring s;
 
     if (errnum != 0) {
-        const char *s = strerror(errnum);
-        if (strcmp(s, "Unknown error") != 0)
-            detail = s;
+        int ret = getErrorString(errnum, tmpbuf, sizeof(tmpbuf));
+        if (ret != EINVAL)
+            detail = tmpbuf;
     }
     /* ASCII Decimal representation uses 2.4 times as many bits as binary. */
     errmsg = NEW(char, strlen(format) + strlen(detail) + 3 * sizeof(errnum));

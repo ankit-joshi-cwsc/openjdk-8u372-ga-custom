@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -28,6 +28,7 @@
 #include "code/debugInfo.hpp"
 #include "code/debugInfoRec.hpp"
 #include "compiler/compileBroker.hpp"
+#include "compiler/disassembler.hpp"
 #include "compiler/oopMap.hpp"
 #include "memory/allocation.inline.hpp"
 #include "opto/callnode.hpp"
@@ -1502,9 +1503,25 @@ void Compile::fill_buffer(CodeBuffer* cb, uint* blk_starts) {
       n->emit(*cb, _regalloc);
       current_offset  = cb->insts_size();
 
+      // Above we only verified that there is enough space in the instruction section.
+      // However, the instruction may emit stubs that cause code buffer expansion.
+      // Bail out here if expansion failed due to a lack of code cache space.
+      if (failing()) {
+        return;
+      }
+
 #ifdef ASSERT
-      if (n->size(_regalloc) < (current_offset-instr_offset)) {
+      uint n_size = n->size(_regalloc);
+      if (n_size < (current_offset-instr_offset)) {
+        MachNode* mach = n->as_Mach();
         n->dump();
+        mach->dump_format(_regalloc, tty);
+        tty->print_cr(" n_size (%d), current_offset (%d), instr_offset (%d)", n_size, current_offset, instr_offset);
+        Disassembler::decode(cb->insts_begin() + instr_offset, cb->insts_begin() + current_offset + 1, tty);
+        tty->print_cr(" ------------------- ");
+        BufferBlob* blob = this->scratch_buffer_blob();
+        address blob_begin = blob->content_begin();
+        Disassembler::decode(blob_begin, blob_begin + n_size + 1, tty);
         assert(false, "wrong size of mach node");
       }
 #endif
@@ -1630,11 +1647,14 @@ void Compile::fill_buffer(CodeBuffer* cb, uint* blk_starts) {
   if (_method) {
     // Emit the exception handler code.
     _code_offsets.set_value(CodeOffsets::Exceptions, HandlerImpl::emit_exception_handler(*cb));
+    if (failing()) {
+      return; // CodeBuffer::expand failed
+    }
     // Emit the deopt handler code.
     _code_offsets.set_value(CodeOffsets::Deopt, HandlerImpl::emit_deopt_handler(*cb));
 
     // Emit the MethodHandle deopt handler code (if required).
-    if (has_method_handle_invokes()) {
+    if (has_method_handle_invokes() && !failing()) {
       // We can use the same code as for the normal deopt handler, we
       // just need a different entry point address.
       _code_offsets.set_value(CodeOffsets::DeoptMH, HandlerImpl::emit_deopt_handler(*cb));
@@ -1662,6 +1682,8 @@ void Compile::fill_buffer(CodeBuffer* cb, uint* blk_starts) {
       }
       if (method() != NULL) {
         method()->print_metadata();
+      } else if (stub_name() != NULL) {
+        tty->print_cr("Generating RuntimeStub - %s", stub_name());
       }
       dump_asm(node_offsets, node_offset_limit);
       if (xtty != NULL) {
@@ -2085,6 +2107,7 @@ void Scheduling::AddNodeToAvailableList(Node *n) {
     if( last->is_MachIf() && last->in(1) == n &&
         ( op == Op_CmpI ||
           op == Op_CmpU ||
+          op == Op_CmpUL ||
           op == Op_CmpP ||
           op == Op_CmpF ||
           op == Op_CmpD ||
@@ -2676,7 +2699,7 @@ void Scheduling::anti_do_def( Block *b, Node *def, OptoReg::Name def_reg, int is
   }
 
   Node *kill = def;             // Rename 'def' to more descriptive 'kill'
-  debug_only( def = (Node*)0xdeadbeef; )
+  debug_only( def = (Node*)((intptr_t)0xdeadbeef); )
 
   // After some number of kills there _may_ be a later def
   Node *later_def = NULL;

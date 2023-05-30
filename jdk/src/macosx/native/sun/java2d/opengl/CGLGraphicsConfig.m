@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2015, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -63,7 +63,7 @@ OGLGC_DestroyOGLGraphicsConfig(jlong pConfigInfo)
 
         CGLCtxInfo *ctxinfo = (CGLCtxInfo *)oglc->ctxInfo;
         if (ctxinfo != NULL) {
-            NSAutoreleasePool * pool = [[NSAutoreleasePool alloc] init];        
+            NSAutoreleasePool * pool = [[NSAutoreleasePool alloc] init];
             [NSOpenGLContext clearCurrentContext];
             [ctxinfo->context clearDrawable];
             [ctxinfo->context release];
@@ -220,7 +220,6 @@ Java_sun_java2d_opengl_CGLGraphicsConfig_getCGLConfigInfo
     AWT_ASSERT_APPKIT_THREAD;
 
     jint displayID = (jint)[(NSNumber *)[argValue objectAtIndex: 0] intValue];
-    jint pixfmt = (jint)[(NSNumber *)[argValue objectAtIndex: 1] intValue];
     jint swapInterval = (jint)[(NSNumber *)[argValue objectAtIndex: 2] intValue];
     JNIEnv *env = [ThreadUtilities getJNIEnvUncached];
     [argValue removeAllObjects];
@@ -229,13 +228,10 @@ Java_sun_java2d_opengl_CGLGraphicsConfig_getCGLConfigInfo
 
     NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
 
-    CGOpenGLDisplayMask glMask = (CGOpenGLDisplayMask)pixfmt;
     if (sharedContext == NULL) {
-        if (glMask == 0) {
-            glMask = CGDisplayIDToOpenGLDisplayMask(displayID);
-        }
 
         NSOpenGLPixelFormatAttribute attrs[] = {
+            NSOpenGLPFAAllowOfflineRenderers,
             NSOpenGLPFAClosestPolicy,
             NSOpenGLPFAWindow,
             NSOpenGLPFAPixelBuffer,
@@ -243,16 +239,17 @@ Java_sun_java2d_opengl_CGLGraphicsConfig_getCGLConfigInfo
             NSOpenGLPFAColorSize, 32,
             NSOpenGLPFAAlphaSize, 8,
             NSOpenGLPFADepthSize, 16,
-            NSOpenGLPFAScreenMask, glMask,
             0
         };
 
         sharedPixelFormat =
             [[NSOpenGLPixelFormat alloc] initWithAttributes:attrs];
         if (sharedPixelFormat == nil) {
-            J2dRlsTraceLn(J2D_TRACE_ERROR, "CGLGraphicsConfig_getCGLConfigInfo: shared NSOpenGLPixelFormat is NULL");
-            [argValue addObject: [NSNumber numberWithLong: 0L]];
-            return;
+            J2dRlsTraceLn(J2D_TRACE_ERROR, 
+                          "CGLGraphicsConfig_getCGLConfigInfo: shared NSOpenGLPixelFormat is NULL");
+                
+           [argValue addObject: [NSNumber numberWithLong: 0L]];
+           return;
         }
 
         sharedContext =
@@ -342,18 +339,10 @@ Java_sun_java2d_opengl_CGLGraphicsConfig_getCGLConfigInfo
     if (value != 0) {
         caps |= CAPS_DOUBLEBUFFERED;
     }
-    [sharedPixelFormat
-        getValues: &value
-        forAttribute: NSOpenGLPFAAlphaSize
-        forVirtualScreen: contextVirtualScreen];
-    if (value != 0) {
-        caps |= CAPS_STORED_ALPHA;
-    }
 
-    J2dRlsTraceLn2(J2D_TRACE_INFO,
-                   "CGLGraphicsConfig_getCGLConfigInfo: db=%d alpha=%d",
-                   (caps & CAPS_DOUBLEBUFFERED) != 0,
-                   (caps & CAPS_STORED_ALPHA) != 0);
+    J2dRlsTraceLn1(J2D_TRACE_INFO,
+                   "CGLGraphicsConfig_getCGLConfigInfo: db=%d",
+                   (caps & CAPS_DOUBLEBUFFERED) != 0);
 
     // remove before shipping (?)
 #if 1

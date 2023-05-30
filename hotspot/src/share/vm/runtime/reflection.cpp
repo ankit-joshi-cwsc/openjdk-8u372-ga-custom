@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -506,7 +506,7 @@ bool Reflection::can_relax_access_check_for(
       (accessor_ik->major_version() < Verifier::STRICTER_ACCESS_CTRL_CHECK_VERSION &&
        accessee_ik->major_version() < Verifier::STRICTER_ACCESS_CTRL_CHECK_VERSION)) {
     return classloader_only &&
-      Verifier::relax_verify_for(accessor_ik->class_loader()) &&
+      Verifier::relax_access_for(accessor_ik->class_loader()) &&
       accessor_ik->protection_domain() == accessee_ik->protection_domain() &&
       accessor_ik->class_loader() == accessee_ik->class_loader();
   } else {
@@ -682,7 +682,7 @@ objArrayHandle Reflection::get_parameter_types(methodHandle method, int paramete
 }
 
 objArrayHandle Reflection::get_exception_types(methodHandle method, TRAPS) {
-  return method->resolved_checked_exceptions(CHECK_(objArrayHandle()));
+  return method->resolved_checked_exceptions(THREAD);
 }
 
 
@@ -1093,7 +1093,7 @@ oop Reflection::invoke(instanceKlassHandle klass, methodHandle reflected_method,
   } else {
     if (rtype == T_BOOLEAN || rtype == T_BYTE || rtype == T_CHAR || rtype == T_SHORT)
       narrow((jvalue*) result.get_value_addr(), rtype, CHECK_NULL);
-    return box((jvalue*) result.get_value_addr(), rtype, CHECK_NULL);
+    return box((jvalue*) result.get_value_addr(), rtype, THREAD);
   }
 }
 
@@ -1101,7 +1101,7 @@ oop Reflection::invoke(instanceKlassHandle klass, methodHandle reflected_method,
 void Reflection::narrow(jvalue* value, BasicType narrow_type, TRAPS) {
   switch (narrow_type) {
     case T_BOOLEAN:
-     value->z = (jboolean) value->i;
+     value->z = (jboolean) (value->i & 1);
      return;
     case T_BYTE:
      value->b = (jbyte) value->i;

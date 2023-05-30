@@ -221,7 +221,7 @@ public class AccessorProperty extends Property {
 
         assert setterType == null || setterType == getterType;
 
-        if (getterType == int.class || getterType == long.class) {
+        if (getterType == int.class) {
             primitiveGetter = MH.asType(getter, Lookup.GET_PRIMITIVE_TYPE);
             primitiveSetter = setter == null ? null : MH.asType(setter, Lookup.SET_PRIMITIVE_TYPE);
         } else if (getterType == double.class) {
@@ -349,8 +349,6 @@ public class AccessorProperty extends Property {
         setType(hasDualFields() ? JSType.unboxedFieldType(initialValue) : Object.class);
         if (initialValue instanceof Integer) {
             invokeSetter(owner, ((Integer)initialValue).intValue());
-        } else if (initialValue instanceof Long) {
-            invokeSetter(owner, ((Long)initialValue).longValue());
         } else if (initialValue instanceof Double) {
             invokeSetter(owner, ((Double)initialValue).doubleValue());
         } else {
@@ -400,17 +398,6 @@ public class AccessorProperty extends Property {
         }
      }
 
-    @Override
-    public long getLongValue(final ScriptObject self, final ScriptObject owner) {
-        try {
-            return (long)getGetter(long.class).invokeExact((Object)self);
-        } catch (final Error | RuntimeException e) {
-            throw e;
-        } catch (final Throwable e) {
-            throw new RuntimeException(e);
-        }
-    }
-
      @Override
      public double getDoubleValue(final ScriptObject self, final ScriptObject owner) {
         try {
@@ -441,21 +428,6 @@ public class AccessorProperty extends Property {
     protected final void invokeSetter(final ScriptObject self, final int value) {
         try {
             getSetter(int.class, self.getMap()).invokeExact((Object)self, value);
-        } catch (final Error | RuntimeException e) {
-            throw e;
-        } catch (final Throwable e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    /**
-     * Invoke setter for this property with a value
-     * @param self  owner
-     * @param value value
-     */
-    protected final void invokeSetter(final ScriptObject self, final long value) {
-        try {
-            getSetter(long.class, self.getMap()).invokeExact((Object)self, value);
         } catch (final Error | RuntimeException e) {
             throw e;
         } catch (final Throwable e) {
@@ -500,12 +472,6 @@ public class AccessorProperty extends Property {
     }
 
     @Override
-    public void setValue(final ScriptObject self, final ScriptObject owner, final long value, final boolean strict)  {
-        assert isConfigurable() || isWritable() : getKey() + " is not writable or configurable";
-        invokeSetter(self, value);
-    }
-
-    @Override
     public void setValue(final ScriptObject self, final ScriptObject owner, final double value, final boolean strict)  {
         assert isConfigurable() || isWritable() : getKey() + " is not writable or configurable";
         invokeSetter(self, value);
@@ -533,7 +499,6 @@ public class AccessorProperty extends Property {
         final int i = getAccessorTypeIndex(type);
 
         assert type == int.class ||
-                type == long.class ||
                 type == double.class ||
                 type == Object.class :
                 "invalid getter type " + type + " for " + getKey();

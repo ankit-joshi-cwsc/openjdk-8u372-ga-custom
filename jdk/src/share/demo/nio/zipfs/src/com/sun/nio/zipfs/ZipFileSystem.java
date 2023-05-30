@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2009, 2020, Oracle and/or its affiliates. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -36,7 +36,6 @@
  * input validation and proper error handling, might not be present in
  * this sample code.
  */
-
 
 package com.sun.nio.zipfs;
 
@@ -83,7 +82,7 @@ public class ZipFileSystem extends FileSystem {
     private final ZipPath defaultdir;
     private boolean readOnly = false;
     private final Path zfpath;
-    private final ZipCoder zc;
+    final ZipCoder zc;
 
     // configurable by env map
     private final String  defaultDir;    // default dir for the file system
@@ -93,6 +92,10 @@ public class ZipFileSystem extends FileSystem {
     private final boolean createNew;     // create a new zip if not exists
     private static final boolean isWindows =
         System.getProperty("os.name").startsWith("Windows");
+
+    // a threshold, in bytes, to decide whether to create a temp file
+    // for outputstream of a zip entry
+    private final int tempFileCreationThreshold = 10 * 1024 * 1024; // 10 MB
 
     ZipFileSystem(ZipFileSystemProvider provider,
                   Path zfpath,
@@ -183,7 +186,7 @@ public class ZipFileSystem extends FileSystem {
             }
             path = sb.toString();
         }
-        return new ZipPath(this, getBytes(path));
+        return new ZipPath(this, path);
     }
 
     @Override
@@ -287,6 +290,14 @@ public class ZipFileSystem extends FileSystem {
         synchronized (deflaters) {
             for (Deflater def : deflaters)
                 def.end();
+        }
+
+        beginWrite();                // lock and sync
+        try {
+            // Clear the map so that its keys & values can be garbage collected
+            inodes = null;
+        } finally {
+            endWrite();
         }
 
         IOException ioe = null;
@@ -497,6 +508,7 @@ public class ZipFileSystem extends FileSystem {
         boolean hasCreateNew = false;
         boolean hasCreate = false;
         boolean hasAppend = false;
+        boolean hasTruncate = false;
         for (OpenOption opt: options) {
             if (opt == READ)
                 throw new IllegalArgumentException("READ not allowed");
@@ -506,7 +518,11 @@ public class ZipFileSystem extends FileSystem {
                 hasCreate = true;
             if (opt == APPEND)
                 hasAppend = true;
+            if (opt == TRUNCATE_EXISTING)
+                hasTruncate = true;
         }
+        if (hasAppend && hasTruncate)
+            throw new IllegalArgumentException("APPEND + TRUNCATE_EXISTING not allowed");
         beginRead();                 // only need a readlock, the "update()" will
         try {                        // try to obtain a writelock when the os is
             ensureOpen();            // being closed.
@@ -558,6 +574,8 @@ public class ZipFileSystem extends FileSystem {
             if (!(option instanceof StandardOpenOption))
                 throw new IllegalArgumentException();
         }
+        if (options.contains(APPEND) && options.contains(TRUNCATE_EXISTING))
+            throw new IllegalArgumentException("APPEND + TRUNCATE_EXISTING not allowed");
     }
 
     // Returns a Writable/ReadByteChannel for now. Might consdier to use
@@ -705,15 +723,19 @@ public class ZipFileSystem extends FileSystem {
             if (forWrite) {
                 checkWritable();
                 if (e == null) {
-                if (!options.contains(StandardOpenOption.CREATE_NEW))
-                    throw new NoSuchFileException(getString(path));
+                    if (!options.contains(StandardOpenOption.CREATE) &&
+                        !options.contains(StandardOpenOption.CREATE_NEW)) {
+                        throw new NoSuchFileException(getString(path));
+                    }
                 } else {
-                    if (options.contains(StandardOpenOption.CREATE_NEW))
+                    if (options.contains(StandardOpenOption.CREATE_NEW)) {
                         throw new FileAlreadyExistsException(getString(path));
+                    }
                     if (e.isDir())
                         throw new FileAlreadyExistsException("directory <"
                             + getString(path) + "> exists");
                 }
+                options = new HashSet<>(options);
                 options.remove(StandardOpenOption.CREATE_NEW); // for tmpfile
             } else if (e == null || e.isDir()) {
                 throw new NoSuchFileException(getString(path));
@@ -1054,7 +1076,7 @@ public class ZipFileSystem extends FileSystem {
         int pos = 0;
         int limit = cen.length - ENDHDR;
         while (pos < limit) {
-            if (CENSIG(cen, pos) != CENSIG)
+            if (!cenSigAt(cen, pos))
                 zerror("invalid CEN header (bad signature)");
             int method = CENHOW(cen, pos);
             int nlen   = CENNAM(cen, pos);
@@ -1086,9 +1108,7 @@ public class ZipFileSystem extends FileSystem {
 
     // Creates a new empty temporary file in the same directory as the
     // specified file.  A variant of Files.createTempFile.
-    private Path createTempFileInSameDirectoryAs(Path path)
-        throws IOException
-    {
+    private Path createTempFileInSameDirectoryAs(Path path) throws IOException {
         Path parent = path.toAbsolutePath().getParent();
         Path dir = (parent == null) ? path.getFileSystem().getPath(".") : parent;
         Path tmpPath = Files.createTempFile(dir, "zipfstmp", null);
@@ -1194,6 +1214,7 @@ public class ZipFileSystem extends FileSystem {
         }
         if (!hasUpdate)
             return;
+        PosixFileAttributes attrs = getPosixAttributes(zfpath);
         Path tmpFile = createTempFileInSameDirectoryAs(zfpath);
         try (OutputStream os = new BufferedOutputStream(Files.newOutputStream(tmpFile, WRITE)))
         {
@@ -1294,6 +1315,11 @@ public class ZipFileSystem extends FileSystem {
             Files.delete(zfpath);
         }
 
+        // Set the POSIX permissions of the original Zip File if available
+        // before moving the temp file
+        if (attrs != null) {
+            Files.setPosixFilePermissions(tmpFile, attrs.permissions());
+        }
         Files.move(tmpFile, zfpath, REPLACE_EXISTING);
         hasUpdate = false;    // clear
         /*
@@ -1303,6 +1329,29 @@ public class ZipFileSystem extends FileSystem {
         }
          */
         //System.out.printf("->sync(%s) done!%n", toString());
+    }
+
+    /**
+     * Returns a file's POSIX file attributes.
+     * @param path The path to the file
+     * @return The POSIX file attributes for the specified file or
+     *         null if the POSIX attribute view is not available
+     * @throws IOException If an error occurs obtaining the POSIX attributes for
+     *                    the specified file
+     */
+    private PosixFileAttributes getPosixAttributes(Path path) throws IOException {
+        try {
+            PosixFileAttributeView view =
+                    Files.getFileAttributeView(path, PosixFileAttributeView.class);
+            // Return if the attribute view is not supported
+            if (view == null) {
+                return null;
+            }
+            return view.readAttributes();
+        } catch (UnsupportedOperationException e) {
+            // PosixFileAttributes not available
+            return null;
+        }
     }
 
     private IndexNode getInode(byte[] path) {
@@ -1371,13 +1420,118 @@ public class ZipFileSystem extends FileSystem {
         if (zc.isUTF8())
             e.flag |= FLAG_EFS;
         OutputStream os;
-        if (useTempFile) {
+        if (useTempFile || e.size >= tempFileCreationThreshold) {
             e.file = getTempPathForEntry(null);
             os = Files.newOutputStream(e.file, WRITE);
         } else {
-            os = new ByteArrayOutputStream((e.size > 0)? (int)e.size : 8192);
+            os = new FileRolloverOutputStream(e);
         }
         return new EntryOutputStream(e, os);
+    }
+
+    // A wrapper around the ByteArrayOutputStream. This FileRolloverOutputStream
+    // uses a threshold size to decide if the contents being written need to be
+    // rolled over into a temporary file. Until the threshold is reached, writes
+    // on this outputstream just write it to the internal in-memory byte array
+    // held by the ByteArrayOutputStream. Once the threshold is reached, the
+    // write operation on this outputstream first (and only once) creates a temporary file
+    // and transfers the data that has so far been written in the internal
+    // byte array, to that newly created file. The temp file is then opened
+    // in append mode and any subsequent writes, including the one which triggered
+    // the temporary file creation, will be written to the file.
+    // Implementation note: the "write" and the "close" methods of this implementation
+    // aren't "synchronized" because this FileRolloverOutputStream gets called
+    // only from either DeflatingEntryOutputStream or EntryOutputStream, both of which
+    // already have the necessary "synchronized" before calling these methods.
+    private class FileRolloverOutputStream extends OutputStream {
+        private ByteArrayOutputStream baos = new ByteArrayOutputStream(8192);
+        private final Entry entry;
+        private OutputStream tmpFileOS;
+        private long totalWritten = 0;
+
+        private FileRolloverOutputStream(final Entry e) {
+            this.entry = e;
+        }
+
+        @Override
+        public void write(final int b) throws IOException {
+            if (tmpFileOS != null) {
+                // already rolled over, write to the file that has been created previously
+                writeToFile(b);
+                return;
+            }
+            if (totalWritten + 1 < tempFileCreationThreshold) {
+                // write to our in-memory byte array
+                baos.write(b);
+                totalWritten++;
+                return;
+            }
+            // rollover into a file
+            transferToFile();
+            writeToFile(b);
+        }
+
+        @Override
+        public void write(final byte[] b) throws IOException {
+            write(b, 0, b.length);
+        }
+
+        @Override
+        public void write(final byte[] b, final int off, final int len) throws IOException {
+            if (tmpFileOS != null) {
+                // already rolled over, write to the file that has been created previously
+                writeToFile(b, off, len);
+                return;
+            }
+            if (totalWritten + len < tempFileCreationThreshold) {
+                // write to our in-memory byte array
+                baos.write(b, off, len);
+                totalWritten += len;
+                return;
+            }
+            // rollover into a file
+            transferToFile();
+            writeToFile(b, off, len);
+        }
+
+        @Override
+        public void flush() throws IOException {
+            if (tmpFileOS != null) {
+                tmpFileOS.flush();
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            baos = null;
+            if (tmpFileOS != null) {
+                tmpFileOS.close();
+            }
+        }
+
+        private void writeToFile(int b) throws IOException {
+            tmpFileOS.write(b);
+            totalWritten++;
+        }
+
+        private void writeToFile(byte[] b, int off, int len) throws IOException {
+            tmpFileOS.write(b, off, len);
+            totalWritten += len;
+        }
+
+        private void transferToFile() throws IOException {
+            // create a tempfile
+            entry.file = getTempPathForEntry(null);
+            tmpFileOS = new BufferedOutputStream(Files.newOutputStream(entry.file));
+            // transfer the already written data from the byte array buffer into this tempfile
+            baos.writeTo(tmpFileOS);
+            // release the underlying byte array
+            baos = null;
+        }
+
+        private byte[] toByteArray() {
+            return baos == null ? null : baos.toByteArray();
+        }
     }
 
     private InputStream getInputStream(Entry e)
@@ -1535,6 +1689,7 @@ public class ZipFileSystem extends FileSystem {
         private CRC32 crc;
         private Entry e;
         private long written;
+        private boolean isClosed = false;
 
         EntryOutputStream(Entry e, OutputStream os)
             throws IOException
@@ -1547,9 +1702,14 @@ public class ZipFileSystem extends FileSystem {
         }
 
         @Override
-        public void write(byte b[], int off, int len) throws IOException {
+        public synchronized void write(byte b[], int off, int len)
+            throws IOException
+        {
             if (e.type != Entry.FILECH)    // only from sync
                 ensureOpen();
+            if (isClosed) {
+                throw new IOException("Stream closed");
+            }
             if (off < 0 || len < 0 || off > b.length - len) {
                 throw new IndexOutOfBoundsException();
             } else if (len == 0) {
@@ -1570,7 +1730,11 @@ public class ZipFileSystem extends FileSystem {
         }
 
         @Override
-        public void close() throws IOException {
+        public synchronized void close() throws IOException {
+            if (isClosed) {
+                return;
+            }
+            isClosed = true;
             // TBD ensureOpen();
             switch (e.method) {
             case METHOD_DEFLATED:
@@ -1588,8 +1752,12 @@ public class ZipFileSystem extends FileSystem {
                 throw new ZipException("invalid compression method");
             }
             //crc.reset();
-            if (out instanceof ByteArrayOutputStream)
-                e.bytes = ((ByteArrayOutputStream)out).toByteArray();
+            if (out instanceof FileRolloverOutputStream) {
+                FileRolloverOutputStream fros = (FileRolloverOutputStream) out;
+                if (fros.tmpFileOS == null) {
+                    e.bytes = fros.toByteArray();
+                }
+            }
 
             if (e.type == Entry.FILECH) {
                 releaseDeflater(def);
@@ -1656,7 +1824,7 @@ public class ZipFileSystem extends FileSystem {
     // Releases the specified inflater to the list of available inflaters.
     private void releaseDeflater(Deflater def) {
         synchronized (deflaters) {
-            if (inflaters.size() < MAX_FLATER) {
+            if (deflaters.size() < MAX_FLATER) {
                def.reset();
                deflaters.add(def);
             } else {
@@ -1875,7 +2043,7 @@ public class ZipFileSystem extends FileSystem {
             throws IOException
         {
             byte[] cen = zipfs.cen;
-            if (CENSIG(cen, pos) != CENSIG)
+            if (!cenSigAt(cen, pos))
                 zerror("invalid CEN header (bad signature)");
             versionMade = CENVEM(cen, pos);
             version     = CENVER(cen, pos);
@@ -2038,9 +2206,9 @@ public class ZipFileSystem extends FileSystem {
             assert (buf.length >= LOCHDR);
             if (zipfs.readFullyAt(buf, 0, LOCHDR , pos) != LOCHDR)
                 throw new ZipException("loc: reading failed");
-            if (LOCSIG(buf) != LOCSIG)
+            if (!locSigAt(buf, 0))
                 throw new ZipException("loc: wrong sig ->"
-                                       + Long.toString(LOCSIG(buf), 16));
+                                       + Long.toString(getSig(buf, 0), 16));
             //startPos = pos;
             version  = LOCVER(buf);
             flag     = LOCFLG(buf);
@@ -2272,9 +2440,9 @@ public class ZipFileSystem extends FileSystem {
                     if (zipfs.readFullyAt(buf, 0, buf.length , locoff)
                         != buf.length)
                         throw new ZipException("loc: reading failed");
-                    if (LOCSIG(buf) != LOCSIG)
+                    if (!locSigAt(buf, 0))
                         throw new ZipException("loc: wrong sig ->"
-                                           + Long.toString(LOCSIG(buf), 16));
+                                           + Long.toString(getSig(buf, 0), 16));
 
                     int locElen = LOCEXT(buf);
                     if (locElen < 9)    // EXTT is at lease 9 bytes

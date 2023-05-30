@@ -63,6 +63,10 @@ u_char G1BlockOffsetSharedArray::offset_array(size_t index) const {
   return _offset_array[index];
 }
 
+inline void G1BlockOffsetSharedArray::set_offset_array_raw(size_t index, u_char offset) {
+  _offset_array[index] = offset;
+}
+
 void G1BlockOffsetSharedArray::set_offset_array(size_t index, u_char offset) {
   check_index(index, "index out of range");
   set_offset_array_raw(index, offset);
@@ -81,7 +85,7 @@ void G1BlockOffsetSharedArray::set_offset_array(size_t left, size_t right, u_cha
   assert(left <= right, "indexes out of order");
   size_t num_cards = right - left + 1;
   if (UseMemSetInBOT) {
-    memset(&_offset_array[left], offset, num_cards);
+    memset(const_cast<u_char*> (&_offset_array[left]), offset, num_cards);
   } else {
     size_t i = left;
     const size_t end = i + num_cards;
@@ -162,7 +166,7 @@ forward_to_block_containing_addr_const(HeapWord* q, HeapWord* n,
   while (n <= addr) {
     q = n;
     oop obj = oop(q);
-    if (obj->klass_or_null() == NULL) return q;
+    if (obj->klass_or_null_acquire() == NULL) return q;
     n += block_size(q);
   }
   assert(q <= n, "wrong order for q and addr");
@@ -173,7 +177,7 @@ forward_to_block_containing_addr_const(HeapWord* q, HeapWord* n,
 inline HeapWord*
 G1BlockOffsetArray::forward_to_block_containing_addr(HeapWord* q,
                                                      const void* addr) {
-  if (oop(q)->klass_or_null() == NULL) return q;
+  if (oop(q)->klass_or_null_acquire() == NULL) return q;
   HeapWord* n = q + block_size(q);
   // In the normal case, where the query "addr" is a card boundary, and the
   // offset table chunks are the same size as cards, the block starting at

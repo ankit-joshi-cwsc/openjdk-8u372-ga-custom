@@ -43,10 +43,11 @@ SurrogateLockerThread*
 ConcurrentMarkThread::ConcurrentMarkThread(ConcurrentMark* cm) :
   ConcurrentGCThread(),
   _cm(cm),
-  _started(false),
-  _in_progress(false),
+  _state(Idle),
   _vtime_accum(0.0),
   _vtime_mark_accum(0.0) {
+
+  set_name("G1 Main Concurrent Mark GC Thread");
   create_and_start();
 }
 
@@ -319,16 +320,6 @@ void ConcurrentMarkThread::stop() {
   }
 }
 
-void ConcurrentMarkThread::print() const {
-  print_on(tty);
-}
-
-void ConcurrentMarkThread::print_on(outputStream* st) const {
-  st->print("\"G1 Main Concurrent Mark GC Thread\" ");
-  Thread::print_on(st);
-  st->cr();
-}
-
 void ConcurrentMarkThread::sleepBeforeNextCycle() {
   // We join here because we don't want to do the "shouldConcurrentMark()"
   // below while the world is otherwise stopped.
@@ -341,7 +332,6 @@ void ConcurrentMarkThread::sleepBeforeNextCycle() {
 
   if (started()) {
     set_in_progress();
-    clear_started();
   }
 }
 

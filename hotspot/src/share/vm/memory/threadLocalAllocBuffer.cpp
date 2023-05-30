@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -88,7 +88,8 @@ void ThreadLocalAllocBuffer::accumulate_statistics() {
       // The result can be larger than 1.0 due to direct to old allocations.
       // These allocations should ideally not be counted but since it is not possible
       // to filter them out here we just cap the fraction to be at most 1.0.
-      double alloc_frac = MIN2(1.0, (double) allocated_since_last_gc / used);
+      // Keep alloc_frac as float and not double to avoid the double to float conversion
+      float alloc_frac = MIN2(1.0f, allocated_since_last_gc / (float) used);
       _allocation_fraction.sample(alloc_frac);
     }
     global_stats()->update_allocating_threads();
@@ -200,12 +201,13 @@ void ThreadLocalAllocBuffer::initialize() {
 
   set_desired_size(initial_desired_size());
 
-  // Following check is needed because at startup the main (primordial)
+  // Following check is needed because at startup the main
   // thread is initialized before the heap is.  The initialization for
   // this thread is redone in startup_initialization below.
   if (Universe::heap() != NULL) {
     size_t capacity   = Universe::heap()->tlab_capacity(myThread()) / HeapWordSize;
-    double alloc_frac = desired_size() * target_refills() / (double) capacity;
+    // Keep alloc_frac as float and not double to avoid the double to float conversion
+    float alloc_frac = desired_size() * target_refills() / (float) capacity;
     _allocation_fraction.sample(alloc_frac);
   }
 
@@ -223,7 +225,7 @@ void ThreadLocalAllocBuffer::startup_initialization() {
 
   _global_stats = new GlobalTLABStats();
 
-  // During jvm startup, the main (primordial) thread is initialized
+  // During jvm startup, the main thread is initialized
   // before the heap is initialized.  So reinitialize it now.
   guarantee(Thread::current()->is_Java_thread(), "tlab initialization thread not Java thread");
   Thread::current()->tlab().initialize();

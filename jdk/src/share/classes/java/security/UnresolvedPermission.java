@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,12 +25,16 @@
 
 package java.security;
 
+import sun.misc.IOUtils;
+
 import java.io.IOException;
 import java.io.ByteArrayInputStream;
+import java.security.cert.Certificate;
 import java.util.ArrayList;
 import java.util.Hashtable;
 import java.lang.reflect.*;
 import java.security.cert.*;
+import java.util.List;
 
 /**
  * The UnresolvedPermission class is used to hold Permissions that
@@ -147,7 +151,7 @@ implements java.io.Serializable
      * Each chain is ordered bottom-to-top (i.e., with the signer certificate
      * first and the (root) certificate authority last). The signer
      * certificates are copied from the array. Subsequent changes to
-     * the array will not affect this UnsolvedPermission.
+     * the array will not affect this UnresolvedPermission.
      */
     public UnresolvedPermission(String type,
                                 String name,
@@ -159,59 +163,63 @@ implements java.io.Serializable
         if (type == null)
                 throw new NullPointerException("type can't be null");
 
+        // Perform a defensive copy and reassign certs if we have a non-null
+        // reference
+        if (certs != null) {
+            certs = certs.clone();
+        }
+
         this.type = type;
         this.name = name;
         this.actions = actions;
+
         if (certs != null) {
             // Extract the signer certs from the list of certificates.
-            for (int i=0; i<certs.length; i++) {
+            for (int i = 0; i < certs.length; i++) {
                 if (!(certs[i] instanceof X509Certificate)) {
                     // there is no concept of signer certs, so we store the
-                    // entire cert array
-                    this.certs = certs.clone();
-                    break;
+                    // entire cert array.  No further processing is necessary.
+                    this.certs = certs;
+                    return;
                 }
             }
 
-            if (this.certs == null) {
-                // Go through the list of certs and see if all the certs are
-                // signer certs.
-                int i = 0;
-                int count = 0;
-                while (i < certs.length) {
-                    count++;
-                    while (((i+1) < certs.length) &&
-                           ((X509Certificate)certs[i]).getIssuerDN().equals(
-                               ((X509Certificate)certs[i+1]).getSubjectDN())) {
-                        i++;
-                    }
+            // Go through the list of certs and see if all the certs are
+            // signer certs.
+            int i = 0;
+            int count = 0;
+            while (i < certs.length) {
+                count++;
+                while (((i + 1) < certs.length) &&
+                       ((X509Certificate)certs[i]).getIssuerDN().equals(
+                           ((X509Certificate)certs[i + 1]).getSubjectDN())) {
                     i++;
                 }
-                if (count == certs.length) {
-                    // All the certs are signer certs, so we store the entire
-                    // array
-                    this.certs = certs.clone();
-                }
-
-                if (this.certs == null) {
-                    // extract the signer certs
-                    ArrayList<java.security.cert.Certificate> signerCerts =
-                        new ArrayList<>();
-                    i = 0;
-                    while (i < certs.length) {
-                        signerCerts.add(certs[i]);
-                        while (((i+1) < certs.length) &&
-                            ((X509Certificate)certs[i]).getIssuerDN().equals(
-                              ((X509Certificate)certs[i+1]).getSubjectDN())) {
-                            i++;
-                        }
-                        i++;
-                    }
-                    this.certs =
-                        new java.security.cert.Certificate[signerCerts.size()];
-                    signerCerts.toArray(this.certs);
-                }
+                i++;
             }
+            if (count == certs.length) {
+                // All the certs are signer certs, so we store the entire
+                // array.  No further processing is needed.
+                this.certs = certs;
+                return;
+            }
+
+            // extract the signer certs
+            ArrayList<java.security.cert.Certificate> signerCerts =
+                new ArrayList<>();
+            i = 0;
+            while (i < certs.length) {
+                signerCerts.add(certs[i]);
+                while (((i + 1) < certs.length) &&
+                    ((X509Certificate)certs[i]).getIssuerDN().equals(
+                      ((X509Certificate)certs[i + 1]).getSubjectDN())) {
+                    i++;
+                }
+                i++;
+            }
+            this.certs =
+                new java.security.cert.Certificate[signerCerts.size()];
+            signerCerts.toArray(this.certs);
         }
     }
 
@@ -304,6 +312,7 @@ implements java.io.Serializable
      *
      * @return false.
      */
+    @Override
     public boolean implies(Permission p) {
         return false;
     }
@@ -324,6 +333,7 @@ implements java.io.Serializable
      * type (class) name, permission name, actions, and
      * certificates as this object.
      */
+    @Override
     public boolean equals(Object obj) {
         if (obj == this)
             return true;
@@ -397,7 +407,7 @@ implements java.io.Serializable
      *
      * @return a hash code value for this object.
      */
-
+    @Override
     public int hashCode() {
         int hash = type.hashCode();
         if (name != null)
@@ -417,6 +427,7 @@ implements java.io.Serializable
      *
      * @return the empty string "".
      */
+    @Override
     public String getActions()
     {
         return "";
@@ -484,6 +495,7 @@ implements java.io.Serializable
      *
      * @return information about this UnresolvedPermission.
      */
+    @Override
     public String toString() {
         return "(unresolved " + type + " " + name + " " + actions + ")";
     }
@@ -495,7 +507,7 @@ implements java.io.Serializable
      * @return a new PermissionCollection object suitable for
      * storing UnresolvedPermissions.
      */
-
+    @Override
     public PermissionCollection newPermissionCollection() {
         return new UnresolvedPermissionCollection();
     }
@@ -549,6 +561,7 @@ implements java.io.Serializable
     {
         CertificateFactory cf;
         Hashtable<String, CertificateFactory> cfs = null;
+        List<Certificate> certList = null;
 
         ois.defaultReadObject();
 
@@ -560,8 +573,10 @@ implements java.io.Serializable
         if (size > 0) {
             // we know of 3 different cert types: X.509, PGP, SDSI, which
             // could all be present in the stream at the same time
-            cfs = new Hashtable<String, CertificateFactory>(3);
-            this.certs = new java.security.cert.Certificate[size];
+            cfs = new Hashtable<>(3);
+            certList = new ArrayList<>(size > 20 ? 20 : size);
+        } else if (size < 0) {
+            throw new IOException("size cannot be negative");
         }
 
         for (int i=0; i<size; i++) {
@@ -583,20 +598,18 @@ implements java.io.Serializable
                 cfs.put(certType, cf);
             }
             // parse the certificate
-            byte[] encoded=null;
-            try {
-                encoded = new byte[ois.readInt()];
-            } catch (OutOfMemoryError oome) {
-                throw new IOException("Certificate too big");
-            }
-            ois.readFully(encoded);
+            byte[] encoded = IOUtils.readExactlyNBytes(ois, ois.readInt());
             ByteArrayInputStream bais = new ByteArrayInputStream(encoded);
             try {
-                this.certs[i] = cf.generateCertificate(bais);
+                certList.add(cf.generateCertificate(bais));
             } catch (CertificateException ce) {
                 throw new IOException(ce.getMessage());
             }
             bais.close();
+        }
+        if (certList != null) {
+            this.certs = certList.toArray(
+                    new java.security.cert.Certificate[size]);
         }
     }
 }

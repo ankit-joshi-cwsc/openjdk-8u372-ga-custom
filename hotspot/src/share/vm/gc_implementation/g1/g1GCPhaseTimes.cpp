@@ -41,13 +41,13 @@ private:
   int _cur;
 
   void vappend(const char* format, va_list ap)  ATTRIBUTE_PRINTF(2, 0) {
-    int res = vsnprintf(&_buffer[_cur], BUFFER_LEN - _cur, format, ap);
-    if (res != -1) {
-      _cur += res;
-    } else {
+    int res = os::vsnprintf(&_buffer[_cur], BUFFER_LEN - _cur, format, ap);
+    if (res > BUFFER_LEN) {
       DEBUG_ONLY(warning("buffer too small in LineBuffer");)
       _buffer[BUFFER_LEN -1] = 0;
       _cur = BUFFER_LEN; // vsnprintf above should not add to _buffer if we are called again
+    } else if (res != -1) {
+      _cur += res;
     }
   }
 
@@ -154,28 +154,28 @@ class WorkerDataArray  : public CHeapObj<mtGC> {
     _has_new_data = true;
   }
 
-  double average(){
-    calculate_totals();
+  double average(uint active_threads){
+    calculate_totals(active_threads);
     return _average;
   }
 
-  T sum() {
-    calculate_totals();
+  T sum(uint active_threads) {
+    calculate_totals(active_threads);
     return _sum;
   }
 
-  T minimum() {
-    calculate_totals();
+  T minimum(uint active_threads) {
+    calculate_totals(active_threads);
     return _min;
   }
 
-  T maximum() {
-    calculate_totals();
+  T maximum(uint active_threads) {
+    calculate_totals(active_threads);
     return _max;
   }
 
   void reset() PRODUCT_RETURN;
-  void verify() PRODUCT_RETURN;
+  void verify(uint active_threads) PRODUCT_RETURN;
 
   void set_enabled(bool enabled) { _enabled = enabled; }
 
@@ -183,7 +183,7 @@ class WorkerDataArray  : public CHeapObj<mtGC> {
 
  private:
 
-  void calculate_totals(){
+  void calculate_totals(uint active_threads){
     if (!_has_new_data) {
       return;
     }
@@ -191,13 +191,14 @@ class WorkerDataArray  : public CHeapObj<mtGC> {
     _sum = (T)0;
     _min = _data[0];
     _max = _min;
-    for (uint i = 0; i < _length; ++i) {
+    assert(active_threads <= _length, "Wrong number of active threads");
+    for (uint i = 0; i < active_threads; ++i) {
       T val = _data[i];
       _sum += val;
       _min = MIN2(_min, val);
       _max = MAX2(_max, val);
     }
-    _average = (double)_sum / (double)_length;
+    _average = (double)_sum / (double)active_threads;
     _has_new_data = false;
   }
 };
@@ -226,17 +227,18 @@ void WorkerDataArray<T>::reset() {
 }
 
 template <class T>
-void WorkerDataArray<T>::verify() {
+void WorkerDataArray<T>::verify(uint active_threads) {
   if (!_enabled) {
     return;
   }
 
-  for (uint i = 0; i < _length; i++) {
+  assert(active_threads <= _length, "Wrong number of active threads");
+  for (uint i = 0; i < active_threads; i++) {
     assert(_data[i] != WorkerDataArray<T>::uninitialized(),
         err_msg("Invalid data for worker %u in '%s'", i, _title));
   }
   if (_thread_work_items != NULL) {
-    _thread_work_items->verify();
+    _thread_work_items->verify(active_threads);
   }
 }
 
@@ -321,7 +323,7 @@ void G1GCPhaseTimes::note_gc_end() {
   }
 
   for (int i = 0; i < GCParPhasesSentinel; i++) {
-    _gc_par_phases[i]->verify();
+    _gc_par_phases[i]->verify(_active_gc_threads);
   }
 }
 
@@ -330,7 +332,7 @@ void G1GCPhaseTimes::print_stats(int level, const char* str, double value) {
 }
 
 void G1GCPhaseTimes::print_stats(int level, const char* str, size_t value) {
-  LineBuffer(level).append_and_print_cr("[%s: "SIZE_FORMAT"]", str, value);
+  LineBuffer(level).append_and_print_cr("[%s: " SIZE_FORMAT "]", str, value);
 }
 
 void G1GCPhaseTimes::print_stats(int level, const char* str, double value, uint workers) {
@@ -378,7 +380,7 @@ void G1GCPhaseTimes::record_thread_work_item(GCParPhases phase, uint worker_i, s
 
 // return the average time for a phase in milliseconds
 double G1GCPhaseTimes::average_time_ms(GCParPhases phase) {
-  return _gc_par_phases[phase]->average() * 1000.0;
+  return _gc_par_phases[phase]->average(_active_gc_threads) * 1000.0;
 }
 
 double G1GCPhaseTimes::get_time_ms(GCParPhases phase, uint worker_i) {
@@ -386,15 +388,15 @@ double G1GCPhaseTimes::get_time_ms(GCParPhases phase, uint worker_i) {
 }
 
 double G1GCPhaseTimes::sum_time_ms(GCParPhases phase) {
-  return _gc_par_phases[phase]->sum() * 1000.0;
+  return _gc_par_phases[phase]->sum(_active_gc_threads) * 1000.0;
 }
 
 double G1GCPhaseTimes::min_time_ms(GCParPhases phase) {
-  return _gc_par_phases[phase]->minimum() * 1000.0;
+  return _gc_par_phases[phase]->minimum(_active_gc_threads) * 1000.0;
 }
 
 double G1GCPhaseTimes::max_time_ms(GCParPhases phase) {
-  return _gc_par_phases[phase]->maximum() * 1000.0;
+  return _gc_par_phases[phase]->maximum(_active_gc_threads) * 1000.0;
 }
 
 size_t G1GCPhaseTimes::get_thread_work_item(GCParPhases phase, uint worker_i) {
@@ -404,22 +406,22 @@ size_t G1GCPhaseTimes::get_thread_work_item(GCParPhases phase, uint worker_i) {
 
 size_t G1GCPhaseTimes::sum_thread_work_items(GCParPhases phase) {
   assert(_gc_par_phases[phase]->thread_work_items() != NULL, "No sub count");
-  return _gc_par_phases[phase]->thread_work_items()->sum();
+  return _gc_par_phases[phase]->thread_work_items()->sum(_active_gc_threads);
 }
 
 double G1GCPhaseTimes::average_thread_work_items(GCParPhases phase) {
   assert(_gc_par_phases[phase]->thread_work_items() != NULL, "No sub count");
-  return _gc_par_phases[phase]->thread_work_items()->average();
+  return _gc_par_phases[phase]->thread_work_items()->average(_active_gc_threads);
 }
 
 size_t G1GCPhaseTimes::min_thread_work_items(GCParPhases phase) {
   assert(_gc_par_phases[phase]->thread_work_items() != NULL, "No sub count");
-  return _gc_par_phases[phase]->thread_work_items()->minimum();
+  return _gc_par_phases[phase]->thread_work_items()->minimum(_active_gc_threads);
 }
 
 size_t G1GCPhaseTimes::max_thread_work_items(GCParPhases phase) {
   assert(_gc_par_phases[phase]->thread_work_items() != NULL, "No sub count");
-  return _gc_par_phases[phase]->thread_work_items()->maximum();
+  return _gc_par_phases[phase]->thread_work_items()->maximum(_active_gc_threads);
 }
 
 class G1GCParPhasePrinter : public StackObj {
@@ -450,19 +452,21 @@ class G1GCParPhasePrinter : public StackObj {
 
     if (phase->_thread_work_items != NULL) {
       LineBuffer buf2(phase->_thread_work_items->_indent_level);
-      buf2.append_and_print_cr("[%s:  "SIZE_FORMAT"]", phase->_thread_work_items->_title, _phase_times->sum_thread_work_items(phase_id));
+      buf2.append_and_print_cr("[%s:  " SIZE_FORMAT "]", phase->_thread_work_items->_title, _phase_times->sum_thread_work_items(phase_id));
     }
   }
 
   void print_time_values(LineBuffer& buf, G1GCPhaseTimes::GCParPhases phase_id, WorkerDataArray<double>* phase) {
-    for (uint i = 0; i < phase->_length; ++i) {
+    uint active_length = _phase_times->_active_gc_threads;
+    for (uint i = 0; i < active_length; ++i) {
       buf.append("  %.1lf", _phase_times->get_time_ms(phase_id, i));
     }
     buf.print_cr();
   }
 
   void print_count_values(LineBuffer& buf, G1GCPhaseTimes::GCParPhases phase_id, WorkerDataArray<size_t>* thread_work_items) {
-    for (uint i = 0; i < thread_work_items->_length; ++i) {
+    uint active_length = _phase_times->_active_gc_threads;
+    for (uint i = 0; i < active_length; ++i) {
       buf.append("  " SIZE_FORMAT, _phase_times->get_thread_work_item(phase_id, i));
     }
     buf.print_cr();
@@ -579,13 +583,12 @@ void G1GCPhaseTimes::print(double pause_time_sec) {
 G1GCParPhaseTimesTracker::G1GCParPhaseTimesTracker(G1GCPhaseTimes* phase_times, G1GCPhaseTimes::GCParPhases phase, uint worker_id) :
     _phase_times(phase_times), _phase(phase), _worker_id(worker_id) {
   if (_phase_times != NULL) {
-    _start_time = os::elapsedTime();
+    _start_time = Ticks::now();
   }
 }
 
 G1GCParPhaseTimesTracker::~G1GCParPhaseTimesTracker() {
   if (_phase_times != NULL) {
-    _phase_times->record_time_secs(_phase, _worker_id, os::elapsedTime() - _start_time);
+    _phase_times->record_time_secs(_phase, _worker_id, (Ticks::now() - _start_time).seconds());
   }
 }
-

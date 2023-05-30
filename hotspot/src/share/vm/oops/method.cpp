@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -36,6 +36,7 @@
 #include "memory/generation.hpp"
 #include "memory/heapInspection.hpp"
 #include "memory/metadataFactory.hpp"
+#include "memory/metaspaceShared.hpp"
 #include "memory/oopFactory.hpp"
 #include "oops/constMethod.hpp"
 #include "oops/methodData.hpp"
@@ -84,15 +85,13 @@ Method::Method(ConstMethod* xconst, AccessFlags access_flags, int size) {
   set_constMethod(xconst);
   set_access_flags(access_flags);
   set_method_size(size);
-#ifdef CC_INTERP
-  set_result_index(T_VOID);
-#endif
   set_intrinsic_id(vmIntrinsics::_none);
   set_jfr_towrite(false);
   set_force_inline(false);
   set_hidden(false);
   set_dont_inline(false);
   set_has_injected_profile(false);
+  set_running_emcp(false);
   set_method_data(NULL);
   clear_method_counters();
   set_vtable_index(Method::garbage_vtable_index);
@@ -100,7 +99,7 @@ Method::Method(ConstMethod* xconst, AccessFlags access_flags, int size) {
   // Fix and bury in Method*
   set_interpreter_entry(NULL); // sets i2i entry and from_int
   set_adapter_entry(NULL);
-  clear_code(); // from_c/from_i get set to c2i/i2i
+  clear_code(false /* don't need a lock */); // from_c/from_i get set to c2i/i2i
 
   if (access_flags.is_native()) {
     clear_native_function();
@@ -113,6 +112,7 @@ Method::Method(ConstMethod* xconst, AccessFlags access_flags, int size) {
 // Release Method*.  The nmethod will be gone when we get here because
 // we've walked the code cache.
 void Method::deallocate_contents(ClassLoaderData* loader_data) {
+  clear_jmethod_id(loader_data);
   MetadataFactory::free_metadata(loader_data, constMethod());
   set_constMethod(NULL);
   MetadataFactory::free_metadata(loader_data, method_data());
@@ -308,6 +308,33 @@ void Method::remove_unshareable_info() {
   unlink_method();
 }
 
+void Method::set_vtable_index(int index) {
+  if (is_shared() && !MetaspaceShared::remapped_readwrite()) {
+    // At runtime initialize_vtable is rerun as part of link_class_impl()
+    // for a shared class loaded by the non-boot loader to obtain the loader
+    // constraints based on the runtime classloaders' context.
+    return; // don't write into the shared class
+  } else {
+    _vtable_index = index;
+  }
+}
+
+void Method::set_itable_index(int index) {
+  if (is_shared() && !MetaspaceShared::remapped_readwrite()) {
+    // At runtime initialize_itable is rerun as part of link_class_impl()
+    // for a shared class loaded by the non-boot loader to obtain the loader
+    // constraints based on the runtime classloaders' context. The dumptime
+    // itable index should be the same as the runtime index.
+    assert(_vtable_index == itable_index_max - index,
+           "archived itable index is different from runtime index");
+    return; // don’t write into the shared class
+  } else {
+    _vtable_index = itable_index_max - index;
+  }
+  assert(valid_itable_index(), "");
+}
+
+
 
 bool Method::was_executed_more_than(int n) {
   // Invocation counter is reset when the Method* is compiled.
@@ -411,12 +438,6 @@ void Method::compute_size_of_parameters(Thread *thread) {
   ArgumentSizeComputer asc(signature());
   set_size_of_parameters(asc.size() + (is_static() ? 0 : 1));
 }
-
-#ifdef CC_INTERP
-void Method::set_result_index(BasicType type)          {
-  _result_index = Interpreter::BasicType_as_index(type);
-}
-#endif
 
 BasicType Method::result_type() const {
   ResultTypeFinder rtf(signature());
@@ -570,7 +591,7 @@ bool Method::is_constant_getter() const {
 }
 
 bool Method::is_initializer() const {
-  return name() == vmSymbols::object_initializer_name() || is_static_initializer();
+  return is_object_initializer() || is_static_initializer();
 }
 
 bool Method::has_valid_initializer_flags() const {
@@ -586,6 +607,9 @@ bool Method::is_static_initializer() const {
          has_valid_initializer_flags();
 }
 
+bool Method::is_object_initializer() const {
+   return name() == vmSymbols::object_initializer_name();
+}
 
 objArrayHandle Method::resolved_checked_exceptions_impl(Method* this_oop, TRAPS) {
   int length = this_oop->checked_exceptions_length();
@@ -823,8 +847,8 @@ void Method::set_not_osr_compilable(int comp_level, bool report, const char* rea
 }
 
 // Revert to using the interpreter and clear out the nmethod
-void Method::clear_code() {
-
+void Method::clear_code(bool acquire_lock /* = true */) {
+  MutexLockerEx pl(acquire_lock ? Patching_lock : NULL, Mutex::_no_safepoint_check_flag);
   // this may be NULL if c2i adapters have not been made yet
   // Only should happen at allocate time.
   if (_adapter == NULL) {
@@ -952,6 +976,7 @@ bool Method::check_code() const {
 
 // Install compiled code.  Instantly it can execute.
 void Method::set_code(methodHandle mh, nmethod *code) {
+  MutexLockerEx pl(Patching_lock, Mutex::_no_safepoint_check_flag);
   assert( code, "use clear_code to remove code" );
   assert( mh->check_code(), "" );
 
@@ -1123,10 +1148,8 @@ methodHandle Method::make_method_handle_intrinsic(vmIntrinsics::ID iid,
   m->set_signature_index(_imcp_invoke_signature);
   assert(MethodHandles::is_signature_polymorphic_name(m->name()), "");
   assert(m->signature() == signature, "");
-#ifdef CC_INTERP
   ResultTypeFinder rtf(signature);
-  m->set_result_index(rtf.type());
-#endif
+  m->constMethod()->set_result_type(rtf.type());
   m->compute_size_of_parameters(THREAD);
   m->init_intrinsic_id();
   assert(m->is_method_handle_intrinsic(), "");
@@ -1783,13 +1806,24 @@ class JNIMethodBlock : public CHeapObj<mtClass> {
 #endif // ASSERT
     *m = _free_method;
   }
+  void clear_method(Method* m) {
+    for (JNIMethodBlock* b = this; b != NULL; b = b->_next) {
+      for (int i = 0; i < number_of_methods; i++) {
+        if (b->_methods[i] == m) {
+          b->_methods[i] = NULL;
+          return;
+        }
+      }
+    }
+    // not found
+  }
 
   // During class unloading the methods are cleared, which is different
   // than freed.
   void clear_all_methods() {
     for (JNIMethodBlock* b = this; b != NULL; b = b->_next) {
       for (int i = 0; i< number_of_methods; i++) {
-        _methods[i] = NULL;
+        b->_methods[i] = NULL;
       }
     }
   }
@@ -1799,7 +1833,7 @@ class JNIMethodBlock : public CHeapObj<mtClass> {
     int count = 0;
     for (JNIMethodBlock* b = this; b != NULL; b = b->_next) {
       for (int i = 0; i< number_of_methods; i++) {
-        if (_methods[i] != _free_method) count++;
+        if (b->_methods[i] != _free_method) count++;
       }
     }
     return count;
@@ -1855,8 +1889,13 @@ void Method::change_method_associated_with_jmethod_id(jmethodID jmid, Method* ne
 
 bool Method::is_method_id(jmethodID mid) {
   Method* m = resolve_jmethod_id(mid);
-  assert(m != NULL, "should be called with non-null method");
+  if (m == NULL) {
+    return false;
+  }
   InstanceKlass* ik = m->method_holder();
+  if (ik == NULL) {
+    return false;
+  }
   ClassLoaderData* cld = ik->class_loader_data();
   if (cld->jmethod_ids() == NULL) return false;
   return (cld->jmethod_ids()->contains((Method**)mid));
@@ -1864,6 +1903,9 @@ bool Method::is_method_id(jmethodID mid) {
 
 Method* Method::checked_resolve_jmethod_id(jmethodID mid) {
   if (mid == NULL) return NULL;
+  if (!Method::is_method_id(mid)) {
+    return NULL;
+  }
   Method* o = resolve_jmethod_id(mid);
   if (o == NULL || o == JNIMethodBlock::_free_method || !((Metadata*)o)->is_method()) {
     return NULL;
@@ -1880,6 +1922,10 @@ void Method::set_on_stack(const bool value) {
   if (value && succeeded) {
     MetadataOnStackMark::record(this, Thread::current());
   }
+}
+
+void Method::clear_jmethod_id(ClassLoaderData* loader_data) {
+  loader_data->jmethod_ids()->clear_method(this);
 }
 
 // Called when the class loader is unloaded to make all methods weak.
@@ -1923,9 +1969,9 @@ void Method::print_on(outputStream* st) const {
   assert(is_method(), "must be method");
   st->print_cr("%s", internal_name());
   // get the effect of PrintOopAddress, always, for methods:
-  st->print_cr(" - this oop:          "INTPTR_FORMAT, (intptr_t)this);
+  st->print_cr(" - this oop:          " INTPTR_FORMAT, (intptr_t)this);
   st->print   (" - method holder:     "); method_holder()->print_value_on(st); st->cr();
-  st->print   (" - constants:         "INTPTR_FORMAT" ", (address)constants());
+  st->print   (" - constants:         " INTPTR_FORMAT " ", (address)constants());
   constants()->print_value_on(st); st->cr();
   st->print   (" - access:            0x%x  ", access_flags().as_int()); access_flags().print_on(st); st->cr();
   st->print   (" - name:              ");    name()->print_value_on(st); st->cr();

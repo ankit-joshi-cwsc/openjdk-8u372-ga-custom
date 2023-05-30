@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -96,7 +96,7 @@ int SymbolTable::_symbols_removed = 0;
 int SymbolTable::_symbols_counted = 0;
 volatile int SymbolTable::_parallel_claimed_idx = 0;
 
-void SymbolTable::buckets_unlink(int start_idx, int end_idx, int* processed, int* removed, size_t* memory_total) {
+void SymbolTable::buckets_unlink(int start_idx, int end_idx, BucketUnlinkContext* context, size_t* memory_total) {
   for (int i = start_idx; i < end_idx; ++i) {
     HashtableEntry<Symbol*, mtSymbol>** p = the_table()->bucket_addr(i);
     HashtableEntry<Symbol*, mtSymbol>* entry = the_table()->bucket(i);
@@ -110,15 +110,14 @@ void SymbolTable::buckets_unlink(int start_idx, int end_idx, int* processed, int
       }
       Symbol* s = entry->literal();
       (*memory_total) += s->size();
-      (*processed)++;
+      context->_num_processed++;
       assert(s != NULL, "just checking");
       // If reference count is zero, remove.
       if (s->refcount() == 0) {
         assert(!entry->is_shared(), "shared entries should be kept live");
         delete s;
-        (*removed)++;
         *p = entry->next();
-        the_table()->free_entry(entry);
+        context->free_entry(entry);
       } else {
         p = entry->next_addr();
       }
@@ -132,9 +131,14 @@ void SymbolTable::buckets_unlink(int start_idx, int end_idx, int* processed, int
 // This is done late during GC.
 void SymbolTable::unlink(int* processed, int* removed) {
   size_t memory_total = 0;
-  buckets_unlink(0, the_table()->table_size(), processed, removed, &memory_total);
-  _symbols_removed += *removed;
-  _symbols_counted += *processed;
+  BucketUnlinkContext context;
+  buckets_unlink(0, the_table()->table_size(), &context, &memory_total);
+  _the_table->bulk_free_entries(&context);
+  *processed = context._num_processed;
+  *removed = context._num_removed;
+
+  _symbols_removed = context._num_removed;
+  _symbols_counted = context._num_processed;
   // Exclude printing for normal PrintGCDetails because people parse
   // this output.
   if (PrintGCDetails && Verbose && WizardMode) {
@@ -148,6 +152,7 @@ void SymbolTable::possibly_parallel_unlink(int* processed, int* removed) {
 
   size_t memory_total = 0;
 
+  BucketUnlinkContext context;
   for (;;) {
     // Grab next set of buckets to scan
     int start_idx = Atomic::add(ClaimChunkSize, &_parallel_claimed_idx) - ClaimChunkSize;
@@ -157,10 +162,15 @@ void SymbolTable::possibly_parallel_unlink(int* processed, int* removed) {
     }
 
     int end_idx = MIN2(limit, start_idx + ClaimChunkSize);
-    buckets_unlink(start_idx, end_idx, processed, removed, &memory_total);
+    buckets_unlink(start_idx, end_idx, &context, &memory_total);
   }
-  Atomic::add(*processed, &_symbols_counted);
-  Atomic::add(*removed, &_symbols_removed);
+
+  _the_table->bulk_free_entries(&context);
+  *processed = context._num_processed;
+  *removed = context._num_removed;
+
+  Atomic::add(context._num_processed, &_symbols_counted);
+  Atomic::add(context._num_removed, &_symbols_removed);
   // Exclude printing for normal PrintGCDetails because people parse
   // this output.
   if (PrintGCDetails && Verbose && WizardMode) {
@@ -214,7 +224,7 @@ Symbol* SymbolTable::lookup(int index, const char* name,
 // Pick hashing algorithm.
 unsigned int SymbolTable::hash_symbol(const char* s, int len) {
   return use_alternate_hashcode() ?
-           AltHashing::murmur3_32(seed(), (const jbyte*)s, len) :
+           AltHashing::halfsiphash_32(seed(), (const uint8_t*)s, len) :
            java_lang_String::hash_code(s, len);
 }
 
@@ -239,7 +249,7 @@ Symbol* SymbolTable::lookup(const char* name, int len, TRAPS) {
   MutexLocker ml(SymbolTable_lock, THREAD);
 
   // Otherwise, add to symbol to table
-  return the_table()->basic_add(index, (u1*)name, len, hashValue, true, CHECK_NULL);
+  return the_table()->basic_add(index, (u1*)name, len, hashValue, true, THREAD);
 }
 
 Symbol* SymbolTable::lookup(const Symbol* sym, int begin, int end, TRAPS) {
@@ -278,7 +288,7 @@ Symbol* SymbolTable::lookup(const Symbol* sym, int begin, int end, TRAPS) {
   // Grab SymbolTable_lock first.
   MutexLocker ml(SymbolTable_lock, THREAD);
 
-  return the_table()->basic_add(index, (u1*)buffer, len, hashValue, true, CHECK_NULL);
+  return the_table()->basic_add(index, (u1*)buffer, len, hashValue, true, THREAD);
 }
 
 Symbol* SymbolTable::lookup_only(const char* name, int len,
@@ -640,7 +650,7 @@ volatile int StringTable::_parallel_claimed_idx = 0;
 
 // Pick hashing algorithm
 unsigned int StringTable::hash_string(const jchar* s, int len) {
-  return use_alternate_hashcode() ? AltHashing::murmur3_32(seed(), s, len) :
+  return use_alternate_hashcode() ? AltHashing::halfsiphash_32(seed(), s, len) :
                                     java_lang_String::hash_code(s, len);
 }
 
@@ -811,7 +821,11 @@ oop StringTable::intern(const char* utf8_string, TRAPS) {
 }
 
 void StringTable::unlink_or_oops_do(BoolObjectClosure* is_alive, OopClosure* f, int* processed, int* removed) {
-  buckets_unlink_or_oops_do(is_alive, f, 0, the_table()->table_size(), processed, removed);
+  BucketUnlinkContext context;
+  buckets_unlink_or_oops_do(is_alive, f, 0, the_table()->table_size(), &context);
+  _the_table->bulk_free_entries(&context);
+  *processed = context._num_processed;
+  *removed = context._num_removed;
 }
 
 void StringTable::possibly_parallel_unlink_or_oops_do(BoolObjectClosure* is_alive, OopClosure* f, int* processed, int* removed) {
@@ -820,6 +834,7 @@ void StringTable::possibly_parallel_unlink_or_oops_do(BoolObjectClosure* is_aliv
   assert(SafepointSynchronize::is_at_safepoint(), "must be at safepoint");
   const int limit = the_table()->table_size();
 
+  BucketUnlinkContext context;
   for (;;) {
     // Grab next set of buckets to scan
     int start_idx = Atomic::add(ClaimChunkSize, &_parallel_claimed_idx) - ClaimChunkSize;
@@ -829,8 +844,11 @@ void StringTable::possibly_parallel_unlink_or_oops_do(BoolObjectClosure* is_aliv
     }
 
     int end_idx = MIN2(limit, start_idx + ClaimChunkSize);
-    buckets_unlink_or_oops_do(is_alive, f, start_idx, end_idx, processed, removed);
+    buckets_unlink_or_oops_do(is_alive, f, start_idx, end_idx, &context);
   }
+  _the_table->bulk_free_entries(&context);
+  *processed = context._num_processed;
+  *removed = context._num_removed;
 }
 
 void StringTable::buckets_oops_do(OopClosure* f, int start_idx, int end_idx) {
@@ -856,7 +874,7 @@ void StringTable::buckets_oops_do(OopClosure* f, int start_idx, int end_idx) {
   }
 }
 
-void StringTable::buckets_unlink_or_oops_do(BoolObjectClosure* is_alive, OopClosure* f, int start_idx, int end_idx, int* processed, int* removed) {
+void StringTable::buckets_unlink_or_oops_do(BoolObjectClosure* is_alive, OopClosure* f, int start_idx, int end_idx, BucketUnlinkContext* context) {
   const int limit = the_table()->table_size();
 
   assert(0 <= start_idx && start_idx <= limit,
@@ -880,10 +898,9 @@ void StringTable::buckets_unlink_or_oops_do(BoolObjectClosure* is_alive, OopClos
         p = entry->next_addr();
       } else {
         *p = entry->next();
-        the_table()->free_entry(entry);
-        (*removed)++;
+        context->free_entry(entry);
       }
-      (*processed)++;
+      context->_num_processed++;
       entry = *p;
     }
   }

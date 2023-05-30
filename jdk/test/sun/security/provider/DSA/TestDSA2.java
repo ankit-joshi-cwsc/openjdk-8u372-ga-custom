@@ -25,6 +25,7 @@
  * @bug 7044060
  * @run main/othervm/timeout=250 TestDSA2
  * @summary verify that DSA signature works using SHA and SHA-224 and SHA-256 digests.
+ * @key randomness
  */
 
 
@@ -50,7 +51,7 @@ public class TestDSA2 {
     public static void main(String[] args) throws Exception {
         boolean[] expectedToPass = { true, true, true };
         test(1024, expectedToPass);
-        boolean[] expectedToPass2 = { true, true, true };
+        boolean[] expectedToPass2 = { false, true, true };
         test(2048, expectedToPass2);
     }
 

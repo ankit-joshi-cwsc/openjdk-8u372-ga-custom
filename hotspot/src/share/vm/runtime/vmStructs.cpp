@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2000, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -107,6 +107,9 @@
 #ifdef TARGET_ARCH_x86
 # include "vmStructs_x86.hpp"
 #endif
+#ifdef TARGET_ARCH_aarch64
+# include "vmStructs_aarch64.hpp"
+#endif
 #ifdef TARGET_ARCH_sparc
 # include "vmStructs_sparc.hpp"
 #endif
@@ -121,6 +124,9 @@
 #endif
 #ifdef TARGET_OS_ARCH_linux_x86
 # include "vmStructs_linux_x86.hpp"
+#endif
+#ifdef TARGET_OS_ARCH_linux_aarch64
+# include "vmStructs_linux_aarch64.hpp"
 #endif
 #ifdef TARGET_OS_ARCH_linux_sparc
 # include "vmStructs_linux_sparc.hpp"
@@ -169,10 +175,6 @@
 #include "gc_implementation/g1/vmStructs_g1.hpp"
 #endif // INCLUDE_ALL_GCS
 
-#if INCLUDE_TRACE
- #include "runtime/vmStructs_trace.hpp"
-#endif
-
 #ifdef COMPILER2
 #include "opto/addnode.hpp"
 #include "opto/block.hpp"
@@ -198,6 +200,8 @@
 # include "adfiles/adGlobals_x86_32.hpp"
 #elif defined TARGET_ARCH_MODEL_x86_64
 # include "adfiles/adGlobals_x86_64.hpp"
+#elif defined TARGET_ARCH_MODEL_aarch64
+# include "adfiles/adGlobals_aarch64.hpp"
 #elif defined TARGET_ARCH_MODEL_sparc
 # include "adfiles/adGlobals_sparc.hpp"
 #elif defined TARGET_ARCH_MODEL_zero
@@ -257,6 +261,7 @@ typedef TwoOopHashtable<Symbol*, mtClass>     SymbolTwoOopHashtable;
 
 #define VM_STRUCTS(nonstatic_field, \
                    static_field, \
+                   static_ptr_volatile_field, \
                    unchecked_nonstatic_field, \
                    volatile_nonstatic_field, \
                    nonproduct_nonstatic_field, \
@@ -278,7 +283,7 @@ typedef TwoOopHashtable<Symbol*, mtClass>     SymbolTwoOopHashtable;
   volatile_nonstatic_field(ArrayKlass,         _lower_dimension,                              Klass*)                                \
   nonstatic_field(ArrayKlass,                  _vtable_len,                                   int)                                   \
   nonstatic_field(ArrayKlass,                  _component_mirror,                             oop)                                   \
-  nonstatic_field(CompiledICHolder,     _holder_method,                                Method*)                               \
+  nonstatic_field(CompiledICHolder,     _holder_metadata,                              Metadata*)                             \
   nonstatic_field(CompiledICHolder,     _holder_klass,                                 Klass*)                                \
   nonstatic_field(ConstantPool,         _tags,                                         Array<u1>*)                            \
   nonstatic_field(ConstantPool,         _cache,                                        ConstantPoolCache*)                    \
@@ -668,7 +673,6 @@ typedef TwoOopHashtable<Symbol*, mtClass>     SymbolTwoOopHashtable;
       static_field(SystemDictionary,            WK_KLASS(WeakReference_klass),                 Klass*)                               \
       static_field(SystemDictionary,            WK_KLASS(FinalReference_klass),                Klass*)                               \
       static_field(SystemDictionary,            WK_KLASS(PhantomReference_klass),              Klass*)                               \
-      static_field(SystemDictionary,            WK_KLASS(Cleaner_klass),                       Klass*)                               \
       static_field(SystemDictionary,            WK_KLASS(Finalizer_klass),                     Klass*)                               \
       static_field(SystemDictionary,            WK_KLASS(Thread_klass),                        Klass*)                               \
       static_field(SystemDictionary,            WK_KLASS(ThreadGroup_klass),                   Klass*)                               \
@@ -704,7 +708,7 @@ typedef TwoOopHashtable<Symbol*, mtClass>     SymbolTwoOopHashtable;
                                                                                                                                      \
   nonstatic_field(BasicHashtable<mtInternal>, _table_size,                                   int)                                   \
   nonstatic_field(BasicHashtable<mtInternal>, _buckets,                                      HashtableBucket<mtInternal>*)          \
-  nonstatic_field(BasicHashtable<mtInternal>, _free_list,                                    BasicHashtableEntry<mtInternal>*)      \
+  volatile_nonstatic_field(BasicHashtable<mtInternal>,  _free_list,                          BasicHashtableEntry<mtInternal>*)      \
   nonstatic_field(BasicHashtable<mtInternal>, _first_free_entry,                             char*)                                 \
   nonstatic_field(BasicHashtable<mtInternal>, _end_block,                                    char*)                                 \
   nonstatic_field(BasicHashtable<mtInternal>, _entry_size,                                   int)                                   \
@@ -810,9 +814,12 @@ typedef TwoOopHashtable<Symbol*, mtClass>     SymbolTwoOopHashtable;
      static_field(StubRoutines,                _aescrypt_decryptBlock,                        address)                               \
      static_field(StubRoutines,                _cipherBlockChaining_encryptAESCrypt,          address)                               \
      static_field(StubRoutines,                _cipherBlockChaining_decryptAESCrypt,          address)                               \
+     static_field(StubRoutines,                _ghash_processBlocks,                          address)                               \
      static_field(StubRoutines,                _updateBytesCRC32,                             address)                               \
      static_field(StubRoutines,                _crc_table_adr,                                address)                               \
      static_field(StubRoutines,                _multiplyToLen,                                address)                               \
+     static_field(StubRoutines,                _squareToLen,                                  address)                               \
+     static_field(StubRoutines,                _mulAdd,                                       address)                               \
                                                                                                                                      \
   /*****************/                                                                                                                \
   /* SharedRuntime */                                                                                                                \
@@ -877,7 +884,7 @@ typedef TwoOopHashtable<Symbol*, mtClass>     SymbolTwoOopHashtable;
   nonstatic_field(nmethod,             _stack_traversal_mark,                         long)                                  \
   nonstatic_field(nmethod,             _compile_id,                                   int)                                   \
   nonstatic_field(nmethod,             _comp_level,                                   int)                                   \
-  nonstatic_field(nmethod,             _exception_cache,                              ExceptionCache*)                       \
+  volatile_nonstatic_field(nmethod,    _exception_cache,                              ExceptionCache*)                       \
   nonstatic_field(nmethod,             _marked_for_deoptimization,                    bool)                                  \
                                                                                                                              \
   unchecked_c2_static_field(Deoptimization,         _trap_reason_name,                   void*)                              \
@@ -1079,7 +1086,7 @@ typedef TwoOopHashtable<Symbol*, mtClass>     SymbolTwoOopHashtable;
   volatile_nonstatic_field(BasicLock,          _displaced_header,                             markOop)                               \
   nonstatic_field(BasicObjectLock,             _lock,                                         BasicLock)                             \
   nonstatic_field(BasicObjectLock,             _obj,                                          oop)                                   \
-  static_field(ObjectSynchronizer,             gBlockList,                                    ObjectMonitor*)                        \
+  static_ptr_volatile_field(ObjectSynchronizer,gBlockList,                                    ObjectMonitor*)                        \
                                                                                                                                      \
   /*********************/                                                                                                            \
   /* Matcher (C2 only) */                                                                                                            \
@@ -1940,6 +1947,7 @@ typedef TwoOopHashtable<Symbol*, mtClass>     SymbolTwoOopHashtable;
   declare_c2_type(CmpPNode, CmpNode)                                      \
   declare_c2_type(CmpNNode, CmpNode)                                      \
   declare_c2_type(CmpLNode, CmpNode)                                      \
+  declare_c2_type(CmpULNode, CmpNode)                                     \
   declare_c2_type(CmpL3Node, CmpLNode)                                    \
   declare_c2_type(CmpFNode, CmpNode)                                      \
   declare_c2_type(CmpF3Node, CmpFNode)                                    \
@@ -2663,6 +2671,11 @@ typedef TwoOopHashtable<Symbol*, mtClass>     SymbolTwoOopHashtable;
 #define GENERATE_STATIC_VM_STRUCT_ENTRY(typeName, fieldName, type)                 \
  { QUOTE(typeName), QUOTE(fieldName), QUOTE(type), 1, 0, &typeName::fieldName },
 
+// This macro generates a VMStructEntry line for a static pointer volatile field,
+// e.g.: "static ObjectMonitor * volatile gBlockList;"
+#define GENERATE_STATIC_PTR_VOLATILE_VM_STRUCT_ENTRY(typeName, fieldName, type)    \
+ { QUOTE(typeName), QUOTE(fieldName), QUOTE(type), 1, 0, (void*)&typeName::fieldName },
+
 // This macro generates a VMStructEntry line for an unchecked
 // nonstatic field, in which the size of the type is also specified.
 // The type string is given as NULL, indicating an "opaque" type.
@@ -2688,9 +2701,14 @@ typedef TwoOopHashtable<Symbol*, mtClass>     SymbolTwoOopHashtable;
 #define CHECK_VOLATILE_NONSTATIC_VM_STRUCT_ENTRY(typeName, fieldName, type)        \
  {typedef type dummyvtype; typeName *dummyObj = NULL; volatile dummyvtype* dummy = &dummyObj->fieldName; }
 
-// This macro checks the type of a VMStructEntry by comparing pointer types
+// This macro checks the type of a static VMStructEntry by comparing pointer types
 #define CHECK_STATIC_VM_STRUCT_ENTRY(typeName, fieldName, type)                    \
  {type* dummy = &typeName::fieldName; }
+
+// This macro checks the type of a static pointer volatile VMStructEntry by comparing pointer types,
+// e.g.: "static ObjectMonitor * volatile gBlockList;"
+#define CHECK_STATIC_PTR_VOLATILE_VM_STRUCT_ENTRY(typeName, fieldName, type)       \
+ {type volatile * dummy = &typeName::fieldName; }
 
 // This macro ensures the type of a field and its containing type are
 // present in the type table. The assertion string is shorter than
@@ -2885,6 +2903,7 @@ VMStructEntry VMStructs::localHotSpotVMStructs[] = {
 
   VM_STRUCTS(GENERATE_NONSTATIC_VM_STRUCT_ENTRY,
              GENERATE_STATIC_VM_STRUCT_ENTRY,
+             GENERATE_STATIC_PTR_VOLATILE_VM_STRUCT_ENTRY,
              GENERATE_UNCHECKED_NONSTATIC_VM_STRUCT_ENTRY,
              GENERATE_NONSTATIC_VM_STRUCT_ENTRY,
              GENERATE_NONPRODUCT_NONSTATIC_VM_STRUCT_ENTRY,
@@ -2904,11 +2923,6 @@ VMStructEntry VMStructs::localHotSpotVMStructs[] = {
   VM_STRUCTS_G1(GENERATE_NONSTATIC_VM_STRUCT_ENTRY,
                 GENERATE_STATIC_VM_STRUCT_ENTRY)
 #endif // INCLUDE_ALL_GCS
-
-#if INCLUDE_TRACE
-  VM_STRUCTS_TRACE(GENERATE_NONSTATIC_VM_STRUCT_ENTRY,
-                GENERATE_STATIC_VM_STRUCT_ENTRY)
-#endif
 
   VM_STRUCTS_CPU(GENERATE_NONSTATIC_VM_STRUCT_ENTRY,
                  GENERATE_STATIC_VM_STRUCT_ENTRY,
@@ -2955,11 +2969,6 @@ VMTypeEntry VMStructs::localHotSpotVMTypes[] = {
               GENERATE_TOPLEVEL_VM_TYPE_ENTRY)
 #endif // INCLUDE_ALL_GCS
 
-#if INCLUDE_TRACE
-  VM_TYPES_TRACE(GENERATE_VM_TYPE_ENTRY,
-              GENERATE_TOPLEVEL_VM_TYPE_ENTRY)
-#endif
-
   VM_TYPES_CPU(GENERATE_VM_TYPE_ENTRY,
                GENERATE_TOPLEVEL_VM_TYPE_ENTRY,
                GENERATE_OOP_VM_TYPE_ENTRY,
@@ -2994,10 +3003,6 @@ VMIntConstantEntry VMStructs::localHotSpotVMIntConstants[] = {
 
   VM_INT_CONSTANTS_PARNEW(GENERATE_VM_INT_CONSTANT_ENTRY)
 #endif // INCLUDE_ALL_GCS
-
-#if INCLUDE_TRACE
-  VM_INT_CONSTANTS_TRACE(GENERATE_VM_INT_CONSTANT_ENTRY)
-#endif
 
   VM_INT_CONSTANTS_CPU(GENERATE_VM_INT_CONSTANT_ENTRY,
                        GENERATE_PREPROCESSOR_VM_INT_CONSTANT_ENTRY,
@@ -3043,6 +3048,7 @@ void
 VMStructs::init() {
   VM_STRUCTS(CHECK_NONSTATIC_VM_STRUCT_ENTRY,
              CHECK_STATIC_VM_STRUCT_ENTRY,
+             CHECK_STATIC_PTR_VOLATILE_VM_STRUCT_ENTRY,
              CHECK_NO_OP,
              CHECK_VOLATILE_NONSTATIC_VM_STRUCT_ENTRY,
              CHECK_NONPRODUCT_NONSTATIC_VM_STRUCT_ENTRY,
@@ -3063,11 +3069,6 @@ VMStructs::init() {
                 CHECK_STATIC_VM_STRUCT_ENTRY);
 
 #endif // INCLUDE_ALL_GCS
-
-#if INCLUDE_TRACE
-  VM_STRUCTS_TRACE(CHECK_NONSTATIC_VM_STRUCT_ENTRY,
-                CHECK_STATIC_VM_STRUCT_ENTRY);
-#endif
 
   VM_STRUCTS_CPU(CHECK_NONSTATIC_VM_STRUCT_ENTRY,
                  CHECK_STATIC_VM_STRUCT_ENTRY,
@@ -3109,11 +3110,6 @@ VMStructs::init() {
               CHECK_SINGLE_ARG_VM_TYPE_NO_OP);
 
 #endif // INCLUDE_ALL_GCS
-
-#if INCLUDE_TRACE
-  VM_TYPES_TRACE(CHECK_VM_TYPE_ENTRY,
-              CHECK_SINGLE_ARG_VM_TYPE_NO_OP);
-#endif
 
   VM_TYPES_CPU(CHECK_VM_TYPE_ENTRY,
                CHECK_SINGLE_ARG_VM_TYPE_NO_OP,
@@ -3158,8 +3154,10 @@ VMStructs::init() {
                         CHECK_NO_OP,
                         CHECK_NO_OP,
                         CHECK_NO_OP,
+                        CHECK_NO_OP,
                         CHECK_NO_OP));
   debug_only(VM_STRUCTS(CHECK_NO_OP,
+                        ENSURE_FIELD_TYPE_PRESENT,
                         ENSURE_FIELD_TYPE_PRESENT,
                         CHECK_NO_OP,
                         ENSURE_FIELD_TYPE_PRESENT,
@@ -3177,11 +3175,6 @@ VMStructs::init() {
   debug_only(VM_STRUCTS_G1(ENSURE_FIELD_TYPE_PRESENT,
                            ENSURE_FIELD_TYPE_PRESENT));
 #endif // INCLUDE_ALL_GCS
-
-#if INCLUDE_TRACE
-  debug_only(VM_STRUCTS_TRACE(ENSURE_FIELD_TYPE_PRESENT,
-                           ENSURE_FIELD_TYPE_PRESENT));
-#endif
 
   debug_only(VM_STRUCTS_CPU(ENSURE_FIELD_TYPE_PRESENT,
                             ENSURE_FIELD_TYPE_PRESENT,

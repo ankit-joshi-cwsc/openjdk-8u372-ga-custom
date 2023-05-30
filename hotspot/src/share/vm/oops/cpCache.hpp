@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -77,18 +77,19 @@ class PSPromotionManager;
 // f2 flag true if f2 contains an oop (e.g., virtual final method)
 // fv flag true if invokeinterface used for method in class Object
 //
-// The flags 31, 30, 29, 28 together build a 4 bit number 0 to 8 with the
+// The flags 31, 30, 29, 28 together build a 4 bit number 0 to 16 with the
 // following mapping to the TosState states:
 //
 // btos: 0
-// ctos: 1
-// stos: 2
-// itos: 3
-// ltos: 4
-// ftos: 5
-// dtos: 6
-// atos: 7
-// vtos: 8
+// ztos: 1
+// ctos: 2
+// stos: 3
+// itos: 4
+// ltos: 5
+// ftos: 6
+// dtos: 7
+// atos: 8
+// vtos: 9
 //
 // Entry specific: field entries:
 // _indices = get (b1 section) and put (b2 section) bytecodes, original constant pool index
@@ -228,13 +229,15 @@ class ConstantPoolCacheEntry VALUE_OBJ_CLASS_SPEC {
   void set_direct_or_vtable_call(
     Bytecodes::Code invoke_code,                 // the bytecode used for invoking the method
     methodHandle    method,                      // the method/prototype if any (NULL, otherwise)
-    int             vtable_index                 // the vtable index if any, else negative
+    int             vtable_index,                // the vtable index if any, else negative
+    bool            sender_is_interface
   );
 
  public:
   void set_direct_call(                          // sets entry to exact concrete method entry
     Bytecodes::Code invoke_code,                 // the bytecode used for invoking the method
-    methodHandle    method                       // the method to call
+    methodHandle    method,                      // the method to call
+    bool            sender_is_interface
   );
 
   void set_vtable_call(                          // sets entry to vtable index
@@ -245,6 +248,7 @@ class ConstantPoolCacheEntry VALUE_OBJ_CLASS_SPEC {
 
   void set_itable_call(
     Bytecodes::Code invoke_code,                 // the bytecode used; must be invokeinterface
+    KlassHandle referenced_klass,                // the referenced klass in the InterfaceMethodref
     methodHandle method,                         // the resolved interface method
     int itable_index                             // index into itable for the method
   );
@@ -341,6 +345,7 @@ class ConstantPoolCacheEntry VALUE_OBJ_CLASS_SPEC {
   bool      is_f1_null() const                   { Metadata* f1 = f1_ord(); return f1 == NULL; }  // classifies a CPC entry as unbound
   int       f2_as_index() const                  { assert(!is_vfinal(), ""); return (int) _f2; }
   Method*   f2_as_vfinal_method() const          { assert(is_vfinal(), ""); return (Method*)_f2; }
+  Method*   f2_as_interface_method() const       { assert(bytecode_1() == Bytecodes::_invokeinterface, ""); return (Method*)_f2; }
   int  field_index() const                       { assert(is_field_entry(),  ""); return (_flags & field_index_mask); }
   int  parameter_size() const                    { assert(is_method_entry(), ""); return (_flags & parameter_size_mask); }
   bool is_volatile() const                       { return (_flags & (1 << is_volatile_shift))       != 0; }
@@ -351,14 +356,8 @@ class ConstantPoolCacheEntry VALUE_OBJ_CLASS_SPEC {
   bool has_method_type() const                   { return (!is_f1_null()) && (_flags & (1 << has_method_type_shift))   != 0; }
   bool is_method_entry() const                   { return (_flags & (1 << is_field_entry_shift))    == 0; }
   bool is_field_entry() const                    { return (_flags & (1 << is_field_entry_shift))    != 0; }
-  bool is_byte() const                           { return flag_state() == btos; }
-  bool is_char() const                           { return flag_state() == ctos; }
-  bool is_short() const                          { return flag_state() == stos; }
-  bool is_int() const                            { return flag_state() == itos; }
   bool is_long() const                           { return flag_state() == ltos; }
-  bool is_float() const                          { return flag_state() == ftos; }
   bool is_double() const                         { return flag_state() == dtos; }
-  bool is_object() const                         { return flag_state() == atos; }
   TosState flag_state() const                    { assert((uint)number_of_states <= (uint)tos_state_mask+1, "");
                                                    return (TosState)((_flags >> tos_state_shift) & tos_state_mask); }
 
@@ -377,7 +376,7 @@ class ConstantPoolCacheEntry VALUE_OBJ_CLASS_SPEC {
   // trace_name_printed is set to true if the current call has
   // printed the klass name so that other routines in the adjust_*
   // group don't print the klass name.
-  bool adjust_method_entry(Method* old_method, Method* new_method,
+  void adjust_method_entry(Method* old_method, Method* new_method,
          bool* trace_name_printed);
   bool check_no_old_or_obsolete_entries();
   Method* get_interesting_method_entry(Klass* k);

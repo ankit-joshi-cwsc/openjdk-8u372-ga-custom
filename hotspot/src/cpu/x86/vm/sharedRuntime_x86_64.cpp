@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -23,6 +23,9 @@
  */
 
 #include "precompiled.hpp"
+#ifndef _WINDOWS
+#include "alloca.h"
+#endif
 #include "asm/macroAssembler.hpp"
 #include "asm/macroAssembler.inline.hpp"
 #include "code/debugInfoRec.hpp"
@@ -866,7 +869,7 @@ AdapterHandlerEntry* SharedRuntime::generate_i2c2i_adapters(MacroAssembler *masm
   {
     __ load_klass(temp, receiver);
     __ cmpptr(temp, Address(holder, CompiledICHolder::holder_klass_offset()));
-    __ movptr(rbx, Address(holder, CompiledICHolder::holder_method_offset()));
+    __ movptr(rbx, Address(holder, CompiledICHolder::holder_metadata_offset()));
     __ jcc(Assembler::equal, ok);
     __ jump(RuntimeAddress(SharedRuntime::get_ic_miss_stub()));
 
@@ -1385,7 +1388,7 @@ static void check_needs_gc_for_critical_native(MacroAssembler* masm,
   __ mov(rsp, r12); // restore sp
   __ reinit_heapbase();
 
-  __ reset_last_Java_frame(false, true);
+  __ reset_last_Java_frame(false);
 
   save_or_restore_arguments(masm, stack_slots, total_in_args,
                             arg_save_area, NULL, in_regs, in_sig_bt);
@@ -2095,7 +2098,7 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
   // critical natives they are offset down.
   GrowableArray<int> arg_order(2 * total_in_args);
   VMRegPair tmp_vmreg;
-  tmp_vmreg.set1(rbx->as_VMReg());
+  tmp_vmreg.set2(rbx->as_VMReg());
 
   if (!is_critical_native) {
     for (int i = total_in_args - 1, c_arg = total_c_args - 1; i >= 0; i--, c_arg--) {
@@ -2494,16 +2497,13 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
     restore_native_result(masm, ret_type, stack_slots);
   }
 
-  __ reset_last_Java_frame(false, true);
+  __ reset_last_Java_frame(false);
 
-  // Unpack oop result
+  // Unbox oop result, e.g. JNIHandles::resolve value.
   if (ret_type == T_OBJECT || ret_type == T_ARRAY) {
-      Label L;
-      __ testptr(rax, rax);
-      __ jcc(Assembler::zero, L);
-      __ movptr(rax, Address(rax, 0));
-      __ bind(L);
-      __ verify_oop(rax);
+    __ resolve_jobject(rax /* value */,
+                       r15_thread /* thread */,
+                       rcx /* tmp */);
   }
 
   if (!is_critical_native) {
@@ -3432,7 +3432,7 @@ void SharedRuntime::generate_deopt_blob() {
   // find any register it might need.
   oop_maps->add_gc_map(__ pc() - start, map);
 
-  __ reset_last_Java_frame(false, false);
+  __ reset_last_Java_frame(false);
 
   // Load UnrollBlock* into rdi
   __ mov(rdi, rax);
@@ -3589,7 +3589,7 @@ void SharedRuntime::generate_deopt_blob() {
                        new OopMap( frame_size_in_words, 0 ));
 
   // Clear fp AND pc
-  __ reset_last_Java_frame(true, true);
+  __ reset_last_Java_frame(true);
 
   // Collect return values
   __ movdbl(xmm0, Address(rsp, RegisterSaver::xmm0_offset_in_bytes()));
@@ -3659,7 +3659,7 @@ void SharedRuntime::generate_uncommon_trap_blob() {
 
   oop_maps->add_gc_map(__ pc() - start, map);
 
-  __ reset_last_Java_frame(false, false);
+  __ reset_last_Java_frame(false);
 
   // Load UnrollBlock* into rdi
   __ mov(rdi, rax);
@@ -3772,7 +3772,7 @@ void SharedRuntime::generate_uncommon_trap_blob() {
   oop_maps->add_gc_map(the_pc - start, new OopMap(SimpleRuntimeFrame::framesize, 0));
 
   // Clear fp AND pc
-  __ reset_last_Java_frame(true, true);
+  __ reset_last_Java_frame(true);
 
   // Pop self-frame.
   __ leave();                 // Epilog
@@ -3855,7 +3855,7 @@ SafepointBlob* SharedRuntime::generate_handler_blob(address call_ptr, int poll_t
 
   Label noException;
 
-  __ reset_last_Java_frame(false, false);
+  __ reset_last_Java_frame(false);
 
   __ cmpptr(Address(r15_thread, Thread::pending_exception_offset()), (int32_t)NULL_WORD);
   __ jcc(Assembler::equal, noException);
@@ -3925,7 +3925,7 @@ RuntimeStub* SharedRuntime::generate_resolve_blob(address destination, const cha
   // rax contains the address we are going to jump to assuming no exception got installed
 
   // clear last_Java_sp
-  __ reset_last_Java_frame(false, false);
+  __ reset_last_Java_frame(false);
   // check for pending exceptions
   Label pending;
   __ cmpptr(Address(r15_thread, Thread::pending_exception_offset()), (int32_t)NULL_WORD);
@@ -3965,6 +3965,256 @@ RuntimeStub* SharedRuntime::generate_resolve_blob(address destination, const cha
   return RuntimeStub::new_runtime_stub(name, &buffer, frame_complete, frame_size_in_words, oop_maps, true);
 }
 
+
+//------------------------------Montgomery multiplication------------------------
+//
+
+#ifndef _WINDOWS
+
+#define ASM_SUBTRACT
+
+#ifdef ASM_SUBTRACT
+// Subtract 0:b from carry:a.  Return carry.
+static unsigned long
+sub(unsigned long a[], unsigned long b[], unsigned long carry, long len) {
+  long i = 0, cnt = len;
+  unsigned long tmp;
+  asm volatile("clc; "
+               "0: ; "
+               "mov (%[b], %[i], 8), %[tmp]; "
+               "sbb %[tmp], (%[a], %[i], 8); "
+               "inc %[i]; dec %[cnt]; "
+               "jne 0b; "
+               "mov %[carry], %[tmp]; sbb $0, %[tmp]; "
+               : [i]"+r"(i), [cnt]"+r"(cnt), [tmp]"=&r"(tmp)
+               : [a]"r"(a), [b]"r"(b), [carry]"r"(carry)
+               : "memory");
+  return tmp;
+}
+#else // ASM_SUBTRACT
+typedef int __attribute__((mode(TI))) int128;
+
+// Subtract 0:b from carry:a.  Return carry.
+static unsigned long
+sub(unsigned long a[], unsigned long b[], unsigned long carry, int len) {
+  int128 tmp = 0;
+  int i;
+  for (i = 0; i < len; i++) {
+    tmp += a[i];
+    tmp -= b[i];
+    a[i] = tmp;
+    tmp >>= 64;
+    assert(-1 <= tmp && tmp <= 0, "invariant");
+  }
+  return tmp + carry;
+}
+#endif // ! ASM_SUBTRACT
+
+// Multiply (unsigned) Long A by Long B, accumulating the double-
+// length result into the accumulator formed of T0, T1, and T2.
+#define MACC(A, B, T0, T1, T2)                                      \
+do {                                                                \
+  unsigned long hi, lo;                                             \
+  asm volatile("mul %5; add %%rax, %2; adc %%rdx, %3; adc $0, %4"   \
+           : "=&d"(hi), "=a"(lo), "+r"(T0), "+r"(T1), "+g"(T2)      \
+           : "r"(A), "a"(B) : "cc");                                \
+ } while(0)
+
+// As above, but add twice the double-length result into the
+// accumulator.
+#define MACC2(A, B, T0, T1, T2)                                     \
+do {                                                                \
+  unsigned long hi, lo;                                             \
+  asm volatile("mul %5; add %%rax, %2; adc %%rdx, %3; adc $0, %4;"  \
+           "add %%rax, %2; adc %%rdx, %3; adc $0, %4"               \
+           : "=&d"(hi), "=a"(lo), "+r"(T0), "+r"(T1), "+g"(T2)      \
+           : "r"(A), "a"(B) : "cc");                                \
+ } while(0)
+
+// Fast Montgomery multiplication.  The derivation of the algorithm is
+// in  A Cryptographic Library for the Motorola DSP56000,
+// Dusse and Kaliski, Proc. EUROCRYPT 90, pp. 230-237.
+
+static void __attribute__((noinline))
+montgomery_multiply(unsigned long a[], unsigned long b[], unsigned long n[],
+                    unsigned long m[], unsigned long inv, int len) {
+  unsigned long t0 = 0, t1 = 0, t2 = 0; // Triple-precision accumulator
+  int i;
+
+  assert(inv * n[0] == -1UL, "broken inverse in Montgomery multiply");
+
+  for (i = 0; i < len; i++) {
+    int j;
+    for (j = 0; j < i; j++) {
+      MACC(a[j], b[i-j], t0, t1, t2);
+      MACC(m[j], n[i-j], t0, t1, t2);
+    }
+    MACC(a[i], b[0], t0, t1, t2);
+    m[i] = t0 * inv;
+    MACC(m[i], n[0], t0, t1, t2);
+
+    assert(t0 == 0, "broken Montgomery multiply");
+
+    t0 = t1; t1 = t2; t2 = 0;
+  }
+
+  for (i = len; i < 2*len; i++) {
+    int j;
+    for (j = i-len+1; j < len; j++) {
+      MACC(a[j], b[i-j], t0, t1, t2);
+      MACC(m[j], n[i-j], t0, t1, t2);
+    }
+    m[i-len] = t0;
+    t0 = t1; t1 = t2; t2 = 0;
+  }
+
+  while (t0)
+    t0 = sub(m, n, t0, len);
+}
+
+// Fast Montgomery squaring.  This uses asymptotically 25% fewer
+// multiplies so it should be up to 25% faster than Montgomery
+// multiplication.  However, its loop control is more complex and it
+// may actually run slower on some machines.
+
+static void __attribute__((noinline))
+montgomery_square(unsigned long a[], unsigned long n[],
+                  unsigned long m[], unsigned long inv, int len) {
+  unsigned long t0 = 0, t1 = 0, t2 = 0; // Triple-precision accumulator
+  int i;
+
+  assert(inv * n[0] == -1UL, "broken inverse in Montgomery multiply");
+
+  for (i = 0; i < len; i++) {
+    int j;
+    int end = (i+1)/2;
+    for (j = 0; j < end; j++) {
+      MACC2(a[j], a[i-j], t0, t1, t2);
+      MACC(m[j], n[i-j], t0, t1, t2);
+    }
+    if ((i & 1) == 0) {
+      MACC(a[j], a[j], t0, t1, t2);
+    }
+    for (; j < i; j++) {
+      MACC(m[j], n[i-j], t0, t1, t2);
+    }
+    m[i] = t0 * inv;
+    MACC(m[i], n[0], t0, t1, t2);
+
+    assert(t0 == 0, "broken Montgomery square");
+
+    t0 = t1; t1 = t2; t2 = 0;
+  }
+
+  for (i = len; i < 2*len; i++) {
+    int start = i-len+1;
+    int end = start + (len - start)/2;
+    int j;
+    for (j = start; j < end; j++) {
+      MACC2(a[j], a[i-j], t0, t1, t2);
+      MACC(m[j], n[i-j], t0, t1, t2);
+    }
+    if ((i & 1) == 0) {
+      MACC(a[j], a[j], t0, t1, t2);
+    }
+    for (; j < len; j++) {
+      MACC(m[j], n[i-j], t0, t1, t2);
+    }
+    m[i-len] = t0;
+    t0 = t1; t1 = t2; t2 = 0;
+  }
+
+  while (t0)
+    t0 = sub(m, n, t0, len);
+}
+
+// Swap words in a longword.
+static unsigned long swap(unsigned long x) {
+  return (x << 32) | (x >> 32);
+}
+
+// Copy len longwords from s to d, word-swapping as we go.  The
+// destination array is reversed.
+static void reverse_words(unsigned long *s, unsigned long *d, int len) {
+  d += len;
+  while(len-- > 0) {
+    d--;
+    *d = swap(*s);
+    s++;
+  }
+}
+
+// The threshold at which squaring is advantageous was determined
+// experimentally on an i7-3930K (Ivy Bridge) CPU @ 3.5GHz.
+#define MONTGOMERY_SQUARING_THRESHOLD 64
+
+void SharedRuntime::montgomery_multiply(jint *a_ints, jint *b_ints, jint *n_ints,
+                                        jint len, jlong inv,
+                                        jint *m_ints) {
+  assert(len % 2 == 0, "array length in montgomery_multiply must be even");
+  int longwords = len/2;
+
+  // Make very sure we don't use so much space that the stack might
+  // overflow.  512 jints corresponds to an 16384-bit integer and
+  // will use here a total of 8k bytes of stack space.
+  int total_allocation = longwords * sizeof (unsigned long) * 4;
+  guarantee(total_allocation <= 8192, "must be");
+  unsigned long *scratch = (unsigned long *)alloca(total_allocation);
+
+  // Local scratch arrays
+  unsigned long
+    *a = scratch + 0 * longwords,
+    *b = scratch + 1 * longwords,
+    *n = scratch + 2 * longwords,
+    *m = scratch + 3 * longwords;
+
+  reverse_words((unsigned long *)a_ints, a, longwords);
+  reverse_words((unsigned long *)b_ints, b, longwords);
+  reverse_words((unsigned long *)n_ints, n, longwords);
+
+  ::montgomery_multiply(a, b, n, m, (unsigned long)inv, longwords);
+
+  reverse_words(m, (unsigned long *)m_ints, longwords);
+}
+
+void SharedRuntime::montgomery_square(jint *a_ints, jint *n_ints,
+                                      jint len, jlong inv,
+                                      jint *m_ints) {
+  assert(len % 2 == 0, "array length in montgomery_square must be even");
+  int longwords = len/2;
+
+  // Make very sure we don't use so much space that the stack might
+  // overflow.  512 jints corresponds to an 16384-bit integer and
+  // will use here a total of 6k bytes of stack space.
+  int total_allocation = longwords * sizeof (unsigned long) * 3;
+  guarantee(total_allocation <= 8192, "must be");
+  unsigned long *scratch = (unsigned long *)alloca(total_allocation);
+
+  // Local scratch arrays
+  unsigned long
+    *a = scratch + 0 * longwords,
+    *n = scratch + 1 * longwords,
+    *m = scratch + 2 * longwords;
+
+  reverse_words((unsigned long *)a_ints, a, longwords);
+  reverse_words((unsigned long *)n_ints, n, longwords);
+
+  //montgomery_square fails to pass BigIntegerTest on solaris amd64
+  //on jdk7 and jdk8.
+#ifndef SOLARIS
+  if (len >= MONTGOMERY_SQUARING_THRESHOLD) {
+#else
+  if (0) {
+#endif
+    ::montgomery_square(a, n, m, (unsigned long)inv, longwords);
+  } else {
+    ::montgomery_multiply(a, a, n, m, (unsigned long)inv, longwords);
+  }
+
+  reverse_words(m, (unsigned long *)m_ints, longwords);
+}
+
+#endif // WINDOWS
 
 #ifdef COMPILER2
 // This is here instead of runtime_x86_64.cpp because it uses SimpleRuntimeFrame
@@ -4056,7 +4306,7 @@ void OptoRuntime::generate_exception_blob() {
 
   oop_maps->add_gc_map(the_pc - start, new OopMap(SimpleRuntimeFrame::framesize, 0));
 
-  __ reset_last_Java_frame(false, true);
+  __ reset_last_Java_frame(false);
 
   // Restore callee-saved registers
 

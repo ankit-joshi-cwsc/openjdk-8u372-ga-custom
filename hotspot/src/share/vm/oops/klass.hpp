@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,7 +32,6 @@
 #include "oops/klassPS.hpp"
 #include "oops/metadata.hpp"
 #include "oops/oop.hpp"
-#include "trace/traceMacros.hpp"
 #include "utilities/accessFlags.hpp"
 #include "utilities/macros.hpp"
 #if INCLUDE_ALL_GCS
@@ -40,6 +39,9 @@
 #include "gc_implementation/g1/g1OopClosures.hpp"
 #include "gc_implementation/parNew/parOopClosures.hpp"
 #endif // INCLUDE_ALL_GCS
+#if INCLUDE_JFR
+#include "jfr/support/jfrTraceIdExtension.hpp"
+#endif
 
 //
 // A Klass provides:
@@ -170,7 +172,7 @@ class Klass : public Metadata {
   markOop  _prototype_header;   // Used when biased locking is both enabled and disabled for this type
   jint     _biased_lock_revocation_count;
 
-  TRACE_DEFINE_KLASS_TRACE_ID;
+  JFR_ONLY(DEFINE_TRACE_ID_FIELD;)
 
   // Remembered sets support for the oops in the klasses.
   jbyte _modified_oops;             // Card Table Equivalent (YC/CMS support)
@@ -192,7 +194,10 @@ protected:
   void* operator new(size_t size, ClassLoaderData* loader_data, size_t word_size, TRAPS) throw();
 
  public:
-  enum MethodLookupMode { normal, skip_overpass, skip_defaults };
+  enum DefaultsLookupMode { find_defaults, skip_defaults };
+  enum OverpassLookupMode { find_overpass, skip_overpass };
+  enum StaticLookupMode   { find_static,   skip_static };
+  enum PrivateLookupMode  { find_private,  skip_private };
 
   bool is_klass() const volatile { return true; }
 
@@ -332,9 +337,10 @@ protected:
     _lh_header_size_mask        = right_n_bits(BitsPerByte),  // shifted mask
     _lh_array_tag_bits          = 2,
     _lh_array_tag_shift         = BitsPerInt - _lh_array_tag_bits,
-    _lh_array_tag_type_value    = ~0x00,  // 0xC0000000 >> 30
     _lh_array_tag_obj_value     = ~0x01   // 0x80000000 >> 30
   };
+
+  static const unsigned int _lh_array_tag_type_value = 0Xffffffff; // ~0x00,  // 0xC0000000 >> 30
 
   static int layout_helper_size_in_bytes(jint lh) {
     assert(lh > (jint)_lh_neutral_value, "must be instance");
@@ -370,6 +376,21 @@ protected:
     assert(btvalue >= T_BOOLEAN && btvalue <= T_OBJECT, "sanity");
     return (BasicType) btvalue;
   }
+
+  // Want a pattern to quickly diff against layout header in register
+  // find something less clever!
+  static int layout_helper_boolean_diffbit() {
+    jint zlh = array_layout_helper(T_BOOLEAN);
+    jint blh = array_layout_helper(T_BYTE);
+    assert(zlh != blh, "array layout helpers must differ");
+    int diffbit = 1;
+    while ((diffbit & (zlh ^ blh)) == 0 && (diffbit & zlh) == 0) {
+      diffbit <<= 1;
+      assert(diffbit != 0, "make sure T_BOOLEAN has a different bit than T_BYTE");
+    }
+    return diffbit;
+  }
+
   static int layout_helper_log2_element_size(jint lh) {
     assert(lh < (jint)_lh_neutral_value, "must be array");
     int l2esz = (lh >> _lh_log2_element_size_shift) & _lh_log2_element_size_mask;
@@ -443,10 +464,10 @@ protected:
   // lookup operation for MethodLookupCache
   friend class MethodLookupCache;
   virtual Klass* find_field(Symbol* name, Symbol* signature, fieldDescriptor* fd) const;
-  virtual Method* uncached_lookup_method(Symbol* name, Symbol* signature, MethodLookupMode mode) const;
+  virtual Method* uncached_lookup_method(Symbol* name, Symbol* signature, OverpassLookupMode overpass_mode) const;
  public:
   Method* lookup_method(Symbol* name, Symbol* signature) const {
-    return uncached_lookup_method(name, signature, normal);
+    return uncached_lookup_method(name, signature, find_overpass);
   }
 
   // array class with specific rank
@@ -564,8 +585,8 @@ protected:
   bool has_final_method() const         { return _access_flags.has_final_method(); }
   void set_has_finalizer()              { _access_flags.set_has_finalizer(); }
   void set_has_final_method()           { _access_flags.set_has_final_method(); }
-  bool is_cloneable() const             { return _access_flags.is_cloneable(); }
-  void set_is_cloneable()               { _access_flags.set_is_cloneable(); }
+  bool is_cloneable() const;
+  void set_is_cloneable();
   bool has_vanilla_constructor() const  { return _access_flags.has_vanilla_constructor(); }
   void set_has_vanilla_constructor()    { _access_flags.set_has_vanilla_constructor(); }
   bool has_miranda_methods () const     { return access_flags().has_miranda_methods(); }
@@ -594,7 +615,7 @@ protected:
   jlong last_biased_lock_bulk_revocation_time() { return _last_biased_lock_bulk_revocation_time; }
   void  set_last_biased_lock_bulk_revocation_time(jlong cur_time) { _last_biased_lock_bulk_revocation_time = cur_time; }
 
-  TRACE_DEFINE_KLASS_METHODS;
+  JFR_ONLY(DEFINE_TRACE_ID_METHODS;)
 
   // garbage collection support
   virtual void oops_do(OopClosure* cl);

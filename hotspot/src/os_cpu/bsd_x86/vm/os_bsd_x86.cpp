@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -407,7 +407,7 @@ JVM_handle_bsd_signal(int sig,
 
   // Must do this before SignalHandlerMark, if crash protection installed we will longjmp away
   // (no destructors can be run)
-  os::WatcherThreadCrashProtection::check_crash_protection(sig, t);
+  os::ThreadCrashProtection::check_crash_protection(sig, t);
 
   SignalHandlerMark shm(t);
 
@@ -462,13 +462,13 @@ JVM_handle_bsd_signal(int sig,
   if (info != NULL && uc != NULL && thread != NULL) {
     pc = (address) os::Bsd::ucontext_get_pc(uc);
 
-    if (StubRoutines::is_safefetch_fault(pc)) {
-      uc->context_pc = intptr_t(StubRoutines::continuation_for_safefetch_fault(pc));
-      return 1;
-    }
-
-    // Handle ALL stack overflow variations here
     if (sig == SIGSEGV || sig == SIGBUS) {
+      if (StubRoutines::is_safefetch_fault(pc)) {
+        uc->context_pc = intptr_t(StubRoutines::continuation_for_safefetch_fault(pc));
+        return 1;
+      }
+
+      // Handle ALL stack overflow variations here
       address addr = (address) info->si_addr;
 
       // check if fault address is within thread stack
@@ -532,7 +532,13 @@ JVM_handle_bsd_signal(int sig,
 
 #ifdef AMD64
       if (sig == SIGFPE  &&
-          (info->si_code == FPE_INTDIV || info->si_code == FPE_FLTDIV)) {
+          (info->si_code == FPE_INTDIV || info->si_code == FPE_FLTDIV
+           // Workaround for macOS ARM incorrectly reporting FPE_FLTINV for "div by 0"
+           // instead of the expected FPE_FLTDIV when running x86_64 binary under Rosetta emulation
+#ifdef __APPLE__
+           || (VM_Version::is_cpu_emulated() && info->si_code == FPE_FLTINV)
+#endif
+          )) {
         stub =
           SharedRuntime::
           continuation_for_implicit_exception(thread,
@@ -846,7 +852,7 @@ static void current_stack_region(address * bottom, size_t * size) {
   *size = pthread_get_stacksize_np(self);
   // workaround for OS X 10.9.0 (Mavericks)
   // pthread_get_stacksize_np returns 128 pages even though the actual size is 2048 pages
-  if (pthread_main_np() == 1) {
+  if (::pthread_main_np() == 1) {
     if ((*size) < (DEFAULT_MAIN_THREAD_STACK_PAGES * (size_t)getpagesize())) {
       char kern_osrelease[256];
       size_t kern_osrelease_size = sizeof(kern_osrelease);

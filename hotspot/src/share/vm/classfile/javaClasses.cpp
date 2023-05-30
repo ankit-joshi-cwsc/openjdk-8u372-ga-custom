@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -782,6 +782,22 @@ Symbol* java_lang_Class::as_signature(oop java_class, bool intern_if_not_found, 
   return name;
 }
 
+// Returns the Java name for this Java mirror (Resource allocated)
+// See Klass::external_name().
+// For primitive type Java mirrors, its type name is returned.
+const char* java_lang_Class::as_external_name(oop java_class) {
+  assert(java_lang_Class::is_instance(java_class), "must be a Class object");
+  const char* name = NULL;
+  if (is_primitive(java_class)) {
+    name = type2name(primitive_type(java_class));
+  } else {
+    name = as_Klass(java_class)->external_name();
+  }
+  if (name == NULL) {
+    name = "<null>";
+  }
+  return name;
+}
 
 Klass* java_lang_Class::array_klass(oop java_class) {
   Klass* k = ((Klass*)java_class->metadata_field(_array_klass_offset));
@@ -920,7 +936,7 @@ void java_lang_Thread::compute_offsets() {
   assert(_group_offset == 0, "offsets should be initialized only once");
 
   Klass* k = SystemDictionary::Thread_klass();
-  compute_offset(_name_offset,      k, vmSymbols::name_name(),      vmSymbols::char_array_signature());
+  compute_offset(_name_offset,      k, vmSymbols::name_name(),      vmSymbols::string_signature());
   compute_offset(_group_offset,     k, vmSymbols::group_name(),     vmSymbols::threadgroup_signature());
   compute_offset(_contextClassLoader_offset, k, vmSymbols::contextClassLoader_name(), vmSymbols::classloader_signature());
   compute_offset(_inheritedAccessControlContext_offset, k, vmSymbols::inheritedAccessControlContext_name(), vmSymbols::accesscontrolcontext_signature());
@@ -950,15 +966,12 @@ void java_lang_Thread::set_thread(oop java_thread, JavaThread* thread) {
 }
 
 
-typeArrayOop java_lang_Thread::name(oop java_thread) {
-  oop name = java_thread->obj_field(_name_offset);
-  assert(name == NULL || (name->is_typeArray() && TypeArrayKlass::cast(name->klass())->element_type() == T_CHAR), "just checking");
-  return typeArrayOop(name);
+oop java_lang_Thread::name(oop java_thread) {
+  return java_thread->obj_field(_name_offset);
 }
 
 
-void java_lang_Thread::set_name(oop java_thread, typeArrayOop name) {
-  assert(java_thread->obj_field(_name_offset) == NULL, "name should be NULL");
+void java_lang_Thread::set_name(oop java_thread, oop name) {
   java_thread->obj_field_put(_name_offset, name);
 }
 
@@ -1034,7 +1047,8 @@ void java_lang_Thread::set_thread_status(oop java_thread,
 
 // Read thread status value from threadStatus field in java.lang.Thread java class.
 java_lang_Thread::ThreadStatus java_lang_Thread::get_thread_status(oop java_thread) {
-  assert(Thread::current()->is_Watcher_thread() || Thread::current()->is_VM_thread() ||
+  assert(Threads_lock->owned_by_self() || Thread::current()->is_Watcher_thread() ||
+         Thread::current()->is_VM_thread() ||
          JavaThread::current()->thread_state() == _thread_in_vm,
          "Java Thread is not running in vm");
   // The threadStatus is only present starting in 1.5
@@ -1220,6 +1234,16 @@ oop java_lang_Throwable::message(Handle throwable) {
   return throwable->obj_field(detailMessage_offset);
 }
 
+
+// Return Symbol for detailed_message or NULL
+Symbol* java_lang_Throwable::detail_message(oop throwable) {
+  PRESERVE_EXCEPTION_MARK;  // Keep original exception
+  oop detailed_message = java_lang_Throwable::message(throwable);
+  if (detailed_message != NULL) {
+    return java_lang_String::as_symbol(detailed_message, THREAD);
+  }
+  return NULL;
+}
 
 void java_lang_Throwable::set_message(oop throwable, oop value) {
   throwable->obj_field_put(detailMessage_offset, value);
@@ -1419,9 +1443,9 @@ class BacktraceBuilder: public StackObj {
       method = mhandle();
     }
 
-    _methods->short_at_put(_index, method->orig_method_idnum());
+    _methods->ushort_at_put(_index, method->orig_method_idnum());
     _bcis->int_at_put(_index, merge_bci_and_version(bci, method->constants()->version()));
-    _cprefs->short_at_put(_index, method->name_index());
+    _cprefs->ushort_at_put(_index, method->name_index());
 
     // We need to save the mirrors in the backtrace to keep the class
     // from being unloaded while we still have this stack trace.
@@ -1538,10 +1562,10 @@ void java_lang_Throwable::print_stack_trace(oop throwable, outputStream* st) {
         Handle mirror(THREAD, mirrors->obj_at(index));
         // NULL mirror means end of stack trace
         if (mirror.is_null()) goto handle_cause;
-        int method = methods->short_at(index);
+        int method = methods->ushort_at(index);
         int version = version_at(bcis->int_at(index));
         int bci = bci_at(bcis->int_at(index));
-        int cpref = cprefs->short_at(index);
+        int cpref = cprefs->ushort_at(index);
         print_stack_element(st, mirror, method, version, bci, cpref);
       }
       result = objArrayHandle(THREAD, objArrayOop(result->obj_at(trace_next_offset)));
@@ -1834,10 +1858,10 @@ oop java_lang_Throwable::get_stack_trace_element(oop throwable, int index, TRAPS
 
   assert(methods != NULL && bcis != NULL && mirrors != NULL, "sanity check");
 
-  int method = methods->short_at(chunk_index);
+  int method = methods->ushort_at(chunk_index);
   int version = version_at(bcis->int_at(chunk_index));
   int bci = bci_at(bcis->int_at(chunk_index));
-  int cpref = cprefs->short_at(chunk_index);
+  int cpref = cprefs->ushort_at(chunk_index);
   Handle mirror(THREAD, mirrors->obj_at(chunk_index));
 
   // Chunk can be partial full
@@ -1948,7 +1972,7 @@ Handle java_lang_reflect_Method::create(TRAPS) {
   // This class is eagerly initialized during VM initialization, since we keep a refence
   // to one of the methods
   assert(InstanceKlass::cast(klass)->is_initialized(), "must be initialized");
-  return InstanceKlass::cast(klass)->allocate_instance_handle(CHECK_NH);
+  return InstanceKlass::cast(klass)->allocate_instance_handle(THREAD);
 }
 
 oop java_lang_reflect_Method::clazz(oop reflect) {
@@ -2666,6 +2690,32 @@ void java_lang_ref_SoftReference::set_clock(jlong value) {
   *offset = value;
 }
 
+// Support for java_lang_ref_ReferenceQueue
+
+oop java_lang_ref_ReferenceQueue::NULL_queue() {
+  InstanceKlass* ik = InstanceKlass::cast(SystemDictionary::ReferenceQueue_klass());
+  oop mirror = ik->java_mirror();
+  return mirror->obj_field(static_NULL_queue_offset);
+}
+
+oop java_lang_ref_ReferenceQueue::ENQUEUED_queue() {
+  InstanceKlass* ik = InstanceKlass::cast(SystemDictionary::ReferenceQueue_klass());
+  oop mirror = ik->java_mirror();
+  return mirror->obj_field(static_ENQUEUED_queue_offset);
+}
+
+void java_lang_ref_ReferenceQueue::compute_offsets() {
+  Klass* k = SystemDictionary::ReferenceQueue_klass();
+  compute_offset(static_NULL_queue_offset,
+                 k,
+                 vmSymbols::referencequeue_null_name(),
+                 vmSymbols::referencequeue_signature());
+  compute_offset(static_ENQUEUED_queue_offset,
+                 k,
+                 vmSymbols::referencequeue_enqueued_name(),
+                 vmSymbols::referencequeue_signature());
+}
+
 // Support for java_lang_invoke_DirectMethodHandle
 
 int java_lang_invoke_DirectMethodHandle::_member_offset;
@@ -2837,6 +2887,15 @@ intptr_t java_lang_invoke_MemberName::vmindex(oop mname) {
 void java_lang_invoke_MemberName::set_vmindex(oop mname, intptr_t index) {
   assert(is_instance(mname), "wrong type");
   mname->address_field_put(_vmindex_offset, (address) index);
+}
+
+bool java_lang_invoke_MemberName::equals(oop mn1, oop mn2) {
+  if (mn1 == mn2) {
+     return true;
+  }
+  return (vmtarget(mn1) == vmtarget(mn2) && flags(mn1) == flags(mn2) &&
+          vmindex(mn1) == vmindex(mn2) &&
+          clazz(mn1) == clazz(mn2));
 }
 
 oop java_lang_invoke_LambdaForm::vmentry(oop lform) {
@@ -3175,6 +3234,8 @@ int java_lang_ref_Reference::discovered_offset;
 int java_lang_ref_Reference::static_lock_offset;
 int java_lang_ref_Reference::static_pending_offset;
 int java_lang_ref_Reference::number_of_fake_oop_fields;
+int java_lang_ref_ReferenceQueue::static_NULL_queue_offset;
+int java_lang_ref_ReferenceQueue::static_ENQUEUED_queue_offset;
 int java_lang_ref_SoftReference::timestamp_offset;
 int java_lang_ref_SoftReference::static_clock_offset;
 int java_lang_ClassLoader::parent_offset;
@@ -3355,6 +3416,8 @@ void JavaClasses::compute_offsets() {
   }
   if (JDK_Version::is_jdk18x_version())
     java_lang_reflect_Parameter::compute_offsets();
+
+  java_lang_ref_ReferenceQueue::compute_offsets();
 
   // generated interpreter code wants to know about the offsets we just computed:
   AbstractAssembler::update_delayed_values();

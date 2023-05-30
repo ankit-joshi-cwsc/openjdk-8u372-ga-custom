@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,6 +29,11 @@
 #define __STDC_FORMAT_MACROS
 #endif
 
+// Needed for INT64_C and UINT64_C with ISO C99 libraries (see JDK-8272214)
+#ifndef __STDC_CONSTANT_MACROS
+#define __STDC_CONSTANT_MACROS
+#endif
+
 #ifdef TARGET_COMPILER_gcc
 # include "utilities/globalDefinitions_gcc.hpp"
 #endif
@@ -40,6 +45,14 @@
 #endif
 #ifdef TARGET_COMPILER_xlc
 # include "utilities/globalDefinitions_xlc.hpp"
+#endif
+
+// Defaults for macros that might be defined per compiler.
+#ifndef NOINLINE
+#define NOINLINE
+#endif
+#ifndef ALWAYSINLINE
+#define ALWAYSINLINE inline
 #endif
 
 #ifndef PRAGMA_DIAG_PUSH
@@ -211,15 +224,20 @@ const int NANOUNITS     = 1000000000;   // nano units per base unit
 const jlong NANOSECS_PER_SEC      = CONST64(1000000000);
 const jint  NANOSECS_PER_MILLISEC = 1000000;
 
+// Proper units routines try to maintain at least three significant digits.
+// In worst case, it would print five significant digits with lower prefix.
+// G is close to MAX_SIZE on 32-bit platforms, so its product can easily overflow,
+// and therefore we need to be careful.
+
 inline const char* proper_unit_for_byte_size(size_t s) {
 #ifdef _LP64
-  if (s >= 10*G) {
+  if (s >= 100*G) {
     return "G";
   }
 #endif
-  if (s >= 10*M) {
+  if (s >= 100*M) {
     return "M";
-  } else if (s >= 10*K) {
+  } else if (s >= 100*K) {
     return "K";
   } else {
     return "B";
@@ -229,13 +247,13 @@ inline const char* proper_unit_for_byte_size(size_t s) {
 template <class T>
 inline T byte_size_in_proper_unit(T s) {
 #ifdef _LP64
-  if (s >= 10*G) {
+  if (s >= 100*G) {
     return (T)(s/G);
   }
 #endif
-  if (s >= 10*M) {
+  if (s >= 100*M) {
     return (T)(s/M);
-  } else if (s >= 10*K) {
+  } else if (s >= 100*K) {
     return (T)(s/K);
   } else {
     return s;
@@ -327,7 +345,7 @@ inline size_t pointer_delta(const MetaWord* left, const MetaWord* right) {
 // so far from the middle of the road that it is likely to be problematic in
 // many C++ compilers.
 //
-#define CAST_TO_FN_PTR(func_type, value) ((func_type)(castable_address(value)))
+#define CAST_TO_FN_PTR(func_type, value) (reinterpret_cast<func_type>(value))
 #define CAST_FROM_FN_PTR(new_type, func_ptr) ((new_type)((address_word)(func_ptr)))
 
 // Unsigned byte types for os and stream.hpp
@@ -414,8 +432,16 @@ enum RTMState {
   ProfileRTM = 0x0  // Use RTM with abort ratio calculation
 };
 
+// The maximum size of the code cache.  Can be overridden by targets.
+#define CODE_CACHE_SIZE_LIMIT (2*G)
+// Allow targets to reduce the default size of the code cache.
+#define CODE_CACHE_DEFAULT_LIMIT CODE_CACHE_SIZE_LIMIT
+
 #ifdef TARGET_ARCH_x86
 # include "globalDefinitions_x86.hpp"
+#endif
+#ifdef TARGET_ARCH_aarch64
+# include "globalDefinitions_aarch64.hpp"
 #endif
 #ifdef TARGET_ARCH_sparc
 # include "globalDefinitions_sparc.hpp"
@@ -639,6 +665,10 @@ inline bool is_signed_subword_type(BasicType t) {
   return (t == T_BYTE || t == T_SHORT);
 }
 
+inline bool is_reference_type(BasicType t) {
+  return (t == T_OBJECT || t == T_ARRAY);
+}
+
 // Convert a char from a classfile signature to a BasicType
 inline BasicType char2type(char c) {
   switch( c ) {
@@ -796,14 +826,15 @@ class JavaValue {
 
 enum TosState {         // describes the tos cache contents
   btos = 0,             // byte, bool tos cached
-  ctos = 1,             // char tos cached
-  stos = 2,             // short tos cached
-  itos = 3,             // int tos cached
-  ltos = 4,             // long tos cached
-  ftos = 5,             // float tos cached
-  dtos = 6,             // double tos cached
-  atos = 7,             // object cached
-  vtos = 8,             // tos not cached
+  ztos = 1,             // byte, bool tos cached
+  ctos = 2,             // char tos cached
+  stos = 3,             // short tos cached
+  itos = 4,             // int tos cached
+  ltos = 5,             // long tos cached
+  ftos = 6,             // float tos cached
+  dtos = 7,             // double tos cached
+  atos = 8,             // object cached
+  vtos = 9,             // tos not cached
   number_of_states,
   ilgl                  // illegal state: should not occur
 };
@@ -812,7 +843,7 @@ enum TosState {         // describes the tos cache contents
 inline TosState as_TosState(BasicType type) {
   switch (type) {
     case T_BYTE   : return btos;
-    case T_BOOLEAN: return btos; // FIXME: Add ztos
+    case T_BOOLEAN: return ztos;
     case T_CHAR   : return ctos;
     case T_SHORT  : return stos;
     case T_INT    : return itos;
@@ -828,8 +859,8 @@ inline TosState as_TosState(BasicType type) {
 
 inline BasicType as_BasicType(TosState state) {
   switch (state) {
-    //case ztos: return T_BOOLEAN;//FIXME
     case btos : return T_BYTE;
+    case ztos : return T_BOOLEAN;
     case ctos : return T_CHAR;
     case stos : return T_SHORT;
     case itos : return T_INT;
@@ -1037,9 +1068,10 @@ extern void basic_fatal(const char* msg);
 // Special constants for debugging
 
 const jint     badInt           = -3;                       // generic "bad int" value
-const long     badAddressVal    = -2;                       // generic "bad address" value
-const long     badOopVal        = -1;                       // generic "bad oop" value
+const intptr_t badAddressVal    = -2;                       // generic "bad address" value
+const intptr_t badOopVal        = -1;                       // generic "bad oop" value
 const intptr_t badHeapOopVal    = (intptr_t) CONST64(0x2BAD4B0BBAADBABE); // value used to zap heap after GC
+const int      badStackSegVal   = 0xCA;                     // value used to zap stack segments
 const int      badHandleValue   = 0xBC;                     // value used to zap vm handle area
 const int      badResourceValue = 0xAB;                     // value used to zap resource area
 const int      freeBlockPad     = 0xBA;                     // value used to pad freed blocks.
@@ -1135,10 +1167,10 @@ inline bool is_power_of_2_long(jlong x) {
 
 //* largest i such that 2^i <= x
 //  A negative value of 'x' will return '31'
-inline int log2_intptr(intptr_t x) {
+inline int log2_intptr(uintptr_t x) {
   int i = -1;
   uintptr_t p =  1;
-  while (p != 0 && p <= (uintptr_t)x) {
+  while (p != 0 && p <= x) {
     // p = 2^(i+1) && p <= x (i.e., 2^(i+1) <= x)
     i++; p *= 2;
   }
@@ -1148,17 +1180,37 @@ inline int log2_intptr(intptr_t x) {
 }
 
 //* largest i such that 2^i <= x
-//  A negative value of 'x' will return '63'
-inline int log2_long(jlong x) {
+inline int log2_long(julong x) {
   int i = -1;
   julong p =  1;
-  while (p != 0 && p <= (julong)x) {
+  while (p != 0 && p <= x) {
     // p = 2^(i+1) && p <= x (i.e., 2^(i+1) <= x)
     i++; p *= 2;
   }
   // p = 2^(i+1) && x < p (i.e., 2^i <= x < 2^(i+1))
   // (if p = 0 then overflow occurred and i = 63)
   return i;
+}
+
+inline int log2_intptr(intptr_t x) {
+  return log2_intptr((uintptr_t)x);
+}
+
+inline int log2_int(int x) {
+  return log2_intptr((uintptr_t)x);
+}
+
+inline int log2_jint(jint x) {
+  return log2_intptr((uintptr_t)x);
+}
+
+inline int log2_uint(uint x) {
+  return log2_intptr((uintptr_t)x);
+}
+
+//  A negative value of 'x' will return '63'
+inline int log2_jlong(jlong x) {
+  return log2_long((julong)x);
 }
 
 //* the argument must be exactly a power of 2
@@ -1199,6 +1251,29 @@ inline intptr_t round_down(intptr_t x, uintx s) {
 
 inline bool is_odd (intx x) { return x & 1;      }
 inline bool is_even(intx x) { return !is_odd(x); }
+
+// abs methods which cannot overflow and so are well-defined across
+// the entire domain of integer types.
+static inline unsigned int uabs(unsigned int n) {
+  union {
+    unsigned int result;
+    int value;
+  };
+  result = n;
+  if (value < 0) result = 0-result;
+  return result;
+}
+static inline julong uabs(julong n) {
+  union {
+    julong result;
+    jlong value;
+  };
+  result = n;
+  if (value < 0) result = 0-result;
+  return result;
+}
+static inline julong uabs(jlong n) { return uabs((julong)n); }
+static inline unsigned int uabs(int n) { return uabs((unsigned int)n); }
 
 // "to" should be greater than "from."
 inline intx byte_size(void* from, void* to) {
@@ -1402,6 +1477,32 @@ inline intptr_t p2i(const void * p) {
 
 #define ARRAY_SIZE(array) (sizeof(array)/sizeof((array)[0]))
 
+//----------------------------------------------------------------------------------------------------
+// Sum and product which can never overflow: they wrap, just like the
+// Java operations.  Note that we don't intend these to be used for
+// general-purpose arithmetic: their purpose is to emulate Java
+// operations.
+
+// The goal of this code to avoid undefined or implementation-defined
+// behaviour.  The use of an lvalue to reference cast is explicitly
+// permitted by Lvalues and rvalues [basic.lval].  [Section 3.10 Para
+// 15 in C++03]
+#define JAVA_INTEGER_OP(OP, NAME, TYPE, UNSIGNED_TYPE)  \
+inline TYPE NAME (TYPE in1, TYPE in2) {                 \
+  UNSIGNED_TYPE ures = static_cast<UNSIGNED_TYPE>(in1); \
+  ures OP ## = static_cast<UNSIGNED_TYPE>(in2);         \
+  return reinterpret_cast<TYPE&>(ures);                 \
+}
+
+JAVA_INTEGER_OP(+, java_add, jint, juint)
+JAVA_INTEGER_OP(-, java_subtract, jint, juint)
+JAVA_INTEGER_OP(*, java_multiply, jint, juint)
+JAVA_INTEGER_OP(+, java_add, jlong, julong)
+JAVA_INTEGER_OP(-, java_subtract, jlong, julong)
+JAVA_INTEGER_OP(*, java_multiply, jlong, julong)
+
+#undef JAVA_INTEGER_OP
+
 // Dereference vptr
 // All C++ compilers that we know of have the vtbl pointer in the first
 // word.  If there are exceptions, this function needs to be made compiler
@@ -1416,6 +1517,7 @@ static inline void* dereference_vptr(const void* addr) {
 class GlobalDefinitions {
 public:
   static void test_globals();
+  static void test_proper_unit();
 };
 
 #endif // PRODUCT

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -38,8 +38,8 @@ class G1StringDedupEntryCache;
 class G1StringDedupEntry : public CHeapObj<mtGC> {
 private:
   G1StringDedupEntry* _next;
-  unsigned int      _hash;
-  typeArrayOop      _obj;
+  unsigned int        _hash;
+  typeArrayOop        _obj;
 
 public:
   G1StringDedupEntry() :
@@ -119,8 +119,8 @@ private:
   // The hash seed also dictates which hash function to use. A
   // zero hash seed means we will use the Java compatible hash
   // function (which doesn't use a seed), and a non-zero hash
-  // seed means we use the murmur3 hash function.
-  jint                            _hash_seed;
+  // seed means we use the murmur3 and better hash function.
+  uint64_t                        _hash_seed;
 
   // Constants governing table resize/rehash/cache.
   static const size_t             _min_size;
@@ -137,7 +137,7 @@ private:
   static uintx                    _resize_count;
   static uintx                    _rehash_count;
 
-  G1StringDedupTable(size_t size, jint hash_seed = 0);
+  G1StringDedupTable(size_t size, uint64_t hash_seed = 0);
   ~G1StringDedupTable();
 
   // Returns the hash bucket at the given index.
@@ -218,8 +218,8 @@ public:
   // and deletes the previously active table.
   static void finish_rehash(G1StringDedupTable* rehashed_table);
 
-  // If the table entry cache has grown too large, trim it down according to policy
-  static void trim_entry_cache();
+  // If the table entry cache has grown too large, delete overflowed entries.
+  static void clean_entry_cache();
 
   static void unlink_or_oops_do(G1StringDedupUnlinkOrOopsDoClosure* cl, uint worker_id);
 

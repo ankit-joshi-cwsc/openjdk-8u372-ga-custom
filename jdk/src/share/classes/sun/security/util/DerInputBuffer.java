@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1996, 2006, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1996, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -27,7 +27,6 @@ package sun.security.util;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.math.BigInteger;
 import java.util.Date;
 import sun.util.calendar.CalendarDate;
@@ -44,16 +43,26 @@ import sun.util.calendar.CalendarSystem;
  */
 class DerInputBuffer extends ByteArrayInputStream implements Cloneable {
 
-    DerInputBuffer(byte[] buf) { super(buf); }
+    boolean allowBER = true;
 
-    DerInputBuffer(byte[] buf, int offset, int len) {
+    // used by sun/security/util/DerInputBuffer/DerInputBufferEqualsHashCode.java
+    DerInputBuffer(byte[] buf) {
+        this(buf, true);
+    }
+
+    DerInputBuffer(byte[] buf, boolean allowBER) {
+        super(buf);
+        this.allowBER = allowBER;
+    }
+
+    DerInputBuffer(byte[] buf, int offset, int len, boolean allowBER) {
         super(buf, offset, len);
+        this.allowBER = allowBER;
     }
 
     DerInputBuffer dup() {
         try {
             DerInputBuffer retval = (DerInputBuffer)clone();
-
             retval.mark(Integer.MAX_VALUE);
             return retval;
         } catch (CloneNotSupportedException e) {
@@ -147,6 +156,11 @@ class DerInputBuffer extends ByteArrayInputStream implements Cloneable {
         System.arraycopy(buf, pos, bytes, 0, len);
         skip(len);
 
+        // BER allows leading 0s but DER does not
+        if (!allowBER && (len >= 2 && (bytes[0] == 0) && (bytes[1] >= 0))) {
+            throw new IOException("Invalid encoding: redundant leading 0s");
+        }
+
         if (makePositive) {
             return new BigInteger(1, bytes);
         } else {
@@ -175,6 +189,28 @@ class DerInputBuffer extends ByteArrayInputStream implements Cloneable {
         return result.intValue();
     }
 
+    // check the number of pad bits, validate the pad bits in the bytes
+    // if enforcing DER (i.e. allowBER == false), and return the number of
+    // bits of the resulting BitString
+    private static int checkPaddedBits(int numOfPadBits, byte[] data, int start,
+                                       int end, boolean allowBER) throws IOException {
+        // number of pad bits should be from 0(min) to 7(max).
+        if ((numOfPadBits < 0) || (numOfPadBits > 7)) {
+            throw new IOException("Invalid number of padding bits");
+        }
+        int lenInBits = ((end - start) << 3) - numOfPadBits;
+        if (lenInBits < 0) {
+            throw new IOException("Not enough bytes in BitString");
+        }
+
+        // padding bits should be all zeros for DER
+        if (!allowBER && numOfPadBits != 0 &&
+                (data[end - 1] & (0xff >>> (8 - numOfPadBits))) != 0) {
+            throw new IOException("Invalid value of padding bits");
+        }
+        return lenInBits;
+    }
+
     /**
      * Returns the bit string which takes up the specified
      * number of bytes in this buffer.
@@ -187,18 +223,20 @@ class DerInputBuffer extends ByteArrayInputStream implements Cloneable {
             throw new IOException("Invalid encoding: zero length bit string");
         }
 
-        int numOfPadBits = buf[pos];
-        if ((numOfPadBits < 0) || (numOfPadBits > 7)) {
-            throw new IOException("Invalid number of padding bits");
-        }
+        int start = pos;
+        int end = start + len;
+        skip(len); // Compatibility.
+
+        int numOfPadBits = buf[start++];
+        checkPaddedBits(numOfPadBits, buf, start, end, allowBER);
+
         // minus the first byte which indicates the number of padding bits
         byte[] retval = new byte[len - 1];
-        System.arraycopy(buf, pos + 1, retval, 0, len - 1);
-        if (numOfPadBits != 0) {
-            // get rid of the padding bits
-            retval[len - 2] &= (0xff << numOfPadBits);
+        System.arraycopy(buf, start, retval, 0, len - 1);
+        if (allowBER && numOfPadBits != 0) {
+            // fix the potential non-zero padding bits
+            retval[retval.length - 1] &= (0xff << numOfPadBits);
         }
-        skip(len);
         return retval;
     }
 
@@ -214,26 +252,35 @@ class DerInputBuffer extends ByteArrayInputStream implements Cloneable {
      * The bit string need not be byte-aligned.
      */
     BitArray getUnalignedBitString() throws IOException {
+        return getUnalignedBitString(available());
+    }
+
+    /**
+     * Returns the bit string which takes up the specified
+     * number of bytes in this buffer.
+     * The bit string need not be byte-aligned.
+     */
+    BitArray getUnalignedBitString(int len) throws IOException {
+        if (len > available())
+            throw new IOException("short read of bit string");
+
+        if (len == 0) {
+            throw new IOException("Invalid encoding: zero length bit string");
+        }
+
         if (pos >= count)
             return null;
         /*
          * Just copy the data into an aligned, padded octet buffer,
          * and consume the rest of the buffer.
          */
-        int len = available();
-        int unusedBits = buf[pos] & 0xff;
-        if (unusedBits > 7 ) {
-            throw new IOException("Invalid value for unused bits: " + unusedBits);
-        }
-        byte[] bits = new byte[len - 1];
-        // number of valid bits
-        int length = (bits.length == 0) ? 0 : bits.length * 8 - unusedBits;
-
-        System.arraycopy(buf, pos + 1, bits, 0, len - 1);
-
-        BitArray bitArray = new BitArray(length, bits);
-        pos = count;
-        return bitArray;
+        int start = pos;
+        int end = start + len;
+        pos = count;  // Compatibility.
+        int numOfPadBits = buf[start++];
+        int lenInBits = checkPaddedBits(numOfPadBits, buf, start,
+                                        end, allowBER);
+        return new BitArray(lenInBits, buf, start);
     }
 
     /**
@@ -260,7 +307,7 @@ class DerInputBuffer extends ByteArrayInputStream implements Cloneable {
         if (len > available())
             throw new IOException("short read of DER Generalized Time");
 
-        if (len < 13 || len > 23)
+        if (len < 13)
             throw new IOException("DER Generalized Time length error");
 
         return getTime(len, true);
@@ -285,7 +332,7 @@ class DerInputBuffer extends ByteArrayInputStream implements Cloneable {
          *       YYMMDDhhmmss-hhmm
          * UTC Time is broken in storing only two digits of year.
          * If YY < 50, we assume 20YY;
-         * if YY >= 50, we assume 19YY, as per RFC 3280.
+         * if YY >= 50, we assume 19YY, as per RFC 5280.
          *
          * Generalized time has a four-digit year and allows any
          * precision specified in ISO 8601. However, for our purposes,
@@ -298,15 +345,15 @@ class DerInputBuffer extends ByteArrayInputStream implements Cloneable {
 
         if (generalized) {
             type = "Generalized";
-            year = 1000 * Character.digit((char)buf[pos++], 10);
-            year += 100 * Character.digit((char)buf[pos++], 10);
-            year += 10 * Character.digit((char)buf[pos++], 10);
-            year += Character.digit((char)buf[pos++], 10);
+            year = 1000 * toDigit(buf[pos++], type);
+            year += 100 * toDigit(buf[pos++], type);
+            year += 10 * toDigit(buf[pos++], type);
+            year += toDigit(buf[pos++], type);
             len -= 2; // For the two extra YY
         } else {
             type = "UTC";
-            year = 10 * Character.digit((char)buf[pos++], 10);
-            year += Character.digit((char)buf[pos++], 10);
+            year = 10 * toDigit(buf[pos++], type);
+            year += toDigit(buf[pos++], type);
 
             if (year < 50)              // origin 2000
                 year += 2000;
@@ -314,17 +361,17 @@ class DerInputBuffer extends ByteArrayInputStream implements Cloneable {
                 year += 1900;   // origin 1900
         }
 
-        month = 10 * Character.digit((char)buf[pos++], 10);
-        month += Character.digit((char)buf[pos++], 10);
+        month = 10 * toDigit(buf[pos++], type);
+        month += toDigit(buf[pos++], type);
 
-        day = 10 * Character.digit((char)buf[pos++], 10);
-        day += Character.digit((char)buf[pos++], 10);
+        day = 10 * toDigit(buf[pos++], type);
+        day += toDigit(buf[pos++], type);
 
-        hour = 10 * Character.digit((char)buf[pos++], 10);
-        hour += Character.digit((char)buf[pos++], 10);
+        hour = 10 * toDigit(buf[pos++], type);
+        hour += toDigit(buf[pos++], type);
 
-        minute = 10 * Character.digit((char)buf[pos++], 10);
-        minute += Character.digit((char)buf[pos++], 10);
+        minute = 10 * toDigit(buf[pos++], type);
+        minute += toDigit(buf[pos++], type);
 
         len -= 10; // YYMMDDhhmm
 
@@ -335,41 +382,48 @@ class DerInputBuffer extends ByteArrayInputStream implements Cloneable {
          */
 
         millis = 0;
-        if (len > 2 && len < 12) {
-            second = 10 * Character.digit((char)buf[pos++], 10);
-            second += Character.digit((char)buf[pos++], 10);
+        if (len > 2) {
+            second = 10 * toDigit(buf[pos++], type);
+            second += toDigit(buf[pos++], type);
             len -= 2;
             // handle fractional seconds (if present)
-            if (buf[pos] == '.' || buf[pos] == ',') {
+            if (generalized && (buf[pos] == '.' || buf[pos] == ',')) {
                 len --;
+                if (len == 0) {
+                    throw new IOException("Parse " + type +
+                            " time, empty fractional part");
+                }
                 pos++;
-                // handle upto milisecond precision only
                 int precision = 0;
-                int peek = pos;
-                while (buf[peek] != 'Z' &&
-                       buf[peek] != '+' &&
-                       buf[peek] != '-') {
-                    peek++;
+                while (buf[pos] != 'Z' &&
+                       buf[pos] != '+' &&
+                       buf[pos] != '-') {
+                    // Validate all digits in the fractional part but
+                    // store millisecond precision only
+                    int thisDigit = toDigit(buf[pos], type);
                     precision++;
-                }
-                switch (precision) {
-                case 3:
-                    millis += 100 * Character.digit((char)buf[pos++], 10);
-                    millis += 10 * Character.digit((char)buf[pos++], 10);
-                    millis += Character.digit((char)buf[pos++], 10);
-                    break;
-                case 2:
-                    millis += 100 * Character.digit((char)buf[pos++], 10);
-                    millis += 10 * Character.digit((char)buf[pos++], 10);
-                    break;
-                case 1:
-                    millis += 100 * Character.digit((char)buf[pos++], 10);
-                    break;
-                default:
+                    len--;
+                    if (len == 0) {
                         throw new IOException("Parse " + type +
-                            " time, unsupported precision for seconds value");
+                                " time, invalid fractional part");
+                    }
+                    pos++;
+                    switch (precision) {
+                        case 1:
+                            millis += 100 * thisDigit;
+                            break;
+                        case 2:
+                            millis += 10 * thisDigit;
+                            break;
+                        case 3:
+                            millis += thisDigit;
+                            break;
+                    }
                 }
-                len -= precision;
+                if (precision == 0) {
+                    throw new IOException("Parse " + type +
+                            " time, empty fractional part");
+                }
             }
         } else
             second = 0;
@@ -399,10 +453,13 @@ class DerInputBuffer extends ByteArrayInputStream implements Cloneable {
 
         switch (buf[pos++]) {
         case '+':
-            hr = 10 * Character.digit((char)buf[pos++], 10);
-            hr += Character.digit((char)buf[pos++], 10);
-            min = 10 * Character.digit((char)buf[pos++], 10);
-            min += Character.digit((char)buf[pos++], 10);
+            if (len != 5) {
+                throw new IOException("Parse " + type + " time, invalid offset");
+            }
+            hr = 10 * toDigit(buf[pos++], type);
+            hr += toDigit(buf[pos++], type);
+            min = 10 * toDigit(buf[pos++], type);
+            min += toDigit(buf[pos++], type);
 
             if (hr >= 24 || min >= 60)
                 throw new IOException("Parse " + type + " time, +hhmm");
@@ -411,10 +468,13 @@ class DerInputBuffer extends ByteArrayInputStream implements Cloneable {
             break;
 
         case '-':
-            hr = 10 * Character.digit((char)buf[pos++], 10);
-            hr += Character.digit((char)buf[pos++], 10);
-            min = 10 * Character.digit((char)buf[pos++], 10);
-            min += Character.digit((char)buf[pos++], 10);
+            if (len != 5) {
+                throw new IOException("Parse " + type + " time, invalid offset");
+            }
+            hr = 10 * toDigit(buf[pos++], type);
+            hr += toDigit(buf[pos++], type);
+            min = 10 * toDigit(buf[pos++], type);
+            min += toDigit(buf[pos++], type);
 
             if (hr >= 24 || min >= 60)
                 throw new IOException("Parse " + type + " time, -hhmm");
@@ -423,11 +483,26 @@ class DerInputBuffer extends ByteArrayInputStream implements Cloneable {
             break;
 
         case 'Z':
+            if (len != 1) {
+                throw new IOException("Parse " + type + " time, invalid format");
+            }
             break;
 
         default:
             throw new IOException("Parse " + type + " time, garbage offset");
         }
         return new Date(time);
+    }
+
+    /**
+     * Converts byte (represented as a char) to int.
+     * @throws IOException if integer is not a valid digit in the specified
+     *    radix (10)
+     */
+    private static int toDigit(byte b, String type) throws IOException {
+        if (b < '0' || b > '9') {
+            throw new IOException("Parse " + type + " time, invalid format");
+        }
+        return b - '0';
     }
 }

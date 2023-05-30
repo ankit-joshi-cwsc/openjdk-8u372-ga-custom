@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -131,7 +131,9 @@ public final class SunJCE extends Provider {
                             + "|OAEPWITHSHA-224ANDMGF1PADDING"
                             + "|OAEPWITHSHA-256ANDMGF1PADDING"
                             + "|OAEPWITHSHA-384ANDMGF1PADDING"
-                            + "|OAEPWITHSHA-512ANDMGF1PADDING");
+                            + "|OAEPWITHSHA-512ANDMGF1PADDING"
+                            + "|OAEPWITHSHA-512/224ANDMGF1PADDING"
+                            + "|OAEPWITHSHA-512/256ANDMGF1PADDING");
                     put("Cipher.RSA SupportedKeyClasses",
                             "java.security.interfaces.RSAPublicKey" +
                             "|java.security.interfaces.RSAPrivateKey");
@@ -705,7 +707,19 @@ public final class SunJCE extends Provider {
                     put("Alg.Alias.Mac.1.2.840.113549.2.11", "HmacSHA512");
 
                     put("Mac.HmacPBESHA1",
-                        "com.sun.crypto.provider.HmacPKCS12PBESHA1");
+                        "com.sun.crypto.provider.HmacPKCS12PBECore$HmacPKCS12PBE_SHA1");
+                    put("Mac.HmacPBESHA224",
+                        "com.sun.crypto.provider.HmacPKCS12PBECore$HmacPKCS12PBE_SHA224");
+                    put("Mac.HmacPBESHA256",
+                        "com.sun.crypto.provider.HmacPKCS12PBECore$HmacPKCS12PBE_SHA256");
+                    put("Mac.HmacPBESHA384",
+                        "com.sun.crypto.provider.HmacPKCS12PBECore$HmacPKCS12PBE_SHA384");
+                    put("Mac.HmacPBESHA512",
+                        "com.sun.crypto.provider.HmacPKCS12PBECore$HmacPKCS12PBE_SHA512");
+                    put("Mac.HmacPBESHA512/224",
+                        "com.sun.crypto.provider.HmacPKCS12PBECore$HmacPKCS12PBE_SHA512_224");
+                    put("Mac.HmacPBESHA512/256",
+                        "com.sun.crypto.provider.HmacPKCS12PBECore$HmacPKCS12PBE_SHA512_256");
 
                     // PBMAC1
 
@@ -732,6 +746,12 @@ public final class SunJCE extends Provider {
                     put("Mac.HmacSHA384 SupportedKeyFormats", "RAW");
                     put("Mac.HmacSHA512 SupportedKeyFormats", "RAW");
                     put("Mac.HmacPBESHA1 SupportedKeyFormats", "RAW");
+                    put("Mac.HmacPBESHA224 SupportedKeyFormats", "RAW");
+                    put("Mac.HmacPBESHA256 SupportedKeyFormats", "RAW");
+                    put("Mac.HmacPBESHA384 SupportedKeyFormats", "RAW");
+                    put("Mac.HmacPBESHA512 SupportedKeyFormats", "RAW");
+                    put("Mac.HmacPBESHA512/224 SupportedKeyFormats", "RAW");
+                    put("Mac.HmacPBESHA512/256 SupportedKeyFormats", "RAW");
                     put("Mac.PBEWithHmacSHA1 SupportedKeyFormatS", "RAW");
                     put("Mac.PBEWithHmacSHA224 SupportedKeyFormats", "RAW");
                     put("Mac.PBEWithHmacSHA256 SupportedKeyFormats", "RAW");
@@ -761,6 +781,8 @@ public final class SunJCE extends Provider {
                     put("KeyGenerator.SunTlsMasterSecret",
                         "com.sun.crypto.provider.TlsMasterSecretGenerator");
                     put("Alg.Alias.KeyGenerator.SunTls12MasterSecret",
+                        "SunTlsMasterSecret");
+                    put("Alg.Alias.KeyGenerator.SunTlsExtendedMasterSecret",
                         "SunTlsMasterSecret");
 
                     put("KeyGenerator.SunTlsKeyMaterial",

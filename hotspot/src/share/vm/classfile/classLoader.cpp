@@ -88,7 +88,6 @@ typedef void * * (JNICALL *ZipOpen_t)(const char *name, char **pmsg);
 typedef void (JNICALL *ZipClose_t)(jzfile *zip);
 typedef jzentry* (JNICALL *FindEntry_t)(jzfile *zip, const char *name, jint *sizeP, jint *nameLen);
 typedef jboolean (JNICALL *ReadEntry_t)(jzfile *zip, jzentry *entry, unsigned char *buf, char *namebuf);
-typedef jboolean (JNICALL *ReadMappedEntry_t)(jzfile *zip, jzentry *entry, unsigned char **buf, char *namebuf);
 typedef jzentry* (JNICALL *GetNextEntry_t)(jzfile *zip, jint n);
 typedef jint     (JNICALL *Crc32_t)(jint crc, const jbyte *buf, jint len);
 
@@ -96,7 +95,6 @@ static ZipOpen_t         ZipOpen            = NULL;
 static ZipClose_t        ZipClose           = NULL;
 static FindEntry_t       FindEntry          = NULL;
 static ReadEntry_t       ReadEntry          = NULL;
-static ReadMappedEntry_t ReadMappedEntry    = NULL;
 static GetNextEntry_t    GetNextEntry       = NULL;
 static canonicalize_fn_t CanonicalizeEntry  = NULL;
 static Crc32_t           Crc32              = NULL;
@@ -162,6 +160,64 @@ bool string_ends_with(const char* str, const char* str_to_find) {
   return (strncmp(str + (str_len - str_to_find_len), str_to_find, str_to_find_len) == 0);
 }
 
+// Used to obtain the package name from a fully qualified class name.
+// It is the responsibility of the caller to establish a ResourceMark.
+const char* ClassLoader::package_from_name(const char* const class_name, bool* bad_class_name) {
+  if (class_name == NULL) {
+    if (bad_class_name != NULL) {
+      *bad_class_name = true;
+    }
+    return NULL;
+  }
+
+  if (bad_class_name != NULL) {
+    *bad_class_name = false;
+  }
+
+  const char* const last_slash = strrchr(class_name, '/');
+  if (last_slash == NULL) {
+    // No package name
+    return NULL;
+  }
+
+  char* class_name_ptr = (char*) class_name;
+  // Skip over '['s
+  if (*class_name_ptr == '[') {
+    do {
+      class_name_ptr++;
+    } while (*class_name_ptr == '[');
+
+    // Fully qualified class names should not contain a 'L'.
+    // Set bad_class_name to true to indicate that the package name
+    // could not be obtained due to an error condition.
+    // In this situation, is_same_class_package returns false.
+    if (*class_name_ptr == 'L') {
+      if (bad_class_name != NULL) {
+        *bad_class_name = true;
+      }
+      return NULL;
+    }
+  }
+
+  int length = last_slash - class_name_ptr;
+
+  // A class name could have just the slash character in the name.
+  if (length <= 0) {
+    // No package name
+    if (bad_class_name != NULL) {
+      *bad_class_name = true;
+    }
+    return NULL;
+  }
+
+  // drop name after last slash (including slash)
+  // Ex., "java/lang/String.class" => "java/lang"
+  char* pkg_name = NEW_RESOURCE_ARRAY(char, length + 1);
+  strncpy(pkg_name, class_name_ptr, length);
+  *(pkg_name+length) = '\0';
+
+  return (const char *)pkg_name;
+}
 
 MetaIndex::MetaIndex(char** meta_package_names, int num_meta_package_names) {
   if (num_meta_package_names == 0) {
@@ -282,19 +338,20 @@ u1* ClassPathZipEntry::open_entry(const char* name, jint* filesize, bool nul_ter
     filename = NEW_RESOURCE_ARRAY(char, name_len + 1);
   }
 
-  // file found, get pointer to the entry in mmapped jar file.
-  if (ReadMappedEntry == NULL ||
-      !(*ReadMappedEntry)(_zip, entry, &buffer, filename)) {
-      // mmapped access not available, perhaps due to compression,
-      // read contents into resource array
-      int size = (*filesize) + ((nul_terminate) ? 1 : 0);
-      buffer = NEW_RESOURCE_ARRAY(u1, size);
-      if (!(*ReadEntry)(_zip, entry, buffer, filename)) return NULL;
+  // read contents into resource array
+  size_t size = (uint32_t)(*filesize);
+  if (nul_terminate) {
+    if (sizeof(size) == sizeof(uint32_t) && size == UINT_MAX) {
+      return NULL; // 32-bit integer overflow will occur.
+    }
+    size++;
   }
+  buffer = NEW_RESOURCE_ARRAY(u1, size);
+  if (!(*ReadEntry)(_zip, entry, buffer, filename)) return NULL;
 
   // return result
   if (nul_terminate) {
-    buffer[*filesize] = 0;
+    buffer[size - 1] = 0;
   }
   return buffer;
 }
@@ -414,30 +471,30 @@ void ClassLoader::exit_with_path_failure(const char* error, const char* message)
 }
 #endif
 
-void ClassLoader::trace_class_path(const char* msg, const char* name) {
+void ClassLoader::trace_class_path(outputStream* out, const char* msg, const char* name) {
   if (!TraceClassPaths) {
     return;
   }
 
   if (msg) {
-    tty->print("%s", msg);
+    out->print("%s", msg);
   }
   if (name) {
     if (strlen(name) < 256) {
-      tty->print("%s", name);
+      out->print("%s", name);
     } else {
       // For very long paths, we need to print each character separately,
       // as print_cr() has a length limit
       while (name[0] != '\0') {
-        tty->print("%c", name[0]);
+        out->print("%c", name[0]);
         name++;
       }
     }
   }
   if (msg && msg[0] == '[') {
-    tty->print_cr("]");
+    out->print_cr("]");
   } else {
-    tty->cr();
+    out->cr();
   }
 }
 
@@ -583,7 +640,7 @@ void ClassLoader::setup_bootstrap_search_path() {
     // Don't print sys_class_path - this is the bootcp of this current VM process, not necessarily
     // the same as the bootcp of the shared archive.
   } else {
-    trace_class_path("[Bootstrap loader class path=", sys_class_path);
+    trace_class_path(tty, "[Bootstrap loader class path=", sys_class_path);
   }
 #if INCLUDE_CDS
   if (DumpSharedSpaces) {
@@ -816,7 +873,6 @@ void ClassLoader::load_zip_library() {
   ZipClose     = CAST_TO_FN_PTR(ZipClose_t, os::dll_lookup(handle, "ZIP_Close"));
   FindEntry    = CAST_TO_FN_PTR(FindEntry_t, os::dll_lookup(handle, "ZIP_FindEntry"));
   ReadEntry    = CAST_TO_FN_PTR(ReadEntry_t, os::dll_lookup(handle, "ZIP_ReadEntry"));
-  ReadMappedEntry = CAST_TO_FN_PTR(ReadMappedEntry_t, os::dll_lookup(handle, "ZIP_ReadMappedEntry"));
   GetNextEntry = CAST_TO_FN_PTR(GetNextEntry_t, os::dll_lookup(handle, "ZIP_GetNextEntry"));
   Crc32        = CAST_TO_FN_PTR(Crc32_t, os::dll_lookup(handle, "ZIP_CRC32"));
 
@@ -1121,6 +1177,11 @@ instanceKlassHandle ClassLoader::load_classfile(Symbol* h_name, TRAPS) {
     ClassLoaderData* loader_data = ClassLoaderData::the_null_class_loader_data();
     Handle protection_domain;
     TempNewSymbol parsed_name = NULL;
+    // Callers are expected to declare a ResourceMark to determine
+    // the lifetime of any updated (resource) allocated under
+    // this call to parseClassFile
+    // We do not declare another ResourceMark here, reusing the one declared
+    // at the start of the method
     instanceKlassHandle result = parser.parseClassFile(h_name,
                                                        loader_data,
                                                        protection_domain,
@@ -1134,6 +1195,15 @@ instanceKlassHandle ClassLoader::load_classfile(Symbol* h_name, TRAPS) {
       }
       return h;
     }
+
+#if INCLUDE_JFR
+  {
+    InstanceKlass* ik = result();
+    ON_KLASS_CREATION(ik, parser, THREAD);
+    result = instanceKlassHandle(ik);
+  }
+#endif
+
     h = context.record_result(classpath_index, e, result, THREAD);
   } else {
     if (DumpSharedSpaces) {
@@ -1563,12 +1633,13 @@ static bool can_be_compiled(methodHandle m, int comp_level) {
 }
 
 void ClassLoader::compile_the_world_in(char* name, Handle loader, TRAPS) {
-  int len = (int)strlen(name);
+  size_t len = strlen(name);
   if (len > 6 && strcmp(".class", name + len - 6) == 0) {
     // We have a .class file
     char buffer[2048];
-    strncpy(buffer, name, len - 6);
-    buffer[len-6] = 0;
+    if (len-6 >= sizeof(buffer)) return;
+    strncpy(buffer, name, sizeof(buffer));
+    buffer[len-6] = 0; // Truncate ".class" suffix.
     // If the file has a period after removing .class, it's not really a
     // valid class file.  The class loader will check everything else.
     if (strchr(buffer, '.') == NULL) {
@@ -1627,7 +1698,6 @@ void ClassLoader::compile_the_world_in(char* name, Handle loader, TRAPS) {
                 if (nm != NULL && !m->is_method_handle_intrinsic()) {
                   // Throw out the code so that the code cache doesn't fill up
                   nm->make_not_entrant();
-                  m->clear_code();
                 }
                 CompileBroker::compile_method(m, InvocationEntryBci, CompLevel_full_optimization,
                                               methodHandle(), 0, "CTW", THREAD);
@@ -1646,7 +1716,6 @@ void ClassLoader::compile_the_world_in(char* name, Handle loader, TRAPS) {
             if (nm != NULL && !m->is_method_handle_intrinsic()) {
               // Throw out the code so that the code cache doesn't fill up
               nm->make_not_entrant();
-              m->clear_code();
             }
           }
         }

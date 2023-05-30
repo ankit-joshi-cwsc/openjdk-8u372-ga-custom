@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,6 +25,7 @@ package jdk.testlibrary;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.io.PrintStream;
 import java.lang.management.ManagementFactory;
 import java.lang.management.RuntimeMXBean;
@@ -269,16 +270,46 @@ public final class ProcessTools {
     }
 
     /**
-     * Create ProcessBuilder using the java launcher from the jdk to be tested
-     * and with any platform specific arguments prepended
+     * Create ProcessBuilder using the java launcher from the jdk to be tested,
+     * and with any platform specific arguments prepended.
+     *
+     * @param command Arguments to pass to the java command.
+     * @return The ProcessBuilder instance representing the java command.
      */
     public static ProcessBuilder createJavaProcessBuilder(String... command)
             throws Exception {
+        return createJavaProcessBuilder(false, command);
+    }
+
+    /**
+     * Create ProcessBuilder using the java launcher from the jdk to be tested,
+     * and with any platform specific arguments prepended.
+     *
+     * @param addTestVmAndJavaOptions If true, adds test.vm.opts and test.java.opts
+     *        to the java arguments.
+     * @param command Arguments to pass to the java command.
+     * @return The ProcessBuilder instance representing the java command.
+     */
+    public static ProcessBuilder createJavaProcessBuilder(boolean addTestVmAndJavaOptions, String... command) throws Exception {
         String javapath = JDKToolFinder.getJDKTool("java");
 
         ArrayList<String> args = new ArrayList<>();
         args.add(javapath);
         Collections.addAll(args, getPlatformSpecificVMArgs());
+
+        if (addTestVmAndJavaOptions) {
+            // -cp is needed to make sure the same classpath is used whether the test is
+            // run in AgentVM mode or OtherVM mode. It was added to the hotspot version
+            // of this API as part of 8077608. However, for the jdk version it is only
+            // added when addTestVmAndJavaOptions is true in order to minimize
+            // disruption to existing JDK tests, which have yet to be tested with -cp
+            // being added. At some point -cp should always be added to be consistent
+            // with what the hotspot version does.
+            args.add("-cp");
+            args.add(System.getProperty("java.class.path"));
+            Collections.addAll(args, Utils.getTestJavaOpts());
+        }
+
         Collections.addAll(args, command);
 
         // Reporting
@@ -323,9 +354,31 @@ public final class ProcessTools {
      * @return The output from the process.
      */
     public static OutputAnalyzer executeProcess(ProcessBuilder pb) throws Throwable {
+        return executeProcess(pb, null);
+    }
+
+    /**
+     * Executes a process, pipe some text into its STDIN, waits for it
+     * to finish and returns the process output. The process will have exited
+     * before this method returns.
+     * @param pb The ProcessBuilder to execute.
+     * @param input The text to pipe into STDIN. Can be null.
+     * @return The {@linkplain OutputAnalyzer} instance wrapping the process.
+     */
+    public static OutputAnalyzer executeProcess(ProcessBuilder pb, String input)
+            throws Throwable {
         OutputAnalyzer output = null;
+        Process p = null;
         try {
-            output = new OutputAnalyzer(pb.start());
+            p = pb.start();
+            if (input != null) {
+                try (OutputStream os = p.getOutputStream();
+                        PrintStream ps = new PrintStream(os)) {
+                    ps.print(input);
+                    ps.flush();
+                }
+            }
+            output = new OutputAnalyzer(p);
             return output;
         } catch (Throwable t) {
             System.out.println("executeProcess() failed: " + t);

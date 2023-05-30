@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -254,7 +254,8 @@ bool ExceptionCache::match_exception_with_space(Handle exception) {
 
 
 address ExceptionCache::test_address(address addr) {
-  for (int i=0; i<count(); i++) {
+  int limit = count();
+  for (int i = 0; i < limit; i++) {
     if (pc_at(i) == addr) {
       return handler_at(i);
     }
@@ -265,9 +266,11 @@ address ExceptionCache::test_address(address addr) {
 
 bool ExceptionCache::add_address_and_handler(address addr, address handler) {
   if (test_address(addr) == handler) return true;
-  if (count() < cache_size) {
-    set_pc_at(count(),addr);
-    set_handler_at(count(), handler);
+
+  int index = count();
+  if (index < cache_size) {
+    set_pc_at(index, addr);
+    set_handler_at(index, handler);
     increment_count();
     return true;
   }
@@ -380,10 +383,11 @@ void nmethod::add_exception_cache_entry(ExceptionCache* new_entry) {
   assert(new_entry != NULL,"Must be non null");
   assert(new_entry->next() == NULL, "Must be null");
 
-  if (exception_cache() != NULL) {
-    new_entry->set_next(exception_cache());
+  ExceptionCache *ec = exception_cache();
+  if (ec != NULL) {
+    new_entry->set_next(ec);
   }
-  set_exception_cache(new_entry);
+  release_set_exception_cache(new_entry);
 }
 
 void nmethod::clean_exception_cache(BoolObjectClosure* is_alive) {
@@ -1148,9 +1152,21 @@ void nmethod::clear_inline_caches() {
   }
 }
 
+// Clear ICStubs of all compiled ICs
+void nmethod::clear_ic_stubs() {
+  assert_locked_or_safepoint(CompiledIC_lock);
+  ResourceMark rm;
+  RelocIterator iter(this);
+  while(iter.next()) {
+    if (iter.type() == relocInfo::virtual_call_type) {
+      CompiledIC* ic = CompiledIC_at(&iter);
+      ic->clear_ic_stub();
+    }
+  }
+}
+
 
 void nmethod::cleanup_inline_caches() {
-
   assert_locked_or_safepoint(CompiledIC_lock);
 
   // If the method is not entrant or zombie then a JMP is plastered over the
@@ -1166,7 +1182,8 @@ void nmethod::cleanup_inline_caches() {
     // In fact, why are we bothering to look at oops in a non-entrant method??
   }
 
-  // Find all calls in an nmethod, and clear the ones that points to zombie methods
+  // Find all calls in an nmethod and clear the ones that point to non-entrant,
+  // zombie and unloaded nmethods.
   ResourceMark rm;
   RelocIterator iter(this, low_boundary);
   while(iter.next()) {
@@ -1178,8 +1195,8 @@ void nmethod::cleanup_inline_caches() {
         CodeBlob *cb = CodeCache::find_blob_unsafe(ic->ic_destination());
         if( cb != NULL && cb->is_nmethod() ) {
           nmethod* nm = (nmethod*)cb;
-          // Clean inline caches pointing to both zombie and not_entrant methods
-          if (!nm->is_in_use() || (nm->method()->code() != nm)) ic->set_to_clean();
+          // Clean inline caches pointing to zombie, non-entrant and unloaded methods
+          if (!nm->is_in_use() || (nm->method()->code() != nm)) ic->set_to_clean(is_alive());
         }
         break;
       }
@@ -1188,7 +1205,7 @@ void nmethod::cleanup_inline_caches() {
         CodeBlob *cb = CodeCache::find_blob_unsafe(csc->destination());
         if( cb != NULL && cb->is_nmethod() ) {
           nmethod* nm = (nmethod*)cb;
-          // Clean inline caches pointing to both zombie and not_entrant methods
+          // Clean inline caches pointing to zombie, non-entrant and unloaded methods
           if (!nm->is_in_use() || (nm->method()->code() != nm)) csc->set_to_clean();
         }
         break;
@@ -1279,7 +1296,7 @@ void nmethod::mark_as_seen_on_stack() {
 // Tell if a non-entrant method can be converted to a zombie (i.e.,
 // there are no activations on the stack, not in use by the VM,
 // and not in use by the ServiceThread)
-bool nmethod::can_not_entrant_be_converted() {
+bool nmethod::can_convert_to_zombie() {
   assert(is_not_entrant(), "must be a non-entrant method");
 
   // Since the nmethod sweeper only does partial sweep the sweeper's traversal
@@ -1375,7 +1392,6 @@ void nmethod::make_unloaded(BoolObjectClosure* is_alive, oop cause) {
   assert(_method == NULL, "Tautology");
 
   set_osr_link(NULL);
-  //set_scavenge_root_link(NULL); // done by prune_scavenge_root_nmethods
   NMethodSweeper::report_state_change(this);
 }
 
@@ -1493,7 +1509,7 @@ bool nmethod::make_not_entrant_or_zombie(unsigned int state) {
     if (method() != NULL && (method()->code() == this ||
                              method()->from_compiled_entry() == verified_entry_point())) {
       HandleMark hm;
-      method()->clear_code();
+      method()->clear_code(false /* already owns Patching_lock */);
     }
   } // leave critical region under Patching_lock
 
@@ -1607,7 +1623,11 @@ void nmethod::flush_dependencies(BoolObjectClosure* is_alive) {
       // During GC the is_alive closure is non-NULL, and is used to
       // determine liveness of dependees that need to be updated.
       if (is_alive == NULL || klass->is_loader_alive(is_alive)) {
-        InstanceKlass::cast(klass)->remove_dependent_nmethod(this);
+        // The GC defers deletion of this entry, since there might be multiple threads
+        // iterating over the _dependencies graph. Other call paths are single-threaded
+        // and may delete it immediately.
+        bool delete_immediately = is_alive == NULL;
+        InstanceKlass::cast(klass)->remove_dependent_nmethod(this, delete_immediately);
       }
     }
   }
@@ -1636,24 +1656,28 @@ bool nmethod::can_unload(BoolObjectClosure* is_alive, oop* root, bool unloading_
 // Transfer information from compilation to jvmti
 void nmethod::post_compiled_method_load_event() {
 
-  Method* moop = method();
+  // This is a bad time for a safepoint.  We don't want
+  // this nmethod to get unloaded while we're queueing the event.
+  No_Safepoint_Verifier nsv;
+
+  Method* m = method();
 #ifndef USDT2
   HS_DTRACE_PROBE8(hotspot, compiled__method__load,
-      moop->klass_name()->bytes(),
-      moop->klass_name()->utf8_length(),
-      moop->name()->bytes(),
-      moop->name()->utf8_length(),
-      moop->signature()->bytes(),
-      moop->signature()->utf8_length(),
+      m->klass_name()->bytes(),
+      m->klass_name()->utf8_length(),
+      m->name()->bytes(),
+      m->name()->utf8_length(),
+      m->signature()->bytes(),
+      m->signature()->utf8_length(),
       insts_begin(), insts_size());
 #else /* USDT2 */
   HOTSPOT_COMPILED_METHOD_LOAD(
-      (char *) moop->klass_name()->bytes(),
-      moop->klass_name()->utf8_length(),
-      (char *) moop->name()->bytes(),
-      moop->name()->utf8_length(),
-      (char *) moop->signature()->bytes(),
-      moop->signature()->utf8_length(),
+      (char *) m->klass_name()->bytes(),
+      m->klass_name()->utf8_length(),
+      (char *) m->name()->bytes(),
+      m->name()->utf8_length(),
+      (char *) m->signature()->bytes(),
+      m->signature()->utf8_length(),
       insts_begin(), insts_size());
 #endif /* USDT2 */
 
@@ -1727,12 +1751,11 @@ void static clean_ic_if_metadata_is_dead(CompiledIC *ic, BoolObjectClosure *is_a
     CompiledICHolder* cichk_oop = ic->cached_icholder();
 
     if (mark_on_stack) {
-      Metadata::mark_on_stack(cichk_oop->holder_method());
+      Metadata::mark_on_stack(cichk_oop->holder_metadata());
       Metadata::mark_on_stack(cichk_oop->holder_klass());
     }
 
-    if (cichk_oop->holder_method()->method_holder()->is_loader_alive(is_alive) &&
-        cichk_oop->holder_klass()->is_loader_alive(is_alive)) {
+    if (cichk_oop->is_loader_alive(is_alive)) {
       return;
     }
   } else {
@@ -2152,14 +2175,15 @@ void nmethod::metadata_do(void f(Metadata*)) {
                "metadata must be found in exactly one place");
         if (r->metadata_is_immediate() && r->metadata_value() != NULL) {
           Metadata* md = r->metadata_value();
-          f(md);
+          if (md != _method) f(md);
         }
       } else if (iter.type() == relocInfo::virtual_call_type) {
         // Check compiledIC holders associated with this nmethod
+        ResourceMark rm;
         CompiledIC *ic = CompiledIC_at(&iter);
         if (ic->is_icholder_call()) {
           CompiledICHolder* cichk = ic->cached_icholder();
-          f(cichk->holder_method());
+          f(cichk->holder_metadata());
           f(cichk->holder_klass());
         } else {
           Metadata* ic_oop = ic->cached_metadata();
@@ -2178,7 +2202,7 @@ void nmethod::metadata_do(void f(Metadata*)) {
     f(md);
   }
 
-  // Visit metadata not embedded in the other places.
+  // Call function Method*, not embedded in these other places.
   if (_method != NULL) f(_method);
 }
 
@@ -2274,7 +2298,7 @@ void nmethod::oops_do_marking_epilogue() {
     assert(cur != NULL, "not NULL-terminated");
     nmethod* next = cur->_oops_do_mark_link;
     cur->_oops_do_mark_link = NULL;
-    cur->verify_oop_relocations();
+    DEBUG_ONLY(cur->verify_oop_relocations());
     NOT_PRODUCT(if (TraceScavenge)  cur->print_on(tty, "oops_do, unmark"));
     cur = next;
   }
@@ -2303,7 +2327,7 @@ public:
   void maybe_print(oop* p) {
     if (_print_nm == NULL)  return;
     if (!_detected_scavenge_root)  _print_nm->print_on(tty, "new scavenge root");
-    tty->print_cr(""PTR_FORMAT"[offset=%d] detected scavengable oop "PTR_FORMAT" (found at "PTR_FORMAT")",
+    tty->print_cr("" PTR_FORMAT "[offset=%d] detected scavengable oop " PTR_FORMAT " (found at " PTR_FORMAT ")",
                   _print_nm, (int)((intptr_t)p - (intptr_t)_print_nm),
                   (void *)(*p), (intptr_t)p);
     (*p)->print();
@@ -2592,6 +2616,7 @@ address nmethod::continuation_for_implicit_exception(address pc) {
     ResourceMark rm(thread);
     CodeBlob* cb = CodeCache::find_blob(pc);
     assert(cb != NULL && cb == this, "");
+    ttyLocker ttyl;
     tty->print_cr("implicit exception happened at " INTPTR_FORMAT, pc);
     print();
     method()->print_codes();
@@ -2684,7 +2709,7 @@ public:
       _nm->print_nmethod(true);
       _ok = false;
     }
-    tty->print_cr("*** non-oop "PTR_FORMAT" found at "PTR_FORMAT" (offset %d)",
+    tty->print_cr("*** non-oop " PTR_FORMAT " found at " PTR_FORMAT " (offset %d)",
                   (void *)(*p), (intptr_t)p, (int)((intptr_t)p - (intptr_t)_nm));
   }
   virtual void do_oop(narrowOop* p) { ShouldNotReachHere(); }
@@ -2695,7 +2720,7 @@ void nmethod::verify() {
   // Hmm. OSR methods can be deopted but not marked as zombie or not_entrant
   // seems odd.
 
-  if( is_zombie() || is_not_entrant() )
+  if (is_zombie() || is_not_entrant() || is_unloaded())
     return;
 
   // Make sure all the entry points are correctly aligned for patching.
@@ -2808,7 +2833,7 @@ public:
       _nm->print_nmethod(true);
       _ok = false;
     }
-    tty->print_cr("*** scavengable oop "PTR_FORMAT" found at "PTR_FORMAT" (offset %d)",
+    tty->print_cr("*** scavengable oop " PTR_FORMAT " found at " PTR_FORMAT " (offset %d)",
                   (void *)(*p), (intptr_t)p, (int)((intptr_t)p - (intptr_t)_nm));
     (*p)->print();
   }
@@ -2853,7 +2878,7 @@ void nmethod::print() const {
   print_on(tty, NULL);
 
   if (WizardMode) {
-    tty->print("((nmethod*) "INTPTR_FORMAT ") ", this);
+    tty->print("((nmethod*) " INTPTR_FORMAT ") ", this);
     tty->print(" for method " INTPTR_FORMAT , (address)method());
     tty->print(" { ");
     if (is_in_use())      tty->print("in_use ");
@@ -2912,13 +2937,6 @@ void nmethod::print() const {
                                               nul_chk_table_end(),
                                               nul_chk_table_size());
 }
-
-void nmethod::print_code() {
-  HandleMark hm;
-  ResourceMark m;
-  Disassembler::decode(this);
-}
-
 
 #ifndef PRODUCT
 

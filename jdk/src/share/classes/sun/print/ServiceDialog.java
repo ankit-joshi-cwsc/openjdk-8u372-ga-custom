@@ -183,6 +183,9 @@ public class ServiceDialog extends JDialog implements ActionListener {
             isAWT = true;
         }
 
+        if (attributes.get(DialogOnTop.class) != null) {
+            setAlwaysOnTop(true);
+        }
         Container c = getContentPane();
         c.setLayout(new BorderLayout());
 
@@ -273,6 +276,10 @@ public class ServiceDialog extends JDialog implements ActionListener {
         this.docFlavor = flavor;
         this.asOriginal = attributes;
         this.asCurrent = new HashPrintRequestAttributeSet(attributes);
+
+        if (attributes.get(DialogOnTop.class) != null) {
+            setAlwaysOnTop(true);
+        }
 
         Container c = getContentPane();
         c.setLayout(new BorderLayout());
@@ -1414,13 +1421,13 @@ public class ServiceDialog extends JDialog implements ActionListener {
             topMargin.addActionListener(this);
             topMargin.getAccessibleContext().setAccessibleName(
                                               getMsg("label.topmargin"));
-            topMargin = new JFormattedTextField(nf);
+
             bottomMargin = new JFormattedTextField(nf);
             bottomMargin.addFocusListener(this);
             bottomMargin.addActionListener(this);
             bottomMargin.getAccessibleContext().setAccessibleName(
                                               getMsg("label.bottommargin"));
-            topMargin = new JFormattedTextField(nf);
+
             c.gridwidth = GridBagConstraints.RELATIVE;
             lblLeft = new JLabel(getMsg("label.leftmargin") + " " + unitsMsg,
                                  JLabel.LEADING);

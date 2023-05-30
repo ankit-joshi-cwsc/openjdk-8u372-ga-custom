@@ -371,14 +371,14 @@ public class JavaThread extends Thread {
     Address stackBase = getStackBase();
     // Be robust
     if (sp == null) return false;
-    return stackBase.greaterThanOrEqual(a) && sp.lessThanOrEqual(a);
+    return stackBase.greaterThan(a) && sp.lessThanOrEqual(a);
   }
 
   public boolean isLockOwned(Address a) {
     Address stackBase = getStackBase();
     Address stackLimit = stackBase.addOffsetTo(-getStackSize());
 
-    return stackBase.greaterThanOrEqual(a) && stackLimit.lessThanOrEqual(a);
+    return stackBase.greaterThan(a) && stackLimit.lessThanOrEqual(a);
 
     // FIXME: should traverse MonitorArray/MonitorChunks as in VM
   }
@@ -415,7 +415,7 @@ public class JavaThread extends Thread {
     } else {
       tty.println("No Java frames present");
     }
-    tty.println("Base of Stack: " + getBaseOfStackPointer());
+    tty.println("Base of Stack: " + getStackBase());
     tty.println("Last_Java_SP: " + getLastJavaSP());
     tty.println("Last_Java_FP: " + getLastJavaFP());
     tty.println("Last_Java_PC: " + getLastJavaPC());

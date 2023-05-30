@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -34,6 +34,7 @@
 #include "ci/ciMemberName.hpp"
 #include "compiler/compileBroker.hpp"
 #include "interpreter/bytecode.hpp"
+#include "jfr/jfrEvents.hpp"
 #include "runtime/sharedRuntime.hpp"
 #include "runtime/compilationPolicy.hpp"
 #include "utilities/bitMap.inline.hpp"
@@ -975,7 +976,19 @@ void GraphBuilder::store_indexed(BasicType type) {
       (array->as_NewArray() && array->as_NewArray()->length() && array->as_NewArray()->length()->type()->is_constant())) {
     length = append(new ArrayLength(array, state_before));
   }
-  StoreIndexed* result = new StoreIndexed(array, index, length, type, value, state_before);
+  ciType* array_type = array->declared_type();
+  bool check_boolean = false;
+  if (array_type != NULL) {
+    if (array_type->is_loaded() &&
+      array_type->as_array_klass()->element_type()->basic_type() == T_BOOLEAN) {
+      assert(type == T_BYTE, "boolean store uses bastore");
+      Value mask = append(new Constant(new IntConstant(1)));
+      value = append(new LogicOp(Bytecodes::_iand, value, mask));
+    }
+  } else if (type == T_BYTE) {
+    check_boolean = true;
+  }
+  StoreIndexed* result = new StoreIndexed(array, index, length, type, value, state_before, check_boolean);
   append(result);
   _memory->store_value(value);
 
@@ -1440,9 +1453,54 @@ void GraphBuilder::method_return(Value x) {
     need_mem_bar = true;
   }
 
+  BasicType bt = method()->return_type()->basic_type();
+  switch (bt) {
+    case T_BYTE:
+    {
+      Value shift = append(new Constant(new IntConstant(24)));
+      x = append(new ShiftOp(Bytecodes::_ishl, x, shift));
+      x = append(new ShiftOp(Bytecodes::_ishr, x, shift));
+      break;
+    }
+    case T_SHORT:
+    {
+      Value shift = append(new Constant(new IntConstant(16)));
+      x = append(new ShiftOp(Bytecodes::_ishl, x, shift));
+      x = append(new ShiftOp(Bytecodes::_ishr, x, shift));
+      break;
+    }
+    case T_CHAR:
+    {
+      Value mask = append(new Constant(new IntConstant(0xFFFF)));
+      x = append(new LogicOp(Bytecodes::_iand, x, mask));
+      break;
+    }
+    case T_BOOLEAN:
+    {
+      Value mask = append(new Constant(new IntConstant(1)));
+      x = append(new LogicOp(Bytecodes::_iand, x, mask));
+      break;
+    }
+  }
+
   // Check to see whether we are inlining. If so, Return
   // instructions become Gotos to the continuation point.
   if (continuation() != NULL) {
+
+    int invoke_bci = state()->caller_state()->bci();
+
+    if (x != NULL) {
+      ciMethod* caller = state()->scope()->caller()->method();
+      Bytecodes::Code invoke_raw_bc = caller->raw_code_at_bci(invoke_bci);
+      if (invoke_raw_bc == Bytecodes::_invokehandle || invoke_raw_bc == Bytecodes::_invokedynamic) {
+        ciType* declared_ret_type = caller->get_declared_signature_at_bci(invoke_bci)->return_type();
+        if (declared_ret_type->is_klass() && x->exact_type() == NULL &&
+            x->declared_type() != declared_ret_type && declared_ret_type != compilation()->env()->Object_klass()) {
+          x = append(new TypeCast(declared_ret_type->as_klass(), x, copy_state_before()));
+        }
+      }
+    }
+
     assert(!method()->is_synchronized() || InlineSynchronizedMethods, "can not inline synchronized methods yet");
 
     if (compilation()->env()->dtrace_method_probes()) {
@@ -1466,7 +1524,6 @@ void GraphBuilder::method_return(Value x) {
     // State at end of inlined method is the state of the caller
     // without the method parameters on stack, including the
     // return value, if any, of the inlined method on operand stack.
-    int invoke_bci = state()->caller_state()->bci();
     set_state(state()->caller_state()->copy_for_parsing());
     if (x != NULL) {
       state()->push(x->type(), x);
@@ -1474,7 +1531,7 @@ void GraphBuilder::method_return(Value x) {
         ciMethod* caller = state()->scope()->method();
         ciMethodData* md = caller->method_data_or_null();
         ciProfileData* data = md->bci_to_data(invoke_bci);
-        if (data->is_CallTypeData() || data->is_VirtualCallTypeData()) {
+        if (data != NULL && (data->is_CallTypeData() || data->is_VirtualCallTypeData())) {
           bool has_return = data->is_CallTypeData() ? ((ciCallTypeData*)data)->has_return() : ((ciVirtualCallTypeData*)data)->has_return();
           // May not be true in case of an inlined call through a method handle intrinsic.
           if (has_return) {
@@ -1587,6 +1644,10 @@ void GraphBuilder::access_field(Bytecodes::Code code) {
         if (state_before == NULL) {
           state_before = copy_state_for_exception();
         }
+        if (field->type()->basic_type() == T_BOOLEAN) {
+          Value mask = append(new Constant(new IntConstant(1)));
+          val = append(new LogicOp(Bytecodes::_iand, val, mask));
+        }
         append(new StoreField(append(obj), offset, field, val, true, state_before, needs_patching));
       }
       break;
@@ -1644,6 +1705,23 @@ void GraphBuilder::access_field(Bytecodes::Code code) {
         Value replacement = !needs_patching ? _memory->load(load) : load;
         if (replacement != load) {
           assert(replacement->is_linked() || !replacement->can_be_linked(), "should already by linked");
+          // Writing an (integer) value to a boolean, byte, char or short field includes an implicit narrowing
+          // conversion. Emit an explicit conversion here to get the correct field value after the write.
+          BasicType bt = field->type()->basic_type();
+          switch (bt) {
+          case T_BOOLEAN:
+          case T_BYTE:
+            replacement = append(new Convert(Bytecodes::_i2b, replacement, as_ValueType(bt)));
+            break;
+          case T_CHAR:
+            replacement = append(new Convert(Bytecodes::_i2c, replacement, as_ValueType(bt)));
+            break;
+          case T_SHORT:
+            replacement = append(new Convert(Bytecodes::_i2s, replacement, as_ValueType(bt)));
+            break;
+          default:
+            break;
+          }
           push(type, replacement);
         } else {
           push(type, append(load));
@@ -1656,6 +1734,10 @@ void GraphBuilder::access_field(Bytecodes::Code code) {
       obj = apop();
       if (state_before == NULL) {
         state_before = copy_state_for_exception();
+      }
+      if (field->type()->basic_type() == T_BOOLEAN) {
+        Value mask = append(new Constant(new IntConstant(1)));
+        val = append(new LogicOp(Bytecodes::_iand, val, mask));
       }
       StoreField* store = new StoreField(obj, offset, field, val, false, state_before, needs_patching);
       if (!needs_patching) store = _memory->store(store);
@@ -1683,7 +1765,7 @@ Values* GraphBuilder::args_list_for_profiling(ciMethod* target, int& start, bool
   start = has_receiver ? 1 : 0;
   if (profile_arguments()) {
     ciProfileData* data = method()->method_data()->bci_to_data(bci());
-    if (data->is_CallTypeData() || data->is_VirtualCallTypeData()) {
+    if (data != NULL && (data->is_CallTypeData() || data->is_VirtualCallTypeData())) {
       n = data->is_CallTypeData() ? data->as_CallTypeData()->number_of_arguments() : data->as_VirtualCallTypeData()->number_of_arguments();
     }
   }
@@ -1772,6 +1854,20 @@ void GraphBuilder::invoke(Bytecodes::Code code) {
       log->elem("call method='%d' instr='%s'",
                 log->identify(target),
                 Bytecodes::name(code));
+
+  // invoke-special-super
+  if (bc_raw == Bytecodes::_invokespecial && !target->is_object_initializer()) {
+    ciInstanceKlass* sender_klass =
+          calling_klass->is_anonymous() ? calling_klass->host_klass() :
+                                          calling_klass;
+    if (sender_klass->is_interface()) {
+      int index = state()->stack_size() - (target->arg_size_no_receiver() + 1);
+      Value receiver = state()->stack_at(index);
+      CheckCast* c = new CheckCast(sender_klass, receiver, copy_state_before());
+      c->set_invokespecial_receiver_check();
+      state()->stack_at_put(index, append_split(c));
+    }
+  }
 
   // Some methods are obviously bindable without any type checks so
   // convert them directly to an invokespecial or invokestatic.
@@ -1895,10 +1991,8 @@ void GraphBuilder::invoke(Bytecodes::Code code) {
       if (singleton) {
         cha_monomorphic_target = target->find_monomorphic_target(calling_klass, target->holder(), singleton);
         if (cha_monomorphic_target != NULL) {
-          // If CHA is able to bind this invoke then update the class
-          // to match that class, otherwise klass will refer to the
-          // interface.
-          klass = cha_monomorphic_target->holder();
+          ciInstanceKlass* holder = cha_monomorphic_target->holder();
+          klass = (holder->is_subtype_of(singleton) ? holder : singleton); // avoid upcasts
           actual_recv = target->holder();
 
           // insert a check it's really the expected class.
@@ -1908,6 +2002,8 @@ void GraphBuilder::invoke(Bytecodes::Code code) {
           // pass the result of the checkcast so that the compiler has
           // more accurate type info in the inlinee
           better_receiver = append_split(c);
+
+          dependency_recorder()->assert_unique_implementor(target->holder(), singleton);
         }
       }
     }
@@ -2297,7 +2393,7 @@ XHandlers* GraphBuilder::handle_exception(Instruction* instruction) {
   if (!has_handler() && (!instruction->needs_exception_state() || instruction->exception_state() != NULL)) {
     assert(instruction->exception_state() == NULL
            || instruction->exception_state()->kind() == ValueStack::EmptyExceptionState
-           || (instruction->exception_state()->kind() == ValueStack::ExceptionState && _compilation->env()->jvmti_can_access_local_variables()),
+           || (instruction->exception_state()->kind() == ValueStack::ExceptionState && _compilation->env()->should_retain_local_variables()),
            "exception_state should be of exception kind");
     return new XHandlers();
   }
@@ -2388,7 +2484,7 @@ XHandlers* GraphBuilder::handle_exception(Instruction* instruction) {
       // This scope and all callees do not handle exceptions, so the local
       // variables of this scope are not needed. However, the scope itself is
       // required for a correct exception stack trace -> clear out the locals.
-      if (_compilation->env()->jvmti_can_access_local_variables()) {
+      if (_compilation->env()->should_retain_local_variables()) {
         cur_state = cur_state->copy(ValueStack::ExceptionState, cur_state->bci());
       } else {
         cur_state = cur_state->copy(ValueStack::EmptyExceptionState, cur_state->bci());
@@ -3235,7 +3331,9 @@ GraphBuilder::GraphBuilder(Compilation* compilation, IRScope* scope)
   // for osr compile, bailout if some requirements are not fulfilled
   if (osr_bci != -1) {
     BlockBegin* osr_block = blm.bci2block()->at(osr_bci);
-    assert(osr_block->is_set(BlockBegin::was_visited_flag),"osr entry must have been visited for osr compile");
+    if (!osr_block->is_set(BlockBegin::was_visited_flag)) {
+      BAILOUT("osr entry must have been visited for osr compile");
+    }
 
     // check if osr entry point has empty stack - we cannot handle non-empty stacks at osr entry points
     if (!osr_block->state()->stack_is_empty()) {
@@ -3272,7 +3370,7 @@ ValueStack* GraphBuilder::copy_state_exhandling_with_bci(int bci) {
 ValueStack* GraphBuilder::copy_state_for_exception_with_bci(int bci) {
   ValueStack* s = copy_state_exhandling_with_bci(bci);
   if (s == NULL) {
-    if (_compilation->env()->jvmti_can_access_local_variables()) {
+    if (_compilation->env()->should_retain_local_variables()) {
       s = state()->copy(ValueStack::ExceptionState, bci);
     } else {
       s = state()->copy(ValueStack::EmptyExceptionState, bci);
@@ -3380,10 +3478,16 @@ bool GraphBuilder::try_inline_intrinsics(ciMethod* callee) {
       if (!InlineArrayCopy) return false;
       break;
 
-#ifdef TRACE_HAVE_INTRINSICS
-    case vmIntrinsics::_classID:
-    case vmIntrinsics::_threadID:
-      preserves_state = true;
+#ifdef JFR_HAVE_INTRINSICS
+#if defined(_LP64) || !defined(TRACE_ID_CLASS_SHIFT)
+    case vmIntrinsics::_getClassId:
+      preserves_state = false;
+      cantrap = false;
+      break;
+#endif
+
+    case vmIntrinsics::_getEventWriter:
+      preserves_state = false;
       cantrap = true;
       break;
 
@@ -3410,6 +3514,7 @@ bool GraphBuilder::try_inline_intrinsics(ciMethod* callee) {
 
     case vmIntrinsics::_getClass      :
     case vmIntrinsics::_isInstance    :
+    case vmIntrinsics::_isPrimitive   :
       if (!InlineClassNatives) return false;
       preserves_state = true;
       break;
@@ -3921,8 +4026,8 @@ bool GraphBuilder::try_inline_full(ciMethod* callee, bool holder_known, Bytecode
   caller_state->truncate_stack(args_base);
   assert(callee_state->stack_size() == 0, "callee stack must be empty");
 
-  Value lock;
-  BlockBegin* sync_handler;
+  Value lock = NULL;
+  BlockBegin* sync_handler = NULL;
 
   // Inline the locking of the receiver if the callee is synchronized
   if (callee->is_synchronized()) {
@@ -4222,7 +4327,12 @@ bool GraphBuilder::append_unsafe_put_obj(ciMethod* callee, BasicType t, bool is_
 #ifndef _LP64
     offset = append(new Convert(Bytecodes::_l2i, offset, as_ValueType(T_INT)));
 #endif
-    Instruction* op = append(new UnsafePutObject(t, args->at(1), offset, args->at(3), is_volatile));
+    Value val = args->at(3);
+    if (t == T_BOOLEAN) {
+      Value mask = append(new Constant(new IntConstant(1)));
+      val = append(new LogicOp(Bytecodes::_iand, val, mask));
+    }
+    Instruction* op = append(new UnsafePutObject(t, args->at(1), offset, val, is_volatile));
     compilation()->set_has_unsafe_access(true);
     kill_all();
   }
@@ -4311,6 +4421,30 @@ void GraphBuilder::append_unsafe_CAS(ciMethod* callee) {
 }
 
 
+static void post_inlining_event(EventCompilerInlining* event,
+                                int compile_id,
+                                const char* msg,
+                                bool success,
+                                int bci,
+                                ciMethod* caller,
+                                ciMethod* callee) {
+  assert(caller != NULL, "invariant");
+  assert(callee != NULL, "invariant");
+  assert(event != NULL, "invariant");
+  assert(event->should_commit(), "invariant");
+  JfrStructCalleeMethod callee_struct;
+  callee_struct.set_type(callee->holder()->name()->as_utf8());
+  callee_struct.set_name(callee->name()->as_utf8());
+  callee_struct.set_descriptor(callee->signature()->as_symbol()->as_utf8());
+  event->set_compileId(compile_id);
+  event->set_message(msg);
+  event->set_succeeded(success);
+  event->set_bci(bci);
+  event->set_caller(caller->get_Method());
+  event->set_callee(callee_struct);
+  event->commit();
+}
+
 void GraphBuilder::print_inlining(ciMethod* callee, const char* msg, bool success) {
   CompileLog* log = compilation()->log();
   if (log != NULL) {
@@ -4325,6 +4459,11 @@ void GraphBuilder::print_inlining(ciMethod* callee, const char* msg, bool succes
       else
         log->inline_fail("reason unknown");
     }
+  }
+
+  EventCompilerInlining event;
+  if (event.should_commit()) {
+    post_inlining_event(&event, compilation()->env()->task()->compile_id(), msg, success, bci(), method(), callee);
   }
 
   if (!PrintInlining && !compilation()->method()->has_option("PrintInlining")) {
@@ -4382,7 +4521,7 @@ void GraphBuilder::profile_return_type(Value ret, ciMethod* callee, ciMethod* m,
   }
   ciMethodData* md = m->method_data_or_null();
   ciProfileData* data = md->bci_to_data(invoke_bci);
-  if (data->is_CallTypeData() || data->is_VirtualCallTypeData()) {
+  if (data != NULL && (data->is_CallTypeData() || data->is_VirtualCallTypeData())) {
     append(new ProfileReturnType(m , invoke_bci, callee, ret));
   }
 }

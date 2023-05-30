@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2001, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -35,6 +35,7 @@
 #include <direct.h>
 #include <windows.h>
 #include <io.h>
+#include <limits.h>
 
 #include "jni.h"
 #include "io_util.h"
@@ -525,13 +526,40 @@ Java_java_io_WinNTFileSystem_getLength(JNIEnv *env, jobject this, jobject file)
         }
     } else {
         if (GetLastError() == ERROR_SHARING_VIOLATION) {
-            /* The error is "share violation", which means the file/dir
-               must exists. Try _wstati64, we know this at least works
-               for pagefile.sys and hiberfil.sys.
-            */
-            struct _stati64 sb;
-            if (_wstati64(pathbuf, &sb) == 0) {
-                rv = sb.st_size;
+            //
+            // The error is a "share violation", which means the file/dir
+            // must exist. Try FindFirstFile, we know this at least works
+            // for pagefile.sys.
+            //
+
+            WIN32_FIND_DATAW fileData;
+            HANDLE h = FindFirstFileW(pathbuf, &fileData);
+            if (h != INVALID_HANDLE_VALUE) {
+                if ((fileData.dwFileAttributes &
+                     FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+                    WCHAR backslash = L'\\';
+                    WCHAR *pslash = wcsrchr(pathbuf, backslash);
+                    WCHAR *fslash = wcsrchr(fileData.cFileName, backslash);
+                    if (pslash == NULL) {
+                        pslash = pathbuf;
+                    } else {
+                        pslash++;
+                    }
+                    if (fslash == NULL) {
+                        fslash = fileData.cFileName;
+                    } else {
+                        fslash++;
+                    }
+                    if (wcscmp(pslash, fslash) == 0) {
+                        ULARGE_INTEGER length;
+                        length.LowPart = fileData.nFileSizeLow;
+                        length.HighPart = fileData.nFileSizeHigh;
+                        if (length.QuadPart <= _I64_MAX) {
+                            rv = (jlong)length.QuadPart;
+                        }
+                    }
+                }
+                FindClose(h);
             }
         }
     }
@@ -626,6 +654,7 @@ Java_java_io_WinNTFileSystem_list(JNIEnv *env, jobject this, jobject file)
     jstring name;
     jclass str_class;
     WCHAR *pathbuf;
+    DWORD err;
 
     str_class = JNU_ClassString(env);
     CHECK_NULL_RETURN(str_class, NULL);
@@ -687,8 +716,10 @@ Java_java_io_WinNTFileSystem_list(JNIEnv *env, jobject this, jobject file)
     len = 0;
     maxlen = 16;
     rv = (*env)->NewObjectArray(env, maxlen, str_class, NULL);
-    if (rv == NULL) // Couldn't allocate an array
+    if (rv == NULL) { // Couldn't allocate an array
+        FindClose(handle);
         return NULL;
+    }
     /* Scan the directory */
     do {
         if (!wcscmp(find_data.cFileName, L".")
@@ -696,13 +727,17 @@ Java_java_io_WinNTFileSystem_list(JNIEnv *env, jobject this, jobject file)
            continue;
         name = (*env)->NewString(env, find_data.cFileName,
                                  (jsize)wcslen(find_data.cFileName));
-        if (name == NULL)
-            return NULL; // error;
+        if (name == NULL) {
+            FindClose(handle);
+            return NULL; // error
+        }
         if (len == maxlen) {
             old = rv;
             rv = (*env)->NewObjectArray(env, maxlen <<= 1, str_class, NULL);
-            if (rv == NULL || JNU_CopyObjectArray(env, rv, old, len) < 0)
+            if (rv == NULL || JNU_CopyObjectArray(env, rv, old, len) < 0) {
+                FindClose(handle);
                 return NULL; // error
+            }
             (*env)->DeleteLocalRef(env, old);
         }
         (*env)->SetObjectArrayElement(env, rv, len++, name);
@@ -710,9 +745,11 @@ Java_java_io_WinNTFileSystem_list(JNIEnv *env, jobject this, jobject file)
 
     } while (FindNextFileW(handle, &find_data));
 
-    if (GetLastError() != ERROR_NO_MORE_FILES)
-        return NULL; // error
+    err = GetLastError();
     FindClose(handle);
+    if (err != ERROR_NO_MORE_FILES) {
+        return NULL; // error
+    }
 
     /* Copy the final results into an appropriately-sized array */
     old = rv;

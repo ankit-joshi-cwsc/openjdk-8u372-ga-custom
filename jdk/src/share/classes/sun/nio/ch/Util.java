@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2000, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -35,6 +35,7 @@ import java.nio.channels.*;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.util.*;
+import jdk.internal.misc.TerminatingThreadLocal;
 import sun.misc.Unsafe;
 import sun.misc.Cleaner;
 import sun.security.action.GetPropertyAction;
@@ -47,15 +48,69 @@ public class Util {
     // The number of temp buffers in our pool
     private static final int TEMP_BUF_POOL_SIZE = IOUtil.IOV_MAX;
 
+    // The max size allowed for a cached temp buffer, in bytes
+    private static final long MAX_CACHED_BUFFER_SIZE = getMaxCachedBufferSize();
+
     // Per-thread cache of temporary direct buffers
-    private static ThreadLocal<BufferCache> bufferCache =
-        new ThreadLocal<BufferCache>()
-    {
+    private static ThreadLocal<BufferCache> bufferCache = new TerminatingThreadLocal<BufferCache>() {
         @Override
         protected BufferCache initialValue() {
             return new BufferCache();
         }
+        @Override
+        protected void threadTerminated(BufferCache cache) { // will never be null
+            while (!cache.isEmpty()) {
+                ByteBuffer bb = cache.removeFirst();
+                free(bb);
+            }
+        }
     };
+
+    /**
+     * Returns the max size allowed for a cached temp buffers, in
+     * bytes. It defaults to Long.MAX_VALUE. It can be set with the
+     * jdk.nio.maxCachedBufferSize property. Even though
+     * ByteBuffer.capacity() returns an int, we're using a long here
+     * for potential future-proofing.
+     */
+    private static long getMaxCachedBufferSize() {
+        String s = java.security.AccessController.doPrivileged(
+            new PrivilegedAction<String>() {
+                @Override
+                public String run() {
+                    return System.getProperty("jdk.nio.maxCachedBufferSize");
+                }
+            });
+        if (s != null) {
+            try {
+                long m = Long.parseLong(s);
+                if (m >= 0) {
+                    return m;
+                } else {
+                    // if it's negative, ignore the system property
+                }
+            } catch (NumberFormatException e) {
+                // if the string is not well formed, ignore the system property
+            }
+        }
+        return Long.MAX_VALUE;
+    }
+
+    /**
+     * Returns true if a buffer of this size is too large to be
+     * added to the buffer cache, false otherwise.
+     */
+    private static boolean isBufferTooLarge(int size) {
+        return size > MAX_CACHED_BUFFER_SIZE;
+    }
+
+    /**
+     * Returns true if the buffer is too large to be added to the
+     * buffer cache, false otherwise.
+     */
+    private static boolean isBufferTooLarge(ByteBuffer buf) {
+        return isBufferTooLarge(buf.capacity());
+    }
 
     /**
      * A simple cache of direct buffers.
@@ -83,6 +138,9 @@ public class Util {
          * size (or null if no suitable buffer is found).
          */
         ByteBuffer get(int size) {
+            // Don't call this if the buffer would be too large.
+            assert !isBufferTooLarge(size);
+
             if (count == 0)
                 return null;  // cache is empty
 
@@ -120,6 +178,9 @@ public class Util {
         }
 
         boolean offerFirst(ByteBuffer buf) {
+            // Don't call this if the buffer is too large.
+            assert !isBufferTooLarge(buf);
+
             if (count >= TEMP_BUF_POOL_SIZE) {
                 return false;
             } else {
@@ -131,6 +192,9 @@ public class Util {
         }
 
         boolean offerLast(ByteBuffer buf) {
+            // Don't call this if the buffer is too large.
+            assert !isBufferTooLarge(buf);
+
             if (count >= TEMP_BUF_POOL_SIZE) {
                 return false;
             } else {
@@ -159,6 +223,15 @@ public class Util {
      * Returns a temporary buffer of at least the given size
      */
     public static ByteBuffer getTemporaryDirectBuffer(int size) {
+        // If a buffer of this size is too large for the cache, there
+        // should not be a buffer in the cache that is at least as
+        // large. So we'll just create a new one. Also, we don't have
+        // to remove the buffer from the cache (as this method does
+        // below) given that we won't put the new buffer in the cache.
+        if (isBufferTooLarge(size)) {
+            return ByteBuffer.allocateDirect(size);
+        }
+
         BufferCache cache = bufferCache.get();
         ByteBuffer buf = cache.get(size);
         if (buf != null) {
@@ -188,6 +261,13 @@ public class Util {
      * likely to be returned by a subsequent call to getTemporaryDirectBuffer.
      */
     static void offerFirstTemporaryDirectBuffer(ByteBuffer buf) {
+        // If the buffer is too large for the cache we don't have to
+        // check the cache. We'll just free it.
+        if (isBufferTooLarge(buf)) {
+            free(buf);
+            return;
+        }
+
         assert buf != null;
         BufferCache cache = bufferCache.get();
         if (!cache.offerFirst(buf)) {
@@ -203,6 +283,13 @@ public class Util {
      * cache in same order that they were obtained.
      */
     static void offerLastTemporaryDirectBuffer(ByteBuffer buf) {
+        // If the buffer is too large for the cache we don't have to
+        // check the cache. We'll just free it.
+        if (isBufferTooLarge(buf)) {
+            free(buf);
+            return;
+        }
+
         assert buf != null;
         BufferCache cache = bufferCache.get();
         if (!cache.offerLast(buf)) {

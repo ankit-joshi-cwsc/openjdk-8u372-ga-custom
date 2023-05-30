@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,6 +32,10 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.UnknownHostException;
+import java.nio.file.Path;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.file.attribute.FileAttribute;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Arrays;
@@ -60,6 +64,15 @@ public final class Utils {
      * Returns the value of 'test.java.opts'system property.
      */
     public static final String JAVA_OPTIONS = System.getProperty("test.java.opts", "").trim();
+
+    public static final String TEST_JDK = System.getProperty("test.jdk");
+
+    public static final String COMPILE_JDK= System.getProperty("compile.jdk", TEST_JDK);
+
+    public static final String TEST_SRC = System.getProperty("test.src", "").trim();
+
+    public static final String TEST_CLASSES = System.getProperty("test.classes", ".");
+
 
     private static Unsafe unsafe = null;
 
@@ -260,8 +273,8 @@ public final class Utils {
             output = ProcessTools.executeProcess(jcmdLauncher.getCommand());
             output.shouldHaveExitValue(0);
 
-            // Search for a line starting with numbers (pid), follwed by the key.
-            Pattern pattern = Pattern.compile("([0-9]+)\\s.*(" + key + ").*\\r?\\n");
+            // Search for a line starting with numbers (pid), followed by the key.
+            Pattern pattern = Pattern.compile("^([0-9]+)\\s.*(" + key + ")", Pattern.MULTILINE);
             Matcher matcher = pattern.matcher(output.getStdout());
 
             int pid = -1;
@@ -361,4 +374,25 @@ public final class Utils {
         }
         return new String(hexView);
     }
+
+    /**
+     * Creates an empty directory in "user.dir" or "."
+     * <p>
+     * This method is meant as a replacement for {@code Files#createTempDirectory(String, String, FileAttribute...)}
+     * that doesn't leave files behind in /tmp directory of the test machine
+     * <p>
+     * If the property "user.dir" is not set, "." will be used.
+     *
+     * @param prefix
+     * @param attrs
+     * @return the path to the newly created directory
+     * @throws IOException
+     *
+     * @see {@link Files#createTempDirectory(String, String, FileAttribute...)}
+     */
+    public static Path createTempDirectory(String prefix, FileAttribute<?>... attrs) throws IOException {
+        Path dir = Paths.get(System.getProperty("user.dir", "."));
+        return Files.createTempDirectory(dir, prefix);
+    }
+
 }

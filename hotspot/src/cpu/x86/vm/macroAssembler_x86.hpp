@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -289,14 +289,17 @@ class MacroAssembler: public Assembler {
                            Register last_java_fp,
                            address last_java_pc);
 
-  void reset_last_Java_frame(Register thread, bool clear_fp, bool clear_pc);
+  void reset_last_Java_frame(Register thread, bool clear_fp);
 
   // thread in the default location (r15_thread on 64bit)
-  void reset_last_Java_frame(bool clear_fp, bool clear_pc);
+  void reset_last_Java_frame(bool clear_fp);
 
   // Stores
   void store_check(Register obj);                // store check for obj - register is destroyed afterwards
   void store_check(Register obj, Address dst);   // same as above, dst is exact store location (reg. is destroyed)
+
+  void resolve_jobject(Register value, Register thread, Register tmp);
+  void clear_jweak_tag(Register possibly_jweak);
 
 #if INCLUDE_ALL_GCS
 
@@ -525,7 +528,8 @@ class MacroAssembler: public Assembler {
                                RegisterOrConstant itable_index,
                                Register method_result,
                                Register scan_temp,
-                               Label& no_such_interface);
+                               Label& no_such_interface,
+                               bool return_method = true);
 
   // virtual method calling
   void lookup_virtual_method(Register recv_klass,
@@ -1241,6 +1245,25 @@ public:
                                Register carry2);
   void multiply_to_len(Register x, Register xlen, Register y, Register ylen, Register z, Register zlen,
                        Register tmp1, Register tmp2, Register tmp3, Register tmp4, Register tmp5);
+
+  void square_rshift(Register x, Register len, Register z, Register tmp1, Register tmp3,
+                     Register tmp4, Register tmp5, Register rdxReg, Register raxReg);
+  void multiply_add_64_bmi2(Register sum, Register op1, Register op2, Register carry,
+                            Register tmp2);
+  void multiply_add_64(Register sum, Register op1, Register op2, Register carry,
+                       Register rdxReg, Register raxReg);
+  void add_one_64(Register z, Register zlen, Register carry, Register tmp1);
+  void lshift_by_1(Register x, Register len, Register z, Register zlen, Register tmp1, Register tmp2,
+                       Register tmp3, Register tmp4);
+  void square_to_len(Register x, Register len, Register z, Register zlen, Register tmp1, Register tmp2,
+                     Register tmp3, Register tmp4, Register tmp5, Register rdxReg, Register raxReg);
+
+  void mul_add_128_x_32_loop(Register out, Register in, Register offset, Register len, Register tmp1,
+               Register tmp2, Register tmp3, Register tmp4, Register tmp5, Register rdxReg,
+               Register raxReg);
+  void mul_add(Register out, Register in, Register offset, Register len, Register k, Register tmp1,
+               Register tmp2, Register tmp3, Register tmp4, Register tmp5, Register rdxReg,
+               Register raxReg);
 #endif
 
   // CRC32 code for java.util.zip.CRC32::updateBytes() instrinsic.

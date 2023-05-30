@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -952,14 +952,19 @@ void ConnectionGraph::process_call_arguments(CallNode *call) {
                   strcmp(call->as_CallLeaf()->_name, "aescrypt_decryptBlock") == 0 ||
                   strcmp(call->as_CallLeaf()->_name, "cipherBlockChaining_encryptAESCrypt") == 0 ||
                   strcmp(call->as_CallLeaf()->_name, "cipherBlockChaining_decryptAESCrypt") == 0 ||
+                  strcmp(call->as_CallLeaf()->_name, "ghash_processBlocks") == 0 ||
                   strcmp(call->as_CallLeaf()->_name, "sha1_implCompress") == 0 ||
                   strcmp(call->as_CallLeaf()->_name, "sha1_implCompressMB") == 0 ||
                   strcmp(call->as_CallLeaf()->_name, "sha256_implCompress") == 0 ||
                   strcmp(call->as_CallLeaf()->_name, "sha256_implCompressMB") == 0 ||
                   strcmp(call->as_CallLeaf()->_name, "sha512_implCompress") == 0 ||
                   strcmp(call->as_CallLeaf()->_name, "sha512_implCompressMB") == 0 ||
-                  strcmp(call->as_CallLeaf()->_name, "multiplyToLen") == 0)
-                  ))) {
+                  strcmp(call->as_CallLeaf()->_name, "multiplyToLen") == 0 ||
+                  strcmp(call->as_CallLeaf()->_name, "squareToLen") == 0 ||
+                  strcmp(call->as_CallLeaf()->_name, "mulAdd") == 0 ||
+                  strcmp(call->as_CallLeaf()->_name, "montgomery_multiply") == 0 ||
+                  strcmp(call->as_CallLeaf()->_name, "montgomery_square") == 0)
+                 ))) {
             call->dump();
             fatal(err_msg_res("EA unexpected CallLeaf %s", call->as_CallLeaf()->_name));
           }
@@ -2012,8 +2017,10 @@ bool ConnectionGraph::is_oop_field(Node* n, int offset, bool* unsafe) {
         // Check for unsafe oop field access
         for (DUIterator_Fast imax, i = n->fast_outs(imax); i < imax; i++) {
           int opcode = n->fast_out(i)->Opcode();
-          if (opcode == Op_StoreP || opcode == Op_LoadP ||
-              opcode == Op_StoreN || opcode == Op_LoadN) {
+          if (opcode == Op_StoreP          || opcode == Op_StoreN ||
+              opcode == Op_LoadP           || opcode == Op_LoadN  ||
+              opcode == Op_GetAndSetP      || opcode == Op_GetAndSetN ||
+              opcode == Op_CompareAndSwapP || opcode == Op_CompareAndSwapN) {
             bt = T_OBJECT;
             (*unsafe) = true;
             break;
@@ -2033,8 +2040,10 @@ bool ConnectionGraph::is_oop_field(Node* n, int offset, bool* unsafe) {
       // Allocation initialization, ThreadLocal field access, unsafe access
       for (DUIterator_Fast imax, i = n->fast_outs(imax); i < imax; i++) {
         int opcode = n->fast_out(i)->Opcode();
-        if (opcode == Op_StoreP || opcode == Op_LoadP ||
-            opcode == Op_StoreN || opcode == Op_LoadN) {
+        if (opcode == Op_StoreP          || opcode == Op_StoreN ||
+            opcode == Op_LoadP           || opcode == Op_LoadN  ||
+            opcode == Op_GetAndSetP      || opcode == Op_GetAndSetN ||
+            opcode == Op_CompareAndSwapP || opcode == Op_CompareAndSwapN) {
           bt = T_OBJECT;
           break;
         }
@@ -2053,6 +2062,9 @@ JavaObjectNode* ConnectionGraph::unique_java_object(Node *n) {
     return NULL;
   }
   PointsToNode* ptn = ptnode_adr(idx);
+  if (ptn == NULL) {
+    return NULL;
+  }
   if (ptn->is_JavaObject()) {
     return ptn->as_JavaObject();
   }
@@ -2106,6 +2118,9 @@ bool ConnectionGraph::not_global_escape(Node *n) {
     return false;
   }
   PointsToNode* ptn = ptnode_adr(idx);
+  if (ptn == NULL) {
+    return false; // not in congraph (e.g. ConI)
+  }
   PointsToNode::EscapeState es = ptn->escape_state();
   // If we have already computed a value, return it.
   if (es >= PointsToNode::GlobalEscape)
@@ -3183,7 +3198,7 @@ void ConnectionGraph::split_unique_types(GrowableArray<Node *>  &alloc_worklist)
     // Note 2: MergeMem may already contains instance memory slices added
     // during find_inst_mem() call when memory nodes were processed above.
     igvn->hash_delete(nmm);
-    uint nslices = nmm->req();
+    uint nslices = MIN2(nmm->req(), new_index_start);
     for (uint i = Compile::AliasIdxRaw+1; i < nslices; i++) {
       Node* mem = nmm->in(i);
       Node* cur = NULL;

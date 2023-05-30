@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2011, 2013, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2011, 2021, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -158,10 +158,7 @@ AC_DEFUN_ONCE([JDKOPT_SETUP_JVM_VARIANTS],
   if test "x$JVM_VARIANT_ZEROSHARK" = xtrue ; then
     INCLUDE_SA=false
   fi
-  if test "x$VAR_CPU" = xppc64 ; then
-    INCLUDE_SA=false
-  fi
-  if test "x$OPENJDK_TARGET_CPU" = xaarch64; then
+  if test "x$VAR_CPU" = xppc64 -o "x$VAR_CPU" = xppc64le ; then
     INCLUDE_SA=false
   fi
   AC_SUBST(INCLUDE_SA)
@@ -389,8 +386,6 @@ AC_DEFUN_ONCE([JDKOPT_SETUP_JDK_OPTIONS],
       [specify alternative cacerts file])])
   if test "x$with_cacerts_file" != x; then
     CACERTS_FILE=$with_cacerts_file
-  else
-    CACERTS_FILE=${SRC_ROOT}/jdk/src/share/lib/security/cacerts
   fi
   AC_SUBST(CACERTS_FILE)
 
@@ -434,6 +429,38 @@ AC_DEFUN_ONCE([JDKOPT_SETUP_JDK_OPTIONS],
   COMPRESS_JARS=false
 
   AC_SUBST(COMPRESS_JARS)
+
+  ###############################################################################
+  #
+  # Enable or disable JFR
+  #
+  AC_MSG_CHECKING([whether to build JFR])
+  AC_ARG_ENABLE(jfr, [AS_HELP_STRING([--disable-jfr],
+      [Disable Java Flight Recorder support @<:@enabled@:>@])],,
+      [enable_jfr=auto])
+  if test "x$enable_jfr" = "xno"; then
+    ENABLE_JFR=false
+  elif test "x$enable_jfr" = "xyes" -o "x$enable_jfr" = "xauto"; then
+    if test "x$JVM_VARIANT_MINIMAL1" = "xtrue" -o "x$JVM_VARIANT_ZERO" = "xtrue"; then
+      if test "x$enable_jfr" = "xyes"; then
+        AC_MSG_ERROR([cannot enable JFR on minimal1 VM or zero build])
+      else
+        ENABLE_JFR=false
+      fi
+    elif test "x$OPENJDK_TARGET_OS" = xaix; then
+      if test "x$enable_jfr" = "xyes"; then
+        AC_MSG_ERROR([AIX does not support JFR])
+      else
+        ENABLE_JFR=false
+      fi
+    else
+      ENABLE_JFR=true
+    fi
+  else
+    AC_MSG_ERROR([--enable-jfr must be set to either yes or no])
+  fi
+  AC_MSG_RESULT([$ENABLE_JFR])
+  AC_SUBST(ENABLE_JFR)
 ])
 
 ###############################################################################
@@ -509,9 +536,59 @@ AC_DEFUN_ONCE([JDKOPT_SETUP_JDK_VERSION_NUMBERS],
   AC_SUBST(PRODUCT_NAME)
   AC_SUBST(PRODUCT_SUFFIX)
   AC_SUBST(JDK_RC_PLATFORM_NAME)
-  AC_SUBST(COMPANY_NAME)
   AC_SUBST(MACOSX_BUNDLE_NAME_BASE)
   AC_SUBST(MACOSX_BUNDLE_ID_BASE)
+
+  # The vendor name, if any
+  AC_ARG_WITH(vendor-name, [AS_HELP_STRING([--with-vendor-name],
+      [Set vendor name. Among others, used to set the 'java.vendor'
+       and 'java.vm.vendor' system properties. @<:@not specified@:>@])])
+  if test "x$with_vendor_name" = xyes; then
+    AC_MSG_ERROR([--with-vendor-name must have a value])
+  elif [ ! [[ $with_vendor_name =~ ^[[:print:]]*$ ]] ]; then
+    AC_MSG_ERROR([--with-vendor-name contains non-printing characters: $with_vendor_name])
+  elif test "x$with_vendor_name" != x; then
+    # Only set COMPANY_NAME if '--with-vendor-name' was used and is not empty.
+    # Otherwise we will use the value from "version-numbers" included above.
+    COMPANY_NAME="$with_vendor_name"
+  fi
+  AC_SUBST(COMPANY_NAME)
+
+  # The vendor URL, if any
+  AC_ARG_WITH(vendor-url, [AS_HELP_STRING([--with-vendor-url],
+      [Set the 'java.vendor.url' system property @<:@not specified@:>@])])
+  if test "x$with_vendor_url" = xyes; then
+    AC_MSG_ERROR([--with-vendor-url must have a value])
+  elif [ ! [[ $with_vendor_url =~ ^[[:print:]]*$ ]] ]; then
+    AC_MSG_ERROR([--with-vendor-url contains non-printing characters: $with_vendor_url])
+  else
+    VENDOR_URL="$with_vendor_url"
+  fi
+  AC_SUBST(VENDOR_URL)
+
+  # The vendor bug URL, if any
+  AC_ARG_WITH(vendor-bug-url, [AS_HELP_STRING([--with-vendor-bug-url],
+      [Set the 'java.vendor.url.bug' system property @<:@not specified@:>@])])
+  if test "x$with_vendor_bug_url" = xyes; then
+    AC_MSG_ERROR([--with-vendor-bug-url must have a value])
+  elif [ ! [[ $with_vendor_bug_url =~ ^[[:print:]]*$ ]] ]; then
+    AC_MSG_ERROR([--with-vendor-bug-url contains non-printing characters: $with_vendor_bug_url])
+  else
+    VENDOR_URL_BUG="$with_vendor_bug_url"
+  fi
+  AC_SUBST(VENDOR_URL_BUG)
+
+  # The vendor VM bug URL, if any
+  AC_ARG_WITH(vendor-vm-bug-url, [AS_HELP_STRING([--with-vendor-vm-bug-url],
+      [Sets the bug URL which will be displayed when the VM crashes @<:@not specified@:>@])])
+  if test "x$with_vendor_vm_bug_url" = xyes; then
+    AC_MSG_ERROR([--with-vendor-vm-bug-url must have a value])
+  elif [ ! [[ $with_vendor_vm_bug_url =~ ^[[:print:]]*$ ]] ]; then
+    AC_MSG_ERROR([--with-vendor-vm-bug-url contains non-printing characters: $with_vendor_vm_bug_url])
+  else
+    VENDOR_URL_VM_BUG="$with_vendor_vm_bug_url"
+  fi
+  AC_SUBST(VENDOR_URL_VM_BUG)
 
   AC_ARG_WITH(copyright-year, [AS_HELP_STRING([--with-copyright-year],
       [Set copyright year value for build @<:@current year@:>@])])
@@ -556,6 +633,9 @@ AC_DEFUN_ONCE([JDKOPT_SETUP_BUILD_TWEAKS],
 
 AC_DEFUN_ONCE([JDKOPT_SETUP_DEBUG_SYMBOLS],
 [
+  # Backwards compatibility. --with-native-debug-symbols is preferred post JDK-8207234,
+  # but if somebody does not specify it via configure, we still want to preserve old
+  # behaviour of --disable-debug-symbols
   #
   # ENABLE_DEBUG_SYMBOLS
   # This must be done after the toolchain is setup, since we're looking at objcopy.
@@ -579,8 +659,8 @@ AC_DEFUN_ONCE([JDKOPT_SETUP_DEBUG_SYMBOLS],
     # Default is on if objcopy is found
     if test "x$OBJCOPY" != x; then
       ENABLE_DEBUG_SYMBOLS=true
-    # MacOS X and Windows don't use objcopy but default is on for those OSes
-    elif test "x$OPENJDK_TARGET_OS" = xmacosx || test "x$OPENJDK_TARGET_OS" = xwindows; then
+    # AIX, MacOS X and Windows don't use objcopy but default is on for those OSes
+    elif test "x$OPENJDK_TARGET_OS" = xaix || test "x$OPENJDK_TARGET_OS" = xmacosx || test "x$OPENJDK_TARGET_OS" = xwindows; then
       ENABLE_DEBUG_SYMBOLS=true
     else
       ENABLE_DEBUG_SYMBOLS=false
@@ -589,6 +669,9 @@ AC_DEFUN_ONCE([JDKOPT_SETUP_DEBUG_SYMBOLS],
 
   AC_MSG_RESULT([$ENABLE_DEBUG_SYMBOLS])
 
+  # Backwards compatibility. --with-native-debug-symbols is preferred post JDK-8207234,
+  # but if somebody does not specify it via configure, we still want to preserve old
+  # behaviour of --disable-zip-debug-info.
   #
   # ZIP_DEBUGINFO_FILES
   #
@@ -600,14 +683,84 @@ AC_DEFUN_ONCE([JDKOPT_SETUP_DEBUG_SYMBOLS],
 
   if test "x${enable_zip_debug_info}" = "xno"; then
     ZIP_DEBUGINFO_FILES=false
-  else
+  elif test "x${enable_zip_debug_info}" = "xyes"; then
     ZIP_DEBUGINFO_FILES=true
   fi
 
+  #
+  # NATIVE_DEBUG_SYMBOLS
+  # This must be done after the toolchain is setup, since we're looking at objcopy.
+  # In addition, this must be done after ENABLE_DEBUG_SYMBOLS and ZIP_DEBUGINFO_FILES
+  # checking in order to preserve backwards compatibility post JDK-8207234.
+  #
+  AC_MSG_CHECKING([what type of native debug symbols to use (this will override previous settings)])
+  AC_ARG_WITH([native-debug-symbols],
+      [AS_HELP_STRING([--with-native-debug-symbols],
+      [set the native debug symbol configuration (none, internal, external, zipped) @<:@varying@:>@])],
+      [
+      ],
+      [
+        # Default to unset for backwards compatibility
+        with_native_debug_symbols=""
+      ])
+  NATIVE_DEBUG_SYMBOLS=$with_native_debug_symbols
+  if test "x$NATIVE_DEBUG_SYMBOLS" = x; then
+    AC_MSG_RESULT([not specified])
+  else
+    AC_MSG_RESULT([$NATIVE_DEBUG_SYMBOLS])
+  fi
+  # Default is empty
+  DEBUG_BINARIES=
+  # Default is min_strip. Possible values are min_strip, all_strip, no_strip
+  STRIP_POLICY=min_strip
+
+  if test "x$NATIVE_DEBUG_SYMBOLS" = xzipped; then
+
+    if test "x$OPENJDK_TARGET_OS" = xsolaris || test "x$OPENJDK_TARGET_OS" = xlinux; then
+      if test "x$OBJCOPY" = x; then
+        # enabling of enable-debug-symbols and can't find objcopy
+        # this is an error
+        AC_MSG_ERROR([Unable to find objcopy, cannot enable native debug symbols])
+      fi
+    fi
+
+    ENABLE_DEBUG_SYMBOLS=true
+    STRIP_POLICY=min_strip
+    ZIP_DEBUGINFO_FILES=true
+  elif test "x$NATIVE_DEBUG_SYMBOLS" = xnone; then
+    ENABLE_DEBUG_SYMBOLS=false
+    STRIP_POLICY=min_strip
+    ZIP_DEBUGINFO_FILES=false
+  elif test "x$NATIVE_DEBUG_SYMBOLS" = xinternal; then
+    ENABLE_DEBUG_SYMBOLS=true
+    STRIP_POLICY=no_strip
+    ZIP_DEBUGINFO_FILES=false
+    POST_STRIP_CMD=
+    DEBUG_BINARIES=true
+  elif test "x$NATIVE_DEBUG_SYMBOLS" = xexternal; then
+
+    if test "x$OPENJDK_TARGET_OS" = xsolaris || test "x$OPENJDK_TARGET_OS" = xlinux; then
+      if test "x$OBJCOPY" = x; then
+        # enabling of enable-debug-symbols and can't find objcopy
+        # this is an error
+        AC_MSG_ERROR([Unable to find objcopy, cannot enable native debug symbols])
+      fi
+    fi
+
+    ENABLE_DEBUG_SYMBOLS=true
+    STRIP_POLICY=min_strip
+    ZIP_DEBUGINFO_FILES=false
+  elif test "x$NATIVE_DEBUG_SYMBOLS" != x; then
+    AC_MSG_ERROR([Allowed native debug symbols are: none, internal, external, zipped])
+  else
+    AC_MSG_NOTICE([--with-native-debug-symbols not specified. Using values from --disable-debug-symbols and --disable-zip-debug-info])
+  fi
+
   AC_SUBST(ENABLE_DEBUG_SYMBOLS)
+  AC_SUBST(STRIP_POLICY)
+  AC_SUBST(POST_STRIP_CMD)
+  AC_SUBST(DEBUG_BINARIES)
   AC_SUBST(ZIP_DEBUGINFO_FILES)
-  AC_SUBST(CFLAGS_DEBUG_SYMBOLS)
-  AC_SUBST(CXXFLAGS_DEBUG_SYMBOLS)
 ])
 
 # Support for customization of the build process. Some build files

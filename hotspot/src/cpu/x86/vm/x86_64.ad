@@ -863,7 +863,11 @@ void MachPrologNode::format(PhaseRegAlloc* ra_, outputStream* st) const {
     st->print("movq    [rsp + #%d], rbp\t# Save rbp",framesize);    
     if (PreserveFramePointer) {
       st->print("\n\t");
-      st->print("movq    rbp, [rsp + #%d]\t# Save the caller's SP into rbp", (framesize + wordSize));
+      st->print("movq    rbp, rsp\t# Save the caller's SP into rbp");
+      if (framesize > 0) {
+        st->print("\n\t");
+        st->print("addq    rbp, #%d", framesize);
+      }      
     }
   }
 
@@ -2121,7 +2125,11 @@ encode %{
     }
     if (_method) {
       // Emit stub for static call.
-      CompiledStaticCall::emit_to_interp_stub(cbuf);
+      address stub = CompiledStaticCall::emit_to_interp_stub(cbuf);
+      if (stub == NULL) {
+        ciEnv::current()->record_failure("CodeCache is full");
+        return;
+      } 
     }
   %}
 
@@ -3732,6 +3740,23 @@ operand indIndexScaleOffset(any_RegP reg, immL32 off, rRegL lreg, immI2 scale)
   %}
 %}
 
+// Indirect Memory Plus Positive Index Register Plus Offset Operand
+operand indPosIndexOffset(any_RegP reg, immL32 off, rRegI idx)
+%{
+  constraint(ALLOC_IN_RC(ptr_reg));
+  predicate(n->in(2)->in(3)->as_Type()->type()->is_long()->_lo >= 0);
+  match(AddP (AddP reg (ConvI2L idx)) off);
+
+  op_cost(10);
+  format %{"[$reg + $off + $idx]" %}
+  interface(MEMORY_INTER) %{
+    base($reg);
+    index($idx);
+    scale(0x0);
+    disp($off);
+  %}
+%}
+
 // Indirect Memory Times Scale Plus Positive Index Register Plus Offset Operand
 operand indPosIndexScaleOffset(any_RegP reg, immL32 off, rRegI idx, immI2 scale)
 %{
@@ -3879,6 +3904,23 @@ operand indIndexScaleOffsetNarrow(rRegN reg, immL32 off, rRegL lreg, immI2 scale
     base($reg);
     index($lreg);
     scale($scale);
+    disp($off);
+  %}
+%}
+
+// Indirect Memory Times Plus Positive Index Register Plus Offset Operand
+operand indPosIndexOffsetNarrow(rRegN reg, immL32 off, rRegI idx)
+%{
+  constraint(ALLOC_IN_RC(ptr_reg));
+  predicate(Universe::narrow_oop_shift() == 0 && n->in(2)->in(3)->as_Type()->type()->is_long()->_lo >= 0);
+  match(AddP (AddP (DecodeN reg) (ConvI2L idx)) off);
+
+  op_cost(10);
+  format %{"[$reg + $off + $idx]" %}
+  interface(MEMORY_INTER) %{
+    base($reg);
+    index($idx);
+    scale(0x0);
     disp($off);
   %}
 %}
@@ -4074,11 +4116,11 @@ operand cmpOpUCF2() %{
 // case of this is memory operands.
 
 opclass memory(indirect, indOffset8, indOffset32, indIndexOffset, indIndex,
-               indIndexScale, indIndexScaleOffset, indPosIndexScaleOffset,
+               indIndexScale, indIndexScaleOffset, indPosIndexOffset, indPosIndexScaleOffset,
                indCompressedOopOffset,
                indirectNarrow, indOffset8Narrow, indOffset32Narrow,
                indIndexOffsetNarrow, indIndexNarrow, indIndexScaleNarrow,
-               indIndexScaleOffsetNarrow, indPosIndexScaleOffsetNarrow);
+               indIndexScaleOffsetNarrow, indPosIndexOffsetNarrow, indPosIndexScaleOffsetNarrow);
 
 //----------PIPELINE-----------------------------------------------------------
 // Rules which define the behavior of the target architectures pipeline.
@@ -5112,6 +5154,17 @@ instruct leaPIdxScaleOff(rRegP dst, indIndexScaleOffset mem)
   ins_pipe(ialu_reg_reg_fat);
 %}
 
+instruct leaPPosIdxOff(rRegP dst, indPosIndexOffset mem)
+%{
+  match(Set dst mem);
+
+  ins_cost(110);
+  format %{ "leaq    $dst, $mem\t# ptr posidxoff" %}
+  opcode(0x8D);
+  ins_encode(REX_reg_mem_wide(dst, mem), OpcP, reg_mem(dst, mem));
+  ins_pipe(ialu_reg_reg_fat);
+%}
+
 instruct leaPPosIdxScaleOff(rRegP dst, indPosIndexScaleOffset mem)
 %{
   match(Set dst mem);
@@ -5191,6 +5244,18 @@ instruct leaPIdxScaleOffNarrow(rRegP dst, indIndexScaleOffsetNarrow mem)
 
   ins_cost(110);
   format %{ "leaq    $dst, $mem\t# ptr idxscaleoffnarrow" %}
+  opcode(0x8D);
+  ins_encode(REX_reg_mem_wide(dst, mem), OpcP, reg_mem(dst, mem));
+  ins_pipe(ialu_reg_reg_fat);
+%}
+
+instruct leaPPosIdxOffNarrow(rRegP dst, indPosIndexOffsetNarrow mem)
+%{
+  predicate(Universe::narrow_oop_shift() == 0);
+  match(Set dst mem);
+
+  ins_cost(110);
+  format %{ "leaq    $dst, $mem\t# ptr posidxoffnarrow" %}
   opcode(0x8D);
   ins_encode(REX_reg_mem_wide(dst, mem), OpcP, reg_mem(dst, mem));
   ins_pipe(ialu_reg_reg_fat);
@@ -11058,6 +11123,48 @@ instruct cmpL3_reg_reg(rRegI dst, rRegL src1, rRegL src2, rFlagsReg flags)
     "done:" %}
   ins_encode(cmpl3_flag(src1, src2, dst));
   ins_pipe(pipe_slow);
+%}
+
+// Unsigned long compare Instructions; really, same as signed long except they
+// produce an rFlagsRegU instead of rFlagsReg.
+instruct compUL_rReg(rFlagsRegU cr, rRegL op1, rRegL op2)
+%{
+  match(Set cr (CmpUL op1 op2));
+
+  format %{ "cmpq    $op1, $op2\t# unsigned" %}
+  opcode(0x3B);  /* Opcode 3B /r */
+  ins_encode(REX_reg_reg_wide(op1, op2), OpcP, reg_reg(op1, op2));
+  ins_pipe(ialu_cr_reg_reg);
+%}
+
+instruct compUL_rReg_imm(rFlagsRegU cr, rRegL op1, immL32 op2)
+%{
+  match(Set cr (CmpUL op1 op2));
+
+  format %{ "cmpq    $op1, $op2\t# unsigned" %}
+  opcode(0x81, 0x07); /* Opcode 81 /7 */
+  ins_encode(OpcSErm_wide(op1, op2), Con8or32(op2));
+  ins_pipe(ialu_cr_reg_imm);
+%}
+
+instruct compUL_rReg_mem(rFlagsRegU cr, rRegL op1, memory op2)
+%{
+  match(Set cr (CmpUL op1 (LoadL op2)));
+
+  format %{ "cmpq    $op1, $op2\t# unsigned" %}
+  opcode(0x3B); /* Opcode 3B /r */
+  ins_encode(REX_reg_mem_wide(op1, op2), OpcP, reg_mem(op1, op2));
+  ins_pipe(ialu_cr_reg_mem);
+%}
+
+instruct testUL_reg(rFlagsRegU cr, rRegL src, immL0 zero)
+%{
+  match(Set cr (CmpUL src zero));
+
+  format %{ "testq   $src, $src\t# unsigned" %}
+  opcode(0x85);
+  ins_encode(REX_reg_reg_wide(src, src), OpcP, reg_reg(src, src));
+  ins_pipe(ialu_cr_reg_imm);
 %}
 
 //----------Max and Min--------------------------------------------------------

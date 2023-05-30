@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -415,7 +415,7 @@ MethodLivenessResult ciMethod::raw_liveness_at_bci(int bci) {
 // information.
 MethodLivenessResult ciMethod::liveness_at_bci(int bci) {
   MethodLivenessResult result = raw_liveness_at_bci(bci);
-  if (CURRENT_ENV->jvmti_can_access_local_variables() || DeoptimizeALot || CompileTheWorld) {
+  if (CURRENT_ENV->should_retain_local_variables() || DeoptimizeALot || CompileTheWorld) {
     // Keep all locals live for the user's edification and amusement.
     result.at_put_range(0, result.size(), true);
   }
@@ -945,6 +945,13 @@ bool ciMethod::is_method_handle_intrinsic() const {
 bool ciMethod::is_compiled_lambda_form() const {
   vmIntrinsics::ID iid = _intrinsic_id;  // do not check if loaded
   return iid == vmIntrinsics::_compiledLambdaForm;
+}
+
+// ------------------------------------------------------------------
+// ciMethod::is_object_initializer
+//
+bool ciMethod::is_object_initializer() const {
+   return name() == ciSymbol::object_initializer_name();
 }
 
 // ------------------------------------------------------------------

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -26,6 +26,7 @@
 #include "precompiled.hpp"
 #include "compiler/compileBroker.hpp"
 #include "gc_interface/collectedHeap.hpp"
+#include "jfr/jfrEvents.hpp"
 #include "prims/whitebox.hpp"
 #include "runtime/arguments.hpp"
 #include "runtime/frame.inline.hpp"
@@ -42,6 +43,10 @@
 #include "utilities/events.hpp"
 #include "utilities/top.hpp"
 #include "utilities/vmError.hpp"
+#include "utilities/macros.hpp"
+#if INCLUDE_JFR
+#include "jfr/jfr.hpp"
+#endif
 
 PRAGMA_FORMAT_MUTE_WARNINGS_FOR_GCC
 
@@ -229,7 +234,7 @@ char* VMError::error_string(char* buf, int buflen) {
 
   if (signame) {
     jio_snprintf(buf, buflen,
-                 "%s (0x%x) at pc=" PTR_FORMAT ", pid=%d, tid=" UINTX_FORMAT,
+                 "%s (0x%x) at pc=" PTR_FORMAT ", pid=%d, tid=" INTPTR_FORMAT,
                  signame, _id, _pc,
                  os::current_process_id(), os::current_thread_id());
   } else if (_filename != NULL && _lineno > 0) {
@@ -237,7 +242,7 @@ char* VMError::error_string(char* buf, int buflen) {
     char separator = os::file_separator()[0];
     const char *p = strrchr(_filename, separator);
     int n = jio_snprintf(buf, buflen,
-                         "Internal Error at %s:%d, pid=%d, tid=" UINTX_FORMAT,
+                         "Internal Error at %s:%d, pid=%d, tid=" INTPTR_FORMAT,
                          p ? p + 1 : _filename, _lineno,
                          os::current_process_id(), os::current_thread_id());
     if (n >= 0 && n < buflen && _message) {
@@ -251,7 +256,7 @@ char* VMError::error_string(char* buf, int buflen) {
     }
   } else {
     jio_snprintf(buf, buflen,
-                 "Internal Error (0x%x), pid=%d, tid=" UINTX_FORMAT,
+                 "Internal Error (0x%x), pid=%d, tid=" INTPTR_FORMAT,
                  _id, os::current_process_id(), os::current_thread_id());
   }
 
@@ -302,6 +307,47 @@ void VMError::print_stack_trace(outputStream* st, JavaThread* jt,
     }
   }
 #endif // ZERO
+}
+
+static void print_oom_reasons(outputStream* st) {
+  st->print_cr("# Possible reasons:");
+  st->print_cr("#   The system is out of physical RAM or swap space");
+  if (UseCompressedOops) {
+    st->print_cr("#   The process is running with CompressedOops enabled, and the Java Heap may be blocking the growth of the native heap");
+  }
+  if (LogBytesPerWord == 2) {
+    st->print_cr("#   In 32 bit mode, the process size limit was hit");
+  }
+  st->print_cr("# Possible solutions:");
+  st->print_cr("#   Reduce memory load on the system");
+  st->print_cr("#   Increase physical memory or swap space");
+  st->print_cr("#   Check if swap backing store is full");
+  if (LogBytesPerWord == 2) {
+    st->print_cr("#   Use 64 bit Java on a 64 bit OS");
+  }
+  st->print_cr("#   Decrease Java heap size (-Xmx/-Xms)");
+  st->print_cr("#   Decrease number of Java threads");
+  st->print_cr("#   Decrease Java thread stack sizes (-Xss)");
+  st->print_cr("#   Set larger code cache with -XX:ReservedCodeCacheSize=");
+  if (UseCompressedOops) {
+    switch (Universe::narrow_oop_mode()) {
+      case Universe::UnscaledNarrowOop:
+        st->print_cr("#   JVM is running with Unscaled Compressed Oops mode in which the Java heap is");
+        st->print_cr("#     placed in the first 4GB address space. The Java Heap base address is the");
+        st->print_cr("#     maximum limit for the native heap growth. Please use -XX:HeapBaseMinAddress");
+        st->print_cr("#     to set the Java Heap base and to place the Java Heap above 4GB virtual address.");
+        break;
+      case Universe::ZeroBasedNarrowOop:
+        st->print_cr("#   JVM is running with Zero Based Compressed Oops mode in which the Java heap is");
+        st->print_cr("#     placed in the first 32GB address space. The Java Heap base address is the");
+        st->print_cr("#     maximum limit for the native heap growth. Please use -XX:HeapBaseMinAddress");
+        st->print_cr("#     to set the Java Heap base and to place the Java Heap above 32GB virtual address.");
+        break;
+      default:
+        break;
+    }
+  }
+  st->print_cr("# This output file may be truncated or incomplete.");
 }
 
 // This is the main function to report a fatal error. Only one thread can
@@ -375,19 +421,7 @@ void VMError::report(outputStream* st) {
          }
          // In error file give some solutions
          if (_verbose) {
-           st->print_cr("# Possible reasons:");
-           st->print_cr("#   The system is out of physical RAM or swap space");
-           st->print_cr("#   In 32 bit mode, the process size limit was hit");
-           st->print_cr("# Possible solutions:");
-           st->print_cr("#   Reduce memory load on the system");
-           st->print_cr("#   Increase physical memory or swap space");
-           st->print_cr("#   Check if swap backing store is full");
-           st->print_cr("#   Use 64 bit Java on a 64 bit OS");
-           st->print_cr("#   Decrease Java heap size (-Xmx/-Xms)");
-           st->print_cr("#   Decrease number of Java threads");
-           st->print_cr("#   Decrease Java thread stack sizes (-Xss)");
-           st->print_cr("#   Set larger code cache with -XX:ReservedCodeCacheSize=");
-           st->print_cr("# This output file may be truncated or incomplete.");
+           print_oom_reasons(st);
          } else {
            return;  // that's enough for the screen
          }
@@ -421,14 +455,7 @@ void VMError::report(outputStream* st) {
 #else
          const char *file = _filename;
 #endif
-         size_t len = strlen(file);
-         size_t buflen = sizeof(buf);
-
-         strncpy(buf, file, buflen);
-         if (len + 10 < buflen) {
-           sprintf(buf + len, ":%d", _lineno);
-         }
-         st->print(" (%s)", buf);
+         st->print(" (%s:%d)", file, _lineno);
        } else {
          st->print(" (0x%x)", _id);
        }
@@ -438,7 +465,7 @@ void VMError::report(outputStream* st) {
 
      // process id, thread id
      st->print(", pid=%d", os::current_process_id());
-     st->print(", tid=" UINTX_FORMAT, os::current_thread_id());
+     st->print(", tid=" INTPTR_FORMAT, os::current_thread_id());
      st->cr();
 
   STEP(40, "(printing error message)")
@@ -675,6 +702,24 @@ void VMError::report(outputStream* st) {
        st->cr();
      }
 
+  STEP(182, "(printing number of OutOfMemoryError and StackOverflow exceptions)")
+
+     if (_verbose && Exceptions::has_exception_counts()) {
+       st->print_cr("OutOfMemory and StackOverflow Exception counts:");
+       Exceptions::print_exception_counts_on_error(st);
+       st->cr();
+     }
+
+  STEP(185, "(printing compressed oops mode")
+
+     if (_verbose && UseCompressedOops) {
+       Universe::print_compressed_oops_mode(st);
+       if (UseCompressedClassPointers) {
+         Metaspace::print_compressed_class_space(st);
+       }
+       st->cr();
+     }
+
   STEP(190, "(printing heap information)" )
 
      if (_verbose && Universe::is_fully_initialized()) {
@@ -780,7 +825,7 @@ void VMError::report(outputStream* st) {
   STEP(280, "(printing date and time)" )
 
      if (_verbose) {
-       os::print_date_and_time(st);
+       os::print_date_and_time(st, buf, sizeof(buf));
        st->cr();
      }
 
@@ -892,6 +937,13 @@ void VMError::report_and_die() {
     // are handled properly.
     reset_signal_handlers();
 
+    EventShutdown e;
+    if (e.should_commit()) {
+      e.set_reason("VM Error");
+      e.commit();
+    }
+
+    JFR_ONLY(Jfr::on_vm_shutdown(true);)
   } else {
     // If UseOsErrorReporting we call this for each level of the call stack
     // while searching for the exception handler.  Only the first level needs
@@ -932,12 +984,16 @@ void VMError::report_and_die() {
     }
   }
 
-  // print to screen
+  // Part 1: print an abbreviated version (the '#' section) to stdout.
   if (!out_done) {
     first_error->_verbose = false;
 
-    staticBufferStream sbs(buffer, sizeof(buffer), &out);
-    first_error->report(&sbs);
+    // Suppress this output if we plan to print Part 2 to stdout too.
+    // No need to have the "#" section twice.
+    if (!(ErrorFileToStdout && out.fd() == 1)) {
+      staticBufferStream sbs(buffer, sizeof(buffer), &out);
+      first_error->report(&sbs);
+    }
 
     out_done = true;
 
@@ -945,6 +1001,7 @@ void VMError::report_and_die() {
     first_error->_current_step_info = "";   // reset current_step string
   }
 
+  // Part 2: print a full error log file (optionally to stdout or stderr).
   // print to error log file
   if (!log_done) {
     first_error->_verbose = true;
@@ -952,19 +1009,26 @@ void VMError::report_and_die() {
     // see if log file is already open
     if (!log.is_open()) {
       // open log file
-      int fd = prepare_log_file(ErrorFile, "hs_err_pid%p.log", buffer, sizeof(buffer));
-      if (fd != -1) {
-        out.print_raw("# An error report file with more information is saved as:\n# ");
-        out.print_raw_cr(buffer);
-
-        log.set_fd(fd);
+      int fd;
+      if (ErrorFileToStdout) {
+        fd = 1;
+      } else if (ErrorFileToStderr) {
+        fd = 2;
       } else {
-        out.print_raw_cr("# Can not save log file, dump to screen..");
-        log.set_fd(defaultStream::output_fd());
-        /* Error reporting currently needs dumpfile.
-         * Maybe implement direct streaming in the future.*/
-        transmit_report_done = true;
+        fd = prepare_log_file(ErrorFile, "hs_err_pid%p.log", buffer, sizeof(buffer));
+        if (fd != -1) {
+          out.print_raw("# An error report file with more information is saved as:\n# ");
+          out.print_raw_cr(buffer);
+
+        } else {
+          out.print_raw_cr("# Can not save log file, dump to screen..");
+          fd = defaultStream::output_fd();
+          /* Error reporting currently needs dumpfile.
+           * Maybe implement direct streaming in the future.*/
+          transmit_report_done = true;
+        }
       }
+      log.set_fd(fd);
     }
 
     staticBufferStream sbs(buffer, O_BUFLEN, &log);
@@ -982,7 +1046,7 @@ void VMError::report_and_die() {
       }
     }
 
-    if (log.fd() != defaultStream::output_fd()) {
+    if (log.fd() > 3) {
       close(log.fd());
     }
 
@@ -1100,7 +1164,7 @@ void VM_ReportJavaOutOfMemory::doit() {
 #endif
     tty->print_cr("\"%s\"...", cmd);
 
-    if (os::fork_and_exec(cmd) < 0) {
+    if (os::fork_and_exec(cmd, true) < 0) {
       tty->print_cr("os::fork_and_exec failed: %s (%d)", strerror(errno), errno);
     }
   }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -76,6 +76,7 @@ public class WhiteBox {
   // Memory
   public native long getObjectAddress(Object o);
   public native int  getHeapOopSize();
+  public native long getHeapAlignment();
   public native int  getVMPageSize();
   public native long getVMLargePageSize();
 
@@ -117,9 +118,13 @@ public class WhiteBox {
   public native void NMTUncommitMemory(long addr, long size);
   public native void NMTReleaseMemory(long addr, long size);
   public native long NMTMallocWithPseudoStack(long size, int index);
+  public native long NMTMallocWithPseudoStackAndType(long size, int index, int type);
   public native boolean NMTIsDetailSupported();
   public native boolean NMTChangeTrackingLevel();
   public native int NMTGetHashSize();
+  public native long NMTNewArena(long initSize);
+  public native void NMTFreeArena(long arena);
+  public native void NMTArenaMalloc(long arena, long size);
 
   // Compiler
   public native void    deoptimizeAll();
@@ -159,8 +164,14 @@ public class WhiteBox {
   public        boolean enqueueMethodForCompilation(Executable method, int compLevel) {
     return enqueueMethodForCompilation(method, compLevel, -1 /*InvocationEntryBci*/);
   }
-  public native boolean enqueueMethodForCompilation(Executable method, int compLevel, int entry_bci);
+  public boolean enqueueMethodForCompilation(Executable method, int compLevel, int entry_bci) {
+    return enqueueMethodForCompilation0(method, compLevel, entry_bci);
+  }
+
+  public native boolean enqueueInitializerForCompilation0(Class clazz, int compLevel);
+  public native boolean enqueueMethodForCompilation0(Executable method, int compLevel, int entry_bci);
   public native void    clearMethodState(Executable method);
+  public native void    markMethodProfiled(Executable method);
   public native int     getMethodEntryBci(Executable method);
   public native Object[] getNMethod(Executable method, boolean isOsr);
 
@@ -169,16 +180,23 @@ public class WhiteBox {
 
   // Memory
   public native void readReservedMemory();
+  public native long allocateCodeBlob(int size, int blobType);
+  public native void freeCodeBlob(long address);
+  public native Object[] getCodeBlob(long address);
   public native long allocateMetaspace(ClassLoader classLoader, long size);
   public native void freeMetaspace(ClassLoader classLoader, long addr, long size);
   public native long incMetaspaceCapacityUntilGC(long increment);
   public native long metaspaceCapacityUntilGC();
 
-  // force Young GC
+  // Force Young GC
   public native void youngGC();
 
-  // force Full GC
+  // Force Full GC
   public native void fullGC();
+
+  // Method tries to start concurrent mark cycle.
+  // It returns false if CM Thread is always in concurrent cycle.
+  public native boolean g1StartConcMarkCycle();
 
   // Tests on ReservedSpace/VirtualSpace classes
   public native int stressVirtualSpaceResize(long reservedSpaceSize, long magnitude, long iterations);
@@ -228,5 +246,18 @@ public class WhiteBox {
     }
     return offset;
   }
+
+  // Class Data Sharing
+  public native boolean isSharedClass(Class<?> c);
+
+  // Returns true on linux if library has the noexecstack flag set.
+  public native boolean checkLibSpecifiesNoexecstack(String libfilename);
+
+  // Container testing
+  public native boolean isContainerized();
+  public native void printOsInfo();
+  public native int validateCgroup(String procCgroups,
+                                   String procSelfCgroup,
+                                   String procSelfMountinfo);
 
 }

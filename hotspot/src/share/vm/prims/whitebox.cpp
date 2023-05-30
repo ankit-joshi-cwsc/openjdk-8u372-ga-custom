@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,6 +25,8 @@
 #include "precompiled.hpp"
 
 #include "memory/metadataFactory.hpp"
+#include "memory/metaspaceShared.hpp"
+#include "memory/iterator.hpp"
 #include "memory/universe.hpp"
 #include "oops/oop.inline.hpp"
 
@@ -38,6 +40,7 @@
 #include "runtime/interfaceSupport.hpp"
 #include "runtime/os.hpp"
 #include "utilities/array.hpp"
+#include "utilities/align.hpp"
 #include "utilities/debug.hpp"
 #include "utilities/macros.hpp"
 #include "utilities/exceptions.hpp"
@@ -45,6 +48,7 @@
 #if INCLUDE_ALL_GCS
 #include "gc_implementation/parallelScavenge/parallelScavengeHeap.inline.hpp"
 #include "gc_implementation/g1/concurrentMark.hpp"
+#include "gc_implementation/g1/concurrentMarkThread.hpp"
 #include "gc_implementation/g1/g1CollectedHeap.inline.hpp"
 #include "gc_implementation/g1/heapRegionRemSet.hpp"
 #endif // INCLUDE_ALL_GCS
@@ -58,6 +62,11 @@
 #include "compiler/compileBroker.hpp"
 #include "jvmtifiles/jvmtiEnv.hpp"
 #include "runtime/compilationPolicy.hpp"
+
+#ifdef LINUX
+#include "osContainer_linux.hpp"
+#include "cgroupSubsystem_linux.hpp"
+#endif
 
 PRAGMA_FORMAT_MUTE_WARNINGS_FOR_GCC
 
@@ -156,6 +165,9 @@ WB_ENTRY(void, WB_AddToSystemClassLoaderSearch(JNIEnv* env, jobject o, jstring s
 }
 WB_END
 
+#ifdef LINUX
+#include "utilities/elfFile.hpp"
+#endif
 
 WB_ENTRY(jlong, WB_GetCompressedOopsMaxHeapSize(JNIEnv* env, jobject o)) {
   return (jlong)Arguments::max_heap_for_compressed_oops();
@@ -164,8 +176,8 @@ WB_END
 
 WB_ENTRY(void, WB_PrintHeapSizes(JNIEnv* env, jobject o)) {
   CollectorPolicy * p = Universe::heap()->collector_policy();
-  gclog_or_tty->print_cr("Minimum heap "SIZE_FORMAT" Initial heap "
-    SIZE_FORMAT" Maximum heap "SIZE_FORMAT" Min alignment "SIZE_FORMAT" Max alignment "SIZE_FORMAT,
+  gclog_or_tty->print_cr("Minimum heap " SIZE_FORMAT " Initial heap "
+    SIZE_FORMAT " Maximum heap " SIZE_FORMAT " Space alignment " SIZE_FORMAT " Heap alignment " SIZE_FORMAT,
     p->min_heap_byte_size(), p->initial_heap_byte_size(), p->max_heap_byte_size(),
     p->space_alignment(), p->heap_alignment());
 }
@@ -200,8 +212,8 @@ WB_ENTRY(void, WB_ReadFromNoaccessArea(JNIEnv* env, jobject o))
          Universe::narrow_oop_use_implicit_null_checks() )) {
     tty->print_cr("WB_ReadFromNoaccessArea method is useless:\n "
                   "\tUseCompressedOops is %d\n"
-                  "\trhs.base() is "PTR_FORMAT"\n"
-                  "\tUniverse::narrow_oop_base() is "PTR_FORMAT"\n"
+                  "\trhs.base() is " PTR_FORMAT "\n"
+                  "\tUniverse::narrow_oop_base() is " PTR_FORMAT "\n"
                   "\tUniverse::narrow_oop_use_implicit_null_checks() is %d",
                   UseCompressedOops,
                   rhs.base(),
@@ -254,8 +266,8 @@ static jint wb_stress_virtual_space_resize(size_t reserved_space_size,
 
 WB_ENTRY(jint, WB_StressVirtualSpaceResize(JNIEnv* env, jobject o,
         jlong reserved_space_size, jlong magnitude, jlong iterations))
-  tty->print_cr("reservedSpaceSize="JLONG_FORMAT", magnitude="JLONG_FORMAT", "
-                "iterations="JLONG_FORMAT"\n", reserved_space_size, magnitude,
+  tty->print_cr("reservedSpaceSize=" JLONG_FORMAT ", magnitude=" JLONG_FORMAT ", "
+                "iterations=" JLONG_FORMAT "\n", reserved_space_size, magnitude,
                 iterations);
   if (reserved_space_size < 0 || magnitude < 0 || iterations < 0) {
     tty->print_cr("One of variables printed above is negative. Can't proceed.\n");
@@ -323,8 +335,16 @@ WB_END
 
 WB_ENTRY(jboolean, WB_G1InConcurrentMark(JNIEnv* env, jobject o))
   G1CollectedHeap* g1 = G1CollectedHeap::heap();
-  ConcurrentMark* cm = g1->concurrent_mark();
-  return cm->concurrent_marking_in_progress();
+  return g1->concurrent_mark()->cmThread()->during_cycle();
+WB_END
+
+WB_ENTRY(jboolean, WB_G1StartMarkCycle(JNIEnv* env, jobject o))
+  G1CollectedHeap* g1h = G1CollectedHeap::heap();
+  if (!g1h->concurrent_mark()->cmThread()->during_cycle()) {
+    g1h->collect(GCCause::_wb_conc_mark);
+    return true;
+  }
+  return false;
 WB_END
 
 WB_ENTRY(jint, WB_G1RegionSize(JNIEnv* env, jobject o))
@@ -355,6 +375,13 @@ WB_ENTRY(jlong, WB_NMTMallocWithPseudoStack(JNIEnv* env, jobject o, jlong size, 
   address pc = (address)(size_t)pseudo_stack;
   NativeCallStack stack(&pc, 1);
   return (jlong)(uintptr_t)os::malloc(size, mtTest, stack);
+WB_END
+
+// Alloc memory with pseudo call stack and specific memory type.
+WB_ENTRY(jlong, WB_NMTMallocWithPseudoStackAndType(JNIEnv* env, jobject o, jlong size, jint pseudo_stack, jint type))
+  address pc = (address)(size_t)pseudo_stack;
+  NativeCallStack stack(&pc, 1);
+  return (jlong)(uintptr_t)os::malloc(size, (MEMFLAGS)type, stack);
 WB_END
 
 // Free the memory allocated by NMTAllocTest
@@ -424,6 +451,21 @@ WB_ENTRY(jint, WB_NMTGetHashSize(JNIEnv* env, jobject o))
   int hash_size = MallocSiteTable::hash_buckets();
   assert(hash_size > 0, "NMT hash_size should be > 0");
   return (jint)hash_size;
+WB_END
+
+WB_ENTRY(jlong, WB_NMTNewArena(JNIEnv* env, jobject o, jlong init_size))
+  Arena* arena =  new (mtTest) Arena(mtTest, size_t(init_size));
+  return (jlong)arena;
+WB_END
+
+WB_ENTRY(void, WB_NMTFreeArena(JNIEnv* env, jobject o, jlong arena))
+  Arena* a = (Arena*)arena;
+  delete a;
+WB_END
+
+WB_ENTRY(void, WB_NMTArenaMalloc(JNIEnv* env, jobject o, jlong arena, jlong size))
+  Arena* a = (Arena*)arena;
+  a->Amalloc(size_t(size));
 WB_END
 #endif // INCLUDE_NMT
 
@@ -546,13 +588,65 @@ WB_ENTRY(jboolean, WB_TestSetForceInlineMethod(JNIEnv* env, jobject o, jobject m
   return result;
 WB_END
 
+#ifdef LINUX
+bool WhiteBox::validate_cgroup(const char* proc_cgroups,
+                               const char* proc_self_cgroup,
+                               const char* proc_self_mountinfo,
+                               u1* cg_flags) {
+  CgroupInfo cg_infos[4];
+  return CgroupSubsystemFactory::determine_type(cg_infos, proc_cgroups,
+                                                    proc_self_cgroup,
+                                                    proc_self_mountinfo, cg_flags);
+}
+#endif
+
+bool WhiteBox::compile_method(Method* method, int comp_level, int bci, Thread* THREAD) {
+  // Screen for unavailable/bad comp level or null method
+  AbstractCompiler* comp = CompileBroker::compiler(comp_level);
+  if (method == NULL) {
+    tty->print_cr("WB error: request to compile NULL method");
+    return false;
+  }
+  if (comp_level > MIN2((CompLevel) TieredStopAtLevel, CompLevel_highest_tier)) {
+    tty->print_cr("WB error: invalid compilation level %d", comp_level);
+    return false;
+  }
+  if (comp == NULL) {
+    tty->print_cr("WB error: no compiler for requested compilation level %d", comp_level);
+    return false;
+  }
+
+  methodHandle mh(THREAD, method);
+
+  // Compile method and check result
+  nmethod* nm = CompileBroker::compile_method(mh, bci, comp_level, mh, mh->invocation_count(), "Whitebox", THREAD);
+  MutexLocker mu(Compile_lock);
+  bool is_queued = mh->queued_for_compilation();
+  if (is_queued || nm != NULL) {
+    return true;
+  }
+  tty->print("WB error: failed to compile at level %d method ", comp_level);
+  mh->print_short_name(tty);
+  tty->cr();
+  if (is_queued) {
+    tty->print_cr("WB error: blocking compilation is still in queue!");
+  }
+  return false;
+}
+
 WB_ENTRY(jboolean, WB_EnqueueMethodForCompilation(JNIEnv* env, jobject o, jobject method, jint comp_level, jint bci))
   jmethodID jmid = reflected_method_to_jmid(thread, env, method);
   CHECK_JNI_EXCEPTION_(env, JNI_FALSE);
-  methodHandle mh(THREAD, Method::checked_resolve_jmethod_id(jmid));
-  nmethod* nm = CompileBroker::compile_method(mh, bci, comp_level, mh, mh->invocation_count(), "WhiteBox", THREAD);
-  MutexLockerEx mu(Compile_lock);
-  return (mh->queued_for_compilation() || nm != NULL);
+  return WhiteBox::compile_method(Method::checked_resolve_jmethod_id(jmid), comp_level, bci, THREAD);
+WB_END
+
+WB_ENTRY(jboolean, WB_EnqueueInitializerForCompilation(JNIEnv* env, jobject o, jclass klass, jint comp_level))
+  InstanceKlass* ik = InstanceKlass::cast(java_lang_Class::as_Klass(JNIHandles::resolve(klass)));
+  Method* clinit = ik->class_initializer();
+  if (clinit == NULL) {
+    return false;
+  }
+  return WhiteBox::compile_method(clinit, comp_level, InvocationEntryBci, THREAD);
 WB_END
 
 class VM_WhiteBoxOperation : public VM_Operation {
@@ -560,11 +654,6 @@ class VM_WhiteBoxOperation : public VM_Operation {
   VM_WhiteBoxOperation()                         { }
   VMOp_Type type()                  const        { return VMOp_WhiteBoxOperation; }
   bool allow_nested_vm_operations() const        { return true; }
-};
-
-class AlwaysFalseClosure : public BoolObjectClosure {
- public:
-  bool do_object_b(oop p) { return false; }
 };
 
 static AlwaysFalseClosure always_false;
@@ -616,14 +705,33 @@ WB_ENTRY(void, WB_ClearMethodState(JNIEnv* env, jobject o, jobject method))
   }
 WB_END
 
+WB_ENTRY(void, WB_MarkMethodProfiled(JNIEnv* env, jobject o, jobject method))
+  jmethodID jmid = reflected_method_to_jmid(thread, env, method);
+  CHECK_JNI_EXCEPTION(env);
+  methodHandle mh(THREAD, Method::checked_resolve_jmethod_id(jmid));
+
+  MethodData* mdo = mh->method_data();
+  if (mdo == NULL) {
+    Method::build_interpreter_method_data(mh, CHECK_AND_CLEAR);
+    mdo = mh->method_data();
+  }
+  mdo->init();
+  InvocationCounter* icnt = mdo->invocation_counter();
+  InvocationCounter* bcnt = mdo->backedge_counter();
+  // set i-counter according to AdvancedThresholdPolicy::is_method_profiled
+  // because SimpleThresholdPolicy::call_predicate_helper uses > in jdk8u, that's why we need to plus one.
+  icnt->set(InvocationCounter::wait_for_compile, Tier4MinInvocationThreshold + 1);
+  bcnt->set(InvocationCounter::wait_for_compile, Tier4CompileThreshold + 1);
+WB_END
+
 template <typename T>
-static bool GetVMFlag(JavaThread* thread, JNIEnv* env, jstring name, T* value, bool (*TAt)(const char*, T*)) {
+static bool GetVMFlag(JavaThread* thread, JNIEnv* env, jstring name, T* value, bool (*TAt)(const char*, T*, bool, bool)) {
   if (name == NULL) {
     return false;
   }
   ThreadToNativeFromVM ttnfv(thread);   // can't be in VM when we call JNI
   const char* flag_name = env->GetStringUTFChars(name, NULL);
-  bool result = (*TAt)(flag_name, value);
+  bool result = (*TAt)(flag_name, value, true, true);
   env->ReleaseStringUTFChars(name, flag_name);
   return result;
 }
@@ -768,7 +876,6 @@ WB_ENTRY(void, WB_SetStringVMFlag(JNIEnv* env, jobject o, jstring name, jstring 
   }
 WB_END
 
-
 WB_ENTRY(jboolean, WB_IsInStringTable(JNIEnv* env, jobject o, jstring javaString))
   ResourceMark rm(THREAD);
   int len;
@@ -815,6 +922,47 @@ WB_ENTRY(jstring, WB_GetCPUFeatures(JNIEnv* env, jobject o))
   return features_string;
 WB_END
 
+int WhiteBox::get_blob_type(const CodeBlob* code) {
+  guarantee(WhiteBoxAPI, "internal testing API :: WhiteBox has to be enabled");
+  return CodeBlobType::All;;
+}
+
+struct CodeBlobStub {
+  CodeBlobStub(const CodeBlob* blob) :
+      name(os::strdup(blob->name())),
+      size(blob->size()),
+      blob_type(WhiteBox::get_blob_type(blob)),
+      address((jlong) blob) { }
+  ~CodeBlobStub() { os::free((void*) name); }
+  const char* const name;
+  const jint        size;
+  const jint        blob_type;
+  const jlong       address;
+};
+
+static jobjectArray codeBlob2objectArray(JavaThread* thread, JNIEnv* env, CodeBlobStub* cb) {
+  jclass clazz = env->FindClass(vmSymbols::java_lang_Object()->as_C_string());
+  CHECK_JNI_EXCEPTION_(env, NULL);
+  jobjectArray result = env->NewObjectArray(4, clazz, NULL);
+
+  jstring name = env->NewStringUTF(cb->name);
+  CHECK_JNI_EXCEPTION_(env, NULL);
+  env->SetObjectArrayElement(result, 0, name);
+
+  jobject obj = integerBox(thread, env, cb->size);
+  CHECK_JNI_EXCEPTION_(env, NULL);
+  env->SetObjectArrayElement(result, 1, obj);
+
+  obj = integerBox(thread, env, cb->blob_type);
+  CHECK_JNI_EXCEPTION_(env, NULL);
+  env->SetObjectArrayElement(result, 2, obj);
+
+  obj = longBox(thread, env, cb->address);
+  CHECK_JNI_EXCEPTION_(env, NULL);
+  env->SetObjectArrayElement(result, 3, obj);
+
+  return result;
+}
 
 WB_ENTRY(jobjectArray, WB_GetNMethod(JNIEnv* env, jobject o, jobject method, jboolean is_osr))
   ResourceMark rm(THREAD);
@@ -831,23 +979,68 @@ WB_ENTRY(jobjectArray, WB_GetNMethod(JNIEnv* env, jobject o, jobject method, jbo
   ThreadToNativeFromVM ttn(thread);
   jclass clazz = env->FindClass(vmSymbols::java_lang_Object()->as_C_string());
   CHECK_JNI_EXCEPTION_(env, NULL);
-  result = env->NewObjectArray(2, clazz, NULL);
+  result = env->NewObjectArray(3, clazz, NULL);
   if (result == NULL) {
     return result;
   }
 
-  jobject obj = integerBox(thread, env, code->comp_level());
+  jobject level = integerBox(thread, env, code->comp_level());
   CHECK_JNI_EXCEPTION_(env, NULL);
-  env->SetObjectArrayElement(result, 0, obj);
+  env->SetObjectArrayElement(result, 0, level);
+
+  jobject id = integerBox(thread, env, code->compile_id());
+  CHECK_JNI_EXCEPTION_(env, NULL);
+  env->SetObjectArrayElement(result, 1, id);
 
   jbyteArray insts = env->NewByteArray(insts_size);
   CHECK_JNI_EXCEPTION_(env, NULL);
   env->SetByteArrayRegion(insts, 0, insts_size, (jbyte*) code->insts_begin());
-  env->SetObjectArrayElement(result, 1, insts);
+  env->SetObjectArrayElement(result, 2, insts);
 
   return result;
 WB_END
 
+CodeBlob* WhiteBox::allocate_code_blob(int size, int blob_type) {
+  guarantee(WhiteBoxAPI, "internal testing API :: WhiteBox has to be enabled");
+  BufferBlob* blob;
+  int full_size = CodeBlob::align_code_offset(sizeof(BufferBlob));
+  if (full_size < size) {
+    full_size += align_up(size - full_size, oopSize);
+  }
+  {
+    MutexLockerEx mu(CodeCache_lock, Mutex::_no_safepoint_check_flag);
+    blob = (BufferBlob*) CodeCache::allocate(full_size);
+    ::new (blob) BufferBlob("WB::DummyBlob", full_size);
+  }
+  // Track memory usage statistic after releasing CodeCache_lock
+  MemoryService::track_code_cache_memory_usage();
+  return blob;
+}
+
+WB_ENTRY(jlong, WB_AllocateCodeBlob(JNIEnv* env, jobject o, jint size, jint blob_type))
+  if (size < 0) {
+    THROW_MSG_0(vmSymbols::java_lang_IllegalArgumentException(),
+      err_msg("WB_AllocateCodeBlob: size is negative: " INT32_FORMAT, size));
+  }
+  return (jlong) WhiteBox::allocate_code_blob(size, blob_type);
+WB_END
+
+WB_ENTRY(void, WB_FreeCodeBlob(JNIEnv* env, jobject o, jlong addr))
+  if (addr == 0) {
+    return;
+  }
+  BufferBlob::free((BufferBlob*) addr);
+WB_END
+
+WB_ENTRY(jobjectArray, WB_GetCodeBlob(JNIEnv* env, jobject o, jlong addr))
+  if (addr == 0) {
+    THROW_MSG_NULL(vmSymbols::java_lang_NullPointerException(),
+      "WB_GetCodeBlob: addr is null");
+  }
+  ThreadToNativeFromVM ttn(thread);
+  CodeBlobStub stub((CodeBlob*) addr);
+  return codeBlob2objectArray(thread, env, &stub);
+WB_END
 
 int WhiteBox::array_bytes_to_length(size_t bytes) {
   return Array<u1>::bytes_to_length(bytes);
@@ -905,6 +1098,10 @@ WB_ENTRY(jlong, WB_MetaspaceCapacityUntilGC(JNIEnv* env, jobject wb))
   return (jlong) MetaspaceGC::capacity_until_GC();
 WB_END
 
+WB_ENTRY(jboolean, WB_IsSharedClass(JNIEnv* env, jobject wb, jclass clazz))
+  return (jboolean)MetaspaceShared::is_in_shared_space(java_lang_Class::as_Klass(JNIHandles::resolve_non_null(clazz)));
+WB_END
+
 WB_ENTRY(jboolean, WB_IsMonitorInflated(JNIEnv* env, jobject wb, jobject obj))
   oop obj_oop = JNIHandles::resolve(obj);
   return (jboolean) obj_oop->mark()->has_monitor();
@@ -913,6 +1110,11 @@ WB_END
 WB_ENTRY(void, WB_ForceSafepoint(JNIEnv* env, jobject wb))
   VM_ForceSafepoint force_safepoint_op;
   VMThread::execute(&force_safepoint_op);
+WB_END
+
+WB_ENTRY(jlong, WB_GetHeapAlignment(JNIEnv* env, jobject o))
+    size_t alignment = Universe::heap()->collector_policy()->heap_alignment();
+    return (jlong)alignment;
 WB_END
 
 //Some convenience methods to deal with objects from java
@@ -996,6 +1198,55 @@ void WhiteBox::register_methods(JNIEnv* env, jclass wbclass, JavaThread* thread,
   }
 }
 
+// Checks that the library libfile has the noexecstack bit set.
+WB_ENTRY(jboolean, WB_CheckLibSpecifiesNoexecstack(JNIEnv* env, jobject o, jstring libfile))
+  jboolean ret = false;
+#ifdef LINUX
+  // Can't be in VM when we call JNI.
+  ThreadToNativeFromVM ttnfv(thread);
+  const char* lf = env->GetStringUTFChars(libfile, NULL);
+  CHECK_JNI_EXCEPTION_(env, 0);
+  ElfFile ef(lf);
+  ret = (jboolean) ef.specifies_noexecstack();
+  env->ReleaseStringUTFChars(libfile, lf);
+#endif
+  return ret;
+WB_END
+
+WB_ENTRY(jboolean, WB_IsContainerized(JNIEnv* env, jobject o))
+  LINUX_ONLY(return OSContainer::is_containerized();)
+  return false;
+WB_END
+
+WB_ENTRY(jint, WB_ValidateCgroup(JNIEnv* env,
+                                    jobject o,
+                                    jstring proc_cgroups,
+                                    jstring proc_self_cgroup,
+                                    jstring proc_self_mountinfo))
+  jint ret = 0;
+#ifdef LINUX
+  ThreadToNativeFromVM ttnfv(thread);
+  const char* p_cgroups = env->GetStringUTFChars(proc_cgroups, NULL);
+  CHECK_JNI_EXCEPTION_(env, 0);
+  const char* p_s_cgroup = env->GetStringUTFChars(proc_self_cgroup, NULL);
+  CHECK_JNI_EXCEPTION_(env, 0);
+  const char* p_s_mountinfo = env->GetStringUTFChars(proc_self_mountinfo, NULL);
+  CHECK_JNI_EXCEPTION_(env, 0);
+  u1 cg_type_flags = 0;
+  // This sets cg_type_flags
+  WhiteBox::validate_cgroup(p_cgroups, p_s_cgroup, p_s_mountinfo, &cg_type_flags);
+  ret = (jint)cg_type_flags;
+  env->ReleaseStringUTFChars(proc_cgroups, p_cgroups);
+  env->ReleaseStringUTFChars(proc_self_cgroup, p_s_cgroup);
+  env->ReleaseStringUTFChars(proc_self_mountinfo, p_s_mountinfo);
+#endif
+  return ret;
+WB_END
+
+WB_ENTRY(void, WB_PrintOsInfo(JNIEnv* env, jobject o))
+  os::print_os_info(tty);
+WB_END
+
 #define CC (char*)
 
 static JNINativeMethod methods[] = {
@@ -1005,6 +1256,7 @@ static JNINativeMethod methods[] = {
   {CC"getHeapOopSize",     CC"()I",                   (void*)&WB_GetHeapOopSize    },
   {CC"getVMPageSize",      CC"()I",                   (void*)&WB_GetVMPageSize     },
   {CC"getVMLargePageSize", CC"()J",                   (void*)&WB_GetVMLargePageSize},
+  {CC"getHeapAlignment",   CC"()J",                   (void*)&WB_GetHeapAlignment  },
   {CC"isClassAlive0",      CC"(Ljava/lang/String;)Z", (void*)&WB_IsClassAlive      },
   {CC"classKnownToNotExist",
                            CC"(Ljava/lang/ClassLoader;Ljava/lang/String;)Z",(void*)&WB_ClassKnownToNotExist},
@@ -1025,18 +1277,21 @@ static JNINativeMethod methods[] = {
   {CC"runMemoryUnitTests", CC"()V",                   (void*)&WB_RunMemoryUnitTests},
   {CC"readFromNoaccessArea",CC"()V",                  (void*)&WB_ReadFromNoaccessArea},
   {CC"stressVirtualSpaceResize",CC"(JJJ)I",           (void*)&WB_StressVirtualSpaceResize},
+  {CC"isSharedClass", CC"(Ljava/lang/Class;)Z",       (void*)&WB_IsSharedClass },
 #if INCLUDE_ALL_GCS
   {CC"g1InConcurrentMark", CC"()Z",                   (void*)&WB_G1InConcurrentMark},
   {CC"g1IsHumongous",      CC"(Ljava/lang/Object;)Z", (void*)&WB_G1IsHumongous     },
   {CC"g1NumMaxRegions",    CC"()J",                   (void*)&WB_G1NumMaxRegions  },
   {CC"g1NumFreeRegions",   CC"()J",                   (void*)&WB_G1NumFreeRegions  },
   {CC"g1RegionSize",       CC"()I",                   (void*)&WB_G1RegionSize      },
+  {CC"g1StartConcMarkCycle",       CC"()Z",           (void*)&WB_G1StartMarkCycle  },
   {CC"g1AuxiliaryMemoryUsage", CC"()Ljava/lang/management/MemoryUsage;",
                                                       (void*)&WB_G1AuxiliaryMemoryUsage  },
 #endif // INCLUDE_ALL_GCS
 #if INCLUDE_NMT
   {CC"NMTMalloc",           CC"(J)J",                 (void*)&WB_NMTMalloc          },
   {CC"NMTMallocWithPseudoStack", CC"(JI)J",           (void*)&WB_NMTMallocWithPseudoStack},
+  {CC"NMTMallocWithPseudoStackAndType", CC"(JII)J",   (void*)&WB_NMTMallocWithPseudoStackAndType},
   {CC"NMTFree",             CC"(J)V",                 (void*)&WB_NMTFree            },
   {CC"NMTReserveMemory",    CC"(J)J",                 (void*)&WB_NMTReserveMemory   },
   {CC"NMTCommitMemory",     CC"(JJ)V",                (void*)&WB_NMTCommitMemory    },
@@ -1045,6 +1300,9 @@ static JNINativeMethod methods[] = {
   {CC"NMTIsDetailSupported",CC"()Z",                  (void*)&WB_NMTIsDetailSupported},
   {CC"NMTChangeTrackingLevel", CC"()Z",               (void*)&WB_NMTChangeTrackingLevel},
   {CC"NMTGetHashSize",      CC"()I",                  (void*)&WB_NMTGetHashSize     },
+  {CC"NMTNewArena",         CC"(J)J",                 (void*)&WB_NMTNewArena        },
+  {CC"NMTFreeArena",        CC"(J)V",                 (void*)&WB_NMTFreeArena       },
+  {CC"NMTArenaMalloc",      CC"(JJ)V",                (void*)&WB_NMTArenaMalloc     },
 #endif // INCLUDE_NMT
   {CC"deoptimizeAll",      CC"()V",                   (void*)&WB_DeoptimizeAll     },
   {CC"deoptimizeMethod",   CC"(Ljava/lang/reflect/Executable;Z)I",
@@ -1067,10 +1325,14 @@ static JNINativeMethod methods[] = {
       CC"(I)I",                                       (void*)&WB_GetCompileQueueSize},
   {CC"testSetForceInlineMethod",
       CC"(Ljava/lang/reflect/Executable;Z)Z",         (void*)&WB_TestSetForceInlineMethod},
-  {CC"enqueueMethodForCompilation",
+  {CC"enqueueMethodForCompilation0",
       CC"(Ljava/lang/reflect/Executable;II)Z",        (void*)&WB_EnqueueMethodForCompilation},
+  {CC"enqueueInitializerForCompilation0",
+      CC"(Ljava/lang/Class;I)Z",                      (void*)&WB_EnqueueInitializerForCompilation},
   {CC"clearMethodState",
       CC"(Ljava/lang/reflect/Executable;)V",          (void*)&WB_ClearMethodState},
+  {CC"markMethodProfiled",
+      CC"(Ljava/lang/reflect/Executable;)V",          (void*)&WB_MarkMethodProfiled},
   {CC"setBooleanVMFlag",   CC"(Ljava/lang/String;Z)V",(void*)&WB_SetBooleanVMFlag},
   {CC"setIntxVMFlag",      CC"(Ljava/lang/String;J)V",(void*)&WB_SetIntxVMFlag},
   {CC"setUintxVMFlag",     CC"(Ljava/lang/String;J)V",(void*)&WB_SetUintxVMFlag},
@@ -1094,6 +1356,9 @@ static JNINativeMethod methods[] = {
   {CC"fullGC",   CC"()V",                             (void*)&WB_FullGC },
   {CC"youngGC",  CC"()V",                             (void*)&WB_YoungGC },
   {CC"readReservedMemory", CC"()V",                   (void*)&WB_ReadReservedMemory },
+  {CC"allocateCodeBlob",   CC"(II)J",                 (void*)&WB_AllocateCodeBlob   },
+  {CC"freeCodeBlob",       CC"(J)V",                  (void*)&WB_FreeCodeBlob       },
+  {CC"getCodeBlob",        CC"(J)[Ljava/lang/Object;",(void*)&WB_GetCodeBlob        },
   {CC"allocateMetaspace",
      CC"(Ljava/lang/ClassLoader;J)J",                 (void*)&WB_AllocateMetaspace },
   {CC"freeMetaspace",
@@ -1105,6 +1370,13 @@ static JNINativeMethod methods[] = {
                                                       (void*)&WB_GetNMethod         },
   {CC"isMonitorInflated",  CC"(Ljava/lang/Object;)Z", (void*)&WB_IsMonitorInflated  },
   {CC"forceSafepoint",     CC"()V",                   (void*)&WB_ForceSafepoint     },
+  {CC"checkLibSpecifiesNoexecstack", CC"(Ljava/lang/String;)Z",
+                                                      (void*)&WB_CheckLibSpecifiesNoexecstack},
+  {CC"isContainerized",           CC"()Z",            (void*)&WB_IsContainerized },
+  {CC"validateCgroup",
+      CC"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I",
+                                                      (void*)&WB_ValidateCgroup },
+  {CC"printOsInfo",               CC"()V",            (void*)&WB_PrintOsInfo },
 };
 
 #undef CC

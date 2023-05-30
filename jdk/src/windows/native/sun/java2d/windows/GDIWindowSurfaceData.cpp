@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1999, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -114,8 +114,9 @@ void SetupThreadGraphicsInfo(JNIEnv *env, GDIWinSDOps *wsdo) {
         // which may've been disposed by this time, and we have
         // no means of checking against it.
         if (oldhDC != NULL) {
-            MoveDCToPassiveList(oldhDC);
+            MoveDCToPassiveList(oldhDC, info->hWnd);
             info->hDC = NULL;
+            info->hWnd = NULL;
         }
 
         if (wsdo->window != NULL){
@@ -124,10 +125,15 @@ void SetupThreadGraphicsInfo(JNIEnv *env, GDIWinSDOps *wsdo) {
             // First, init the HDC object
             AwtComponent *comp = GDIWindowSurfaceData_GetComp(env, wsdo);
             if (comp == NULL) {
+                // wsdo->invalid is set by GDIWindowSurfaceData_GetComp
                 return;
             }
             hDC = comp->GetDCFromComponent();
-            if (hDC != NULL) {
+            if (hDC == NULL) {
+                wsdo->invalid = JNI_TRUE;
+                return;
+            }
+            if (hDC != NULL && wsdo->device != NULL) {
                 ::SelectObject(hDC, nullbrush);
                 ::SelectObject(hDC, nullpen);
                 ::SelectClipRgn(hDC, (HRGN) NULL);
@@ -150,6 +156,7 @@ void SetupThreadGraphicsInfo(JNIEnv *env, GDIWinSDOps *wsdo) {
 
             // Finally, set these new values in the info for this thread
             info->hDC = hDC;
+            info->hWnd = wsdo->window;
         }
 
         // cached brush and pen are not associated with any DC, and can be
@@ -187,7 +194,7 @@ void DisposeThreadGraphicsInfo(JNIEnv *env, jlong tgi) {
         if (info->hDC != NULL) {
             // move the DC from the active dcs list to
             // the passive dc list to be released later
-            MoveDCToPassiveList(info->hDC);
+            MoveDCToPassiveList(info->hDC, info->hWnd);
         }
 
         if (info->clip != NULL) {

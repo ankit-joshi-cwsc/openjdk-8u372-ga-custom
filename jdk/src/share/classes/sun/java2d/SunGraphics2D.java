@@ -770,6 +770,11 @@ public final class SunGraphics2D
                 }
             }
         }
+        if (FontUtilities.isMacOSX14 &&
+            (aahint == SunHints.INTVAL_TEXT_ANTIALIAS_OFF))
+        {
+             aahint =  SunHints.INTVAL_TEXT_ANTIALIAS_ON;
+        }
         info.aaHint = aahint;
         info.fontStrike = info.font2D.getStrike(font, devAt, textAt,
                                                 aahint, fmhint);
@@ -3020,7 +3025,8 @@ public final class SunGraphics2D
         if (data == null) {
             throw new NullPointerException("char data is null");
         }
-        if (offset < 0 || length < 0 || offset + length > data.length) {
+        if (offset < 0 || length < 0 || offset + length < length ||
+            offset + length > data.length) {
             throw new ArrayIndexOutOfBoundsException("bad offset/length");
         }
         if (font.hasLayoutAttributes()) {
@@ -3052,7 +3058,8 @@ public final class SunGraphics2D
         if (data == null) {
             throw new NullPointerException("byte data is null");
         }
-        if (offset < 0 || length < 0 || offset + length > data.length) {
+        if (offset < 0 || length < 0 || offset + length < length ||
+            offset + length > data.length) {
             throw new ArrayIndexOutOfBoundsException("bad offset/length");
         }
         /* Byte data is interpreted as 8-bit ASCII. Re-use drawChars loops */

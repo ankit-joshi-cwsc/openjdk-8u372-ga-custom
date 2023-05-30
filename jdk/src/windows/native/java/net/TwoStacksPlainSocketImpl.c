@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -109,7 +109,7 @@ Java_java_net_TwoStacksPlainSocketImpl_initProto(JNIEnv *env, jclass cls) {
     psi_portID = (*env)->GetFieldID(env, cls, "port", "I");
     CHECK_NULL(psi_portID);
     psi_lastfdID = (*env)->GetFieldID(env, cls, "lastfd", "I");
-    CHECK_NULL(psi_portID);
+    CHECK_NULL(psi_lastfdID);
     psi_localportID = (*env)->GetFieldID(env, cls, "localport", "I");
     CHECK_NULL(psi_localportID);
     psi_timeoutID = (*env)->GetFieldID(env, cls, "timeout", "I");
@@ -154,17 +154,17 @@ Java_java_net_TwoStacksPlainSocketImpl_socketCreate(JNIEnv *env, jobject this,
         fd1Obj = (*env)->GetObjectField(env, this, psi_fd1ID);
 
         if (IS_NULL(fd1Obj)) {
-            JNU_ThrowByName(env, JNU_JAVANETPKG "SocketException",
-                            "null fd1 object");
             (*env)->SetIntField(env, fdObj, IO_fd_fdID, -1);
             NET_SocketClose(fd);
+            JNU_ThrowByName(env, JNU_JAVANETPKG "SocketException",
+                            "null fd1 object");
             return;
         }
         fd1 = socket(AF_INET6, (stream ? SOCK_STREAM: SOCK_DGRAM), 0);
         if (fd1 == -1) {
-            NET_ThrowCurrent(env, "create");
             (*env)->SetIntField(env, fdObj, IO_fd_fdID, -1);
             NET_SocketClose(fd);
+            NET_ThrowCurrent(env, "create");
             return;
         } else {
             /* Set socket attribute so it is not passed to any child process */
@@ -414,6 +414,7 @@ Java_java_net_TwoStacksPlainSocketImpl_socketBind(JNIEnv *env, jobject this,
     fd1Obj = (*env)->GetObjectField(env, this, psi_fd1ID);
 
     family = getInetAddress_family(env, iaObj);
+    JNU_CHECK_EXCEPTION(env);
 
     if (family == IPv6 && !ipv6_supported) {
         JNU_ThrowByName(env, JNU_JAVANETPKG "SocketException",
@@ -731,7 +732,9 @@ Java_java_net_TwoStacksPlainSocketImpl_socketAccept(JNIEnv *env, jobject this,
         }
 
         setInetAddress_addr(env, socketAddressObj, ntohl(him.him4.sin_addr.s_addr));
+        JNU_CHECK_EXCEPTION(env);
         setInetAddress_family(env, socketAddressObj, IPv4);
+        JNU_CHECK_EXCEPTION(env);
         (*env)->SetObjectField(env, socket, psi_addressID, socketAddressObj);
     } else {
         /* AF_INET6 -> Inet6Address */
@@ -758,6 +761,7 @@ Java_java_net_TwoStacksPlainSocketImpl_socketAccept(JNIEnv *env, jobject this,
         }
         setInet6Address_ipaddress(env, socketAddressObj, (const char *)&him.him6.sin6_addr);
         setInetAddress_family(env, socketAddressObj, IPv6);
+        JNU_CHECK_EXCEPTION(env);
         setInet6Address_scopeid(env, socketAddressObj, him.him6.sin6_scope_id);
 
     }
@@ -911,6 +915,7 @@ Java_java_net_TwoStacksPlainSocketImpl_socketNativeSetOption(JNIEnv *env,
                     isRcvTimeoutSupported = JNI_FALSE;
                 } else {
                     NET_ThrowCurrent(env, "setsockopt SO_RCVTIMEO");
+                    return;
                 }
             }
             if (fd1 != -1) {

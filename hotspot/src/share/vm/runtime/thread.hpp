@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -42,8 +42,6 @@
 #include "runtime/threadLocalStorage.hpp"
 #include "runtime/thread_ext.hpp"
 #include "runtime/unhandledOops.hpp"
-#include "trace/traceBackend.hpp"
-#include "trace/traceMacros.hpp"
 #include "utilities/exceptions.hpp"
 #include "utilities/macros.hpp"
 #include "utilities/top.hpp"
@@ -51,10 +49,11 @@
 #include "gc_implementation/g1/dirtyCardQueue.hpp"
 #include "gc_implementation/g1/satbQueue.hpp"
 #endif // INCLUDE_ALL_GCS
-#ifdef ZERO
 #ifdef TARGET_ARCH_zero
 # include "stack_zero.hpp"
 #endif
+#if INCLUDE_JFR
+#include "jfr/support/jfrThreadExtension.hpp"
 #endif
 
 class ThreadSafepointState;
@@ -197,7 +196,9 @@ class Thread: public ThreadShadow {
     _deopt_suspend          = 0x10000000U, // thread needs to self suspend for deopt
 
     _has_async_exception    = 0x00000001U, // there is a pending async exception
-    _critical_native_unlock = 0x00000002U  // Must call back to unlock JNI critical lock
+    _critical_native_unlock = 0x00000002U, // Must call back to unlock JNI critical lock
+
+    JFR_ONLY(_trace_flag    = 0x00000004U)  // call jfr tracing
   };
 
   // various suspension related flags - atomically updated
@@ -262,7 +263,7 @@ class Thread: public ThreadShadow {
   // Thread-local buffer used by MetadataOnStackMark.
   MetadataOnStackBuffer* _metadata_on_stack_buffer;
 
-  TRACE_DATA _trace_data;                       // Thread-local data for tracing
+  JFR_ONLY(DEFINE_THREAD_LOCAL_FIELD_JFR;)      // Thread-local data for jfr
 
   ThreadExt _ext;
 
@@ -312,6 +313,7 @@ class Thread: public ThreadShadow {
   virtual bool is_VM_thread()       const            { return false; }
   virtual bool is_Java_thread()     const            { return false; }
   virtual bool is_Compiler_thread() const            { return false; }
+  virtual bool is_service_thread() const             { return false; }
   virtual bool is_hidden_from_external_view() const  { return false; }
   virtual bool is_jvmti_agent_thread() const         { return false; }
   // True iff the thread can perform GC operations at a safepoint.
@@ -330,6 +332,7 @@ class Thread: public ThreadShadow {
 
   // Returns the current thread
   static inline Thread* current();
+  static inline Thread* current_or_null();
 
   // Common thread operations
   static void set_priority(Thread* thread, ThreadPriority priority);
@@ -443,7 +446,8 @@ class Thread: public ThreadShadow {
   void incr_allocated_bytes(jlong size) { _allocated_bytes += size; }
   inline jlong cooked_allocated_bytes();
 
-  TRACE_DATA* trace_data()              { return &_trace_data; }
+  JFR_ONLY(DEFINE_THREAD_LOCAL_ACCESSOR_JFR;)
+  JFR_ONLY(DEFINE_TRACE_SUSPEND_FLAG_METHODS)
 
   const ThreadExt& ext() const          { return _ext; }
   ThreadExt& ext()                      { return _ext; }
@@ -556,7 +560,7 @@ protected:
 
   bool    on_local_stack(address adr) const {
     /* QQQ this has knowledge of direction, ought to be a stack method */
-    return (_stack_base >= adr && adr >= (_stack_base - _stack_size));
+    return (_stack_base > adr && adr >= (_stack_base - _stack_size));
   }
 
   uintptr_t self_raw_id()                    { return _self_raw_id; }
@@ -566,7 +570,7 @@ protected:
   void    set_lgrp_id(int value) { _lgrp_id = value; }
 
   // Printing
-  void print_on(outputStream* st) const;
+  virtual void print_on(outputStream* st) const;
   void print() const { print_on(tty); }
   virtual void print_on_error(outputStream* st, char* buf, int buflen) const;
 
@@ -628,6 +632,8 @@ protected:
 
   static ByteSize allocated_bytes_offset()       { return byte_offset_of(Thread, _allocated_bytes ); }
 
+  JFR_ONLY(DEFINE_THREAD_LOCAL_OFFSET_JFR;)
+
  public:
   volatile intptr_t _Stalled ;
   volatile int _TypeTag ;
@@ -674,9 +680,16 @@ inline Thread* Thread::current() {
          "Don't use Thread::current() inside signal handler");
 #endif
 #endif
-  Thread* thread = ThreadLocalStorage::thread();
-  assert(thread != NULL, "just checking");
-  return thread;
+  Thread* current = current_or_null();
+  assert(current != NULL, "Thread::current() called on detached thread");
+  return current;
+}
+
+inline Thread* Thread::current_or_null() {
+  if (ThreadLocalStorage::is_initialized()) {
+    return ThreadLocalStorage::thread();
+  }
+  return NULL;
 }
 
 // Name support for threads.  non-JavaThread subclasses with multiple
@@ -696,10 +709,12 @@ class NamedThread: public Thread {
   ~NamedThread();
   // May only be called once per thread.
   void set_name(const char* format, ...)  ATTRIBUTE_PRINTF(2, 3);
+  void initialize_named_thread();
   virtual bool is_Named_thread() const { return true; }
   virtual char* name() const { return _name == NULL ? (char*)"Unknown Thread" : _name; }
   JavaThread *processed_thread() { return _processed_thread; }
   void set_processed_thread(JavaThread *thread) { _processed_thread = thread; }
+  virtual void print_on(outputStream* st) const;
 };
 
 // Worker threads are named and have an id of an assigned work.
@@ -730,8 +745,6 @@ class WatcherThread: public Thread {
 
   static bool _startable;
   volatile static bool _should_terminate; // updated without holding lock
-
-  os::WatcherThreadCrashProtection* _crash_protection;
  public:
   enum SomeConstants {
     delay_interval = 10                          // interrupt delay in milliseconds
@@ -746,7 +759,6 @@ class WatcherThread: public Thread {
   // Printing
   char* name() const { return (char*)"VM Periodic Task Thread"; }
   void print_on(outputStream* st) const;
-  void print() const { print_on(tty); }
   void unpark();
 
   // Returns the single instance of WatcherThread
@@ -758,15 +770,6 @@ class WatcherThread: public Thread {
   // Only allow start once the VM is sufficiently initialized
   // Otherwise the first task to enroll will trigger the start
   static void make_startable();
-
-  void set_crash_protection(os::WatcherThreadCrashProtection* crash_protection) {
-    assert(Thread::current()->is_Watcher_thread(), "Can only be set by WatcherThread");
-    _crash_protection = crash_protection;
-  }
-
-  bool has_crash_protection() const { return _crash_protection != NULL; }
-  os::WatcherThreadCrashProtection* crash_protection() const { return _crash_protection; }
-
  private:
   int sleep() const;
 };
@@ -779,6 +782,7 @@ typedef void (*ThreadFunction)(JavaThread*, TRAPS);
 class JavaThread: public Thread {
   friend class VMStructs;
  private:
+  bool           _in_asgct;                      // Is set when this JavaThread is handling ASGCT call
   JavaThread*    _next;                          // The next thread in the Threads list
   oop            _threadObj;                     // The Java level thread object
 
@@ -1050,7 +1054,7 @@ class JavaThread: public Thread {
   address last_Java_pc(void)                     { return _anchor.last_Java_pc(); }
 
   // Safepoint support
-#ifndef PPC64
+#if !(defined(PPC64) || defined(AARCH64))
   JavaThreadState thread_state() const           { return _thread_state; }
   void set_thread_state(JavaThreadState s)       { _thread_state = s;    }
 #else
@@ -1461,7 +1465,6 @@ class JavaThread: public Thread {
   // Misc. operations
   char* name() const { return (char*)get_thread_name(); }
   void print_on(outputStream* st) const;
-  void print() const { print_on(tty); }
   void print_value();
   void print_thread_state_on(outputStream* ) const      PRODUCT_RETURN;
   void print_thread_state() const                       PRODUCT_RETURN;
@@ -1708,6 +1711,9 @@ public:
 #ifdef TARGET_OS_ARCH_linux_x86
 # include "thread_linux_x86.hpp"
 #endif
+#ifdef TARGET_OS_ARCH_linux_aarch64
+# include "thread_linux_aarch64.hpp"
+#endif
 #ifdef TARGET_OS_ARCH_linux_sparc
 # include "thread_linux_sparc.hpp"
 #endif
@@ -1777,12 +1783,16 @@ private:
 public:
   uint get_claimed_par_id() { return _claimed_par_id; }
   void set_claimed_par_id(uint id) { _claimed_par_id = id;}
+
+  // AsyncGetCallTrace support
+  inline bool in_asgct(void) {return _in_asgct;}
+  inline void set_in_asgct(bool value) {_in_asgct = value;}
 };
 
 // Inline implementation of JavaThread::current
 inline JavaThread* JavaThread::current() {
-  Thread* thread = ThreadLocalStorage::thread();
-  assert(thread != NULL && thread->is_Java_thread(), "just checking");
+  Thread* thread = Thread::current();
+  assert(thread->is_Java_thread(), "just checking");
   return (JavaThread*)thread;
 }
 
@@ -1801,7 +1811,8 @@ inline bool JavaThread::stack_yellow_zone_disabled() {
 
 inline bool JavaThread::stack_yellow_zone_enabled() {
 #ifdef ASSERT
-  if (os::uses_stack_guard_pages()) {
+  if (os::uses_stack_guard_pages() &&
+      !(DisablePrimordialThreadGuardPages && os::is_primordial_thread())) {
     assert(_stack_guard_state != stack_guard_unused, "guard pages must be in use");
   }
 #endif

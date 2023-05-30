@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2016, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -36,6 +36,8 @@
 # include "adfiles/ad_x86_32.hpp"
 #elif defined TARGET_ARCH_MODEL_x86_64
 # include "adfiles/ad_x86_64.hpp"
+#elif defined TARGET_ARCH_MODEL_aarch64
+# include "adfiles/ad_aarch64.hpp"
 #elif defined TARGET_ARCH_MODEL_sparc
 # include "adfiles/ad_sparc.hpp"
 #elif defined TARGET_ARCH_MODEL_zero
@@ -49,7 +51,7 @@
 // Check whether val is not-null-decoded compressed oop,
 // i.e. will grab into the base of the heap if it represents NULL.
 static bool accesses_heap_base_zone(Node *val) {
-  if (Universe::narrow_oop_base() > 0) { // Implies UseCompressedOops.
+  if (Universe::narrow_oop_base() != NULL) { // Implies UseCompressedOops.
     if (val && val->is_Mach()) {
       if (val->as_Mach()->ideal_Opcode() == Op_DecodeN) {
         // This assumes all Decodes with TypePtr::NotNull are matched to nodes that
@@ -246,6 +248,14 @@ void PhaseCFG::implicit_null_check(Block* block, Node *proj, Node *val, int allo
       continue;
     }
 
+    // Check that node's control edge is not-null block's head or dominates it,
+    // otherwise we can't hoist it because there are other control dependencies.
+    Node* ctrl = mach->in(0);
+    if (ctrl != NULL && !(ctrl == not_null_block->head() ||
+        get_block_for_node(ctrl)->dominates(not_null_block))) {
+      continue;
+    }
+
     // check if the offset is not too high for implicit exception
     {
       intptr_t offset = 0;
@@ -383,9 +393,12 @@ void PhaseCFG::implicit_null_check(Block* block, Node *proj, Node *val, int allo
   block->add_inst(best);
   map_node_to_block(best, block);
 
-  // Move the control dependence
-  if (best->in(0) && best->in(0) == old_block->head())
-    best->set_req(0, block->head());
+  // Move the control dependence if it is pinned to not-null block.
+  // Don't change it in other cases: NULL or dominating control.
+  if (best->in(0) == not_null_block->head()) {
+    // Set it to control edge of null check.
+    best->set_req(0, proj->in(0)->in(0));
+  }
 
   // Check for flag-killing projections that also need to be hoisted
   // Should be DU safe because no edge updates.
@@ -441,6 +454,18 @@ void PhaseCFG::implicit_null_check(Block* block, Node *proj, Node *val, int allo
 
   latency_from_uses(nul_chk);
   latency_from_uses(best);
+
+  // insert anti-dependences to defs in this block
+  if (! best->needs_anti_dependence_check()) {
+    for (uint k = 1; k < block->number_of_nodes(); k++) {
+      Node *n = block->get_node(k);
+      if (n->needs_anti_dependence_check() &&
+          n->in(LoadNode::Memory) == best->in(StoreNode::Memory)) {
+        // Found anti-dependent load
+        insert_anti_dependences(block, n);
+      }
+    }
+  }
 }
 
 
@@ -675,7 +700,7 @@ uint PhaseCFG::sched_call(Block* block, uint node_cnt, Node_List& worklist, Grow
   block->insert_node(proj, node_cnt++);
 
   // Select the right register save policy.
-  const char * save_policy;
+  const char *save_policy = NULL;
   switch (op) {
     case Op_CallRuntime:
     case Op_CallLeaf:
@@ -792,6 +817,13 @@ bool PhaseCFG::schedule_local(Block* block, GrowableArray<int>& ready_cnt, Vecto
         // and the edge will be lost. This is why this code should be
         // executed only when Precedent (== TypeFunc::Parms) edge is present.
         Node *x = n->in(TypeFunc::Parms);
+        if (x != NULL && get_block_for_node(x) == block && n->find_prec_edge(x) != -1) {
+          // Old edge to node within same block will get removed, but no precedence
+          // edge will get added because it already exists. Update ready count.
+          int cnt = ready_cnt.at(n->_idx);
+          assert(cnt > 1, err_msg("MemBar node %d must not get ready here", n->_idx));
+          ready_cnt.at_put(n->_idx, cnt-1);
+        }
         n->del_req(TypeFunc::Parms);
         n->add_prec(x);
       }
@@ -931,6 +963,8 @@ bool PhaseCFG::schedule_local(Block* block, GrowableArray<int>& ready_cnt, Vecto
       // If this is the first failure, the sentinel string will "stick"
       // to the Compile object, and the C2Compiler will see it and retry.
       C->record_failure(C2Compiler::retry_no_subsuming_loads());
+    } else {
+      assert(false, "graph should be schedulable");
     }
     // assert( phi_cnt == end_idx(), "did not schedule all" );
     return false;
@@ -1088,11 +1122,12 @@ void PhaseCFG::call_catch_cleanup(Block* block) {
     Block *sb = block->_succs[i];
     // Clone the entire area; ignoring the edge fixup for now.
     for( uint j = end; j > beg; j-- ) {
-      // It is safe here to clone a node with anti_dependence
-      // since clones dominate on each path.
       Node *clone = block->get_node(j-1)->clone();
       sb->insert_node(clone, 1);
       map_node_to_block(clone, sb);
+      if (clone->needs_anti_dependence_check()) {
+        insert_anti_dependences(sb, clone);
+      }
     }
   }
 

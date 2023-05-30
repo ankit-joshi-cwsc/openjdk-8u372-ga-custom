@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -66,8 +66,6 @@ import javax.security.auth.callback.UnsupportedCallbackException;
 import sun.security.util.Debug;
 import sun.security.util.DerValue;
 import sun.security.util.ECUtil;
-
-import sun.security.ec.ECParameters;
 
 import sun.security.pkcs11.Secmod.*;
 import static sun.security.pkcs11.P11Util.*;
@@ -752,14 +750,31 @@ final class P11KeyStore extends KeyStoreSpi {
             } else {
                 login(new PasswordCallbackHandler(password));
             }
+        } catch(LoginException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof PKCS11Exception) {
+                PKCS11Exception pe = (PKCS11Exception) cause;
+                if (pe.getErrorCode() == CKR_PIN_INCORRECT) {
+                    // if password is wrong, the cause of the IOException
+                    // should be an UnrecoverableKeyException
+                    throw new IOException("load failed",
+                            new UnrecoverableKeyException().initCause(e));
+                }
+            }
+            throw new IOException("load failed", e);
+        }
+
+        try {
             if (mapLabels() == true) {
                 // CKA_LABELs are shared by multiple certs
                 writeDisabled = true;
             }
             if (debug != null) {
                 dumpTokenMap();
+                debug.println("P11KeyStore load. Entry count: " +
+                        aliasMap.size());
             }
-        } catch (LoginException | KeyStoreException | PKCS11Exception e) {
+        } catch (KeyStoreException | PKCS11Exception e) {
             throw new IOException("load failed", e);
         }
     }
@@ -1471,6 +1486,7 @@ final class P11KeyStore extends KeyStoreSpi {
         }
     }
 
+    // retrieves the native key handle and either update it directly or make a copy
     private void updateP11Pkey(String alias, CK_ATTRIBUTE attribute, P11Key key)
                 throws PKCS11Exception {
 
@@ -1478,23 +1494,22 @@ final class P11KeyStore extends KeyStoreSpi {
         // if session key, convert to token key.
 
         Session session = null;
+        long keyID = key.getKeyID();
         try {
             session = token.getOpSession();
             if (key.tokenObject == true) {
-
                 // token key - set new CKA_ID
 
                 CK_ATTRIBUTE[] attrs = new CK_ATTRIBUTE[] {
                                 new CK_ATTRIBUTE(CKA_ID, alias) };
                 token.p11.C_SetAttributeValue
-                                (session.id(), key.keyID, attrs);
+                                (session.id(), keyID, attrs);
                 if (debug != null) {
                     debug.println("updateP11Pkey set new alias [" +
                                 alias +
                                 "] for key entry");
                 }
             } else {
-
                 // session key - convert to token key and set CKA_ID
 
                 CK_ATTRIBUTE[] attrs = new CK_ATTRIBUTE[] {
@@ -1504,7 +1519,8 @@ final class P11KeyStore extends KeyStoreSpi {
                 if (attribute != null) {
                     attrs = addAttribute(attrs, attribute);
                 }
-                token.p11.C_CopyObject(session.id(), key.keyID, attrs);
+                // creates a new token key with the desired CKA_ID
+                token.p11.C_CopyObject(session.id(), keyID, attrs);
                 if (debug != null) {
                     debug.println("updateP11Pkey copied private session key " +
                                 "for [" +
@@ -1514,6 +1530,7 @@ final class P11KeyStore extends KeyStoreSpi {
             }
         } finally {
             token.releaseSession(session);
+            key.releaseKeyID();
         }
     }
 
@@ -1880,10 +1897,12 @@ final class P11KeyStore extends KeyStoreSpi {
             return attrs;
         }
         String alg = privateKey.getAlgorithm();
-        if (id && alg.equals("RSA") && (publicKey instanceof RSAPublicKey)) {
+        if (alg.equals("RSA") && (publicKey instanceof RSAPublicKey)) {
+            if (id) {
+                BigInteger n = ((RSAPublicKey)publicKey).getModulus();
+                attrs[0] = new CK_ATTRIBUTE(CKA_ID, sha1(getMagnitude(n)));
+            }
             // CKA_NETSCAPE_DB not needed for RSA public keys
-            BigInteger n = ((RSAPublicKey)publicKey).getModulus();
-            attrs[0] = new CK_ATTRIBUTE(CKA_ID, sha1(getMagnitude(n)));
         } else if (alg.equals("DSA") && (publicKey instanceof DSAPublicKey)) {
             BigInteger y = ((DSAPublicKey)publicKey).getY();
             if (id) {

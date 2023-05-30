@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -31,8 +31,8 @@
 
 #if !INCLUDE_NMT
 
-#define CURRENT_PC   NativeCallStack::EMPTY_STACK
-#define CALLER_PC    NativeCallStack::EMPTY_STACK
+#define CURRENT_PC   NativeCallStack::empty_stack()
+#define CALLER_PC    NativeCallStack::empty_stack()
 
 class Tracker : public StackObj {
  public:
@@ -57,14 +57,14 @@ class MemTracker : AllStatic {
 
   static inline void record_new_arena(MEMFLAGS flag) { }
   static inline void record_arena_free(MEMFLAGS flag) { }
-  static inline void record_arena_size_change(int diff, MEMFLAGS flag) { }
+  static inline void record_arena_size_change(ssize_t diff, MEMFLAGS flag) { }
   static inline void record_virtual_memory_reserve(void* addr, size_t size, const NativeCallStack& stack,
                        MEMFLAGS flag = mtNone) { }
   static inline void record_virtual_memory_reserve_and_commit(void* addr, size_t size,
     const NativeCallStack& stack, MEMFLAGS flag = mtNone) { }
   static inline void record_virtual_memory_commit(void* addr, size_t size, const NativeCallStack& stack) { }
   static inline Tracker get_virtual_memory_uncommit_tracker() { return Tracker(); }
-  static inline Tracker get_virtual_memory_release_tracker() { }
+  static inline Tracker get_virtual_memory_release_tracker() { return Tracker(); }
   static inline void record_virtual_memory_type(void* addr, MEMFLAGS flag) { }
   static inline void record_thread_stack(void* addr, size_t size) { }
   static inline void release_thread_stack(void* addr, size_t size) { }
@@ -75,7 +75,7 @@ class MemTracker : AllStatic {
 
 #else
 
-#include "runtime/atomic.hpp"
+#include "runtime/atomic.inline.hpp"
 #include "runtime/threadCritical.hpp"
 #include "services/mallocTracker.hpp"
 #include "services/virtualMemoryTracker.hpp"
@@ -83,9 +83,9 @@ class MemTracker : AllStatic {
 extern volatile bool NMT_stack_walkable;
 
 #define CURRENT_PC ((MemTracker::tracking_level() == NMT_detail && NMT_stack_walkable) ? \
-                    NativeCallStack(0, true) : NativeCallStack::EMPTY_STACK)
+                    NativeCallStack(0, true) : NativeCallStack::empty_stack())
 #define CALLER_PC  ((MemTracker::tracking_level() == NMT_detail && NMT_stack_walkable) ?  \
-                    NativeCallStack(1, true) : NativeCallStack::EMPTY_STACK)
+                    NativeCallStack(1, true) : NativeCallStack::empty_stack())
 
 class MemBaseline;
 class Mutex;
@@ -190,7 +190,7 @@ class MemTracker : AllStatic {
 
   // Record arena size change. Arena size is the size of all arena
   // chuncks that backing up the arena.
-  static inline void record_arena_size_change(int diff, MEMFLAGS flag) {
+  static inline void record_arena_size_change(ssize_t diff, MEMFLAGS flag) {
     if (tracking_level() < NMT_summary) return;
     MallocTracker::record_arena_size_change(diff, flag);
   }

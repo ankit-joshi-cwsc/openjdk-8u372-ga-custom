@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,6 +32,7 @@
 #include "code/pcDesc.hpp"
 #include "compiler/compileBroker.hpp"
 #include "gc_implementation/shared/markSweep.hpp"
+#include "jfr/jfrEvents.hpp"
 #include "memory/allocation.inline.hpp"
 #include "memory/gcLocker.hpp"
 #include "memory/iterator.hpp"
@@ -41,12 +42,13 @@
 #include "oops/oop.inline.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/arguments.hpp"
+#include "runtime/deoptimization.hpp"
 #include "runtime/icache.hpp"
 #include "runtime/java.hpp"
 #include "runtime/mutexLocker.hpp"
 #include "services/memoryService.hpp"
-#include "trace/tracing.hpp"
 #include "utilities/xmlstream.hpp"
+
 
 // Helper class for printing in CodeCache
 
@@ -187,6 +189,12 @@ CodeBlob* CodeCache::allocate(int size, bool is_critical) {
     if (cb != NULL) break;
     if (!_heap->expand_by(CodeCacheExpansionSize)) {
       // Expansion failed
+      if (CodeCache_lock->owned_by_self()) {
+        MutexUnlockerEx mu(CodeCache_lock, Mutex::_no_safepoint_check_flag);
+        report_codemem_full();
+      } else {
+        report_codemem_full();
+      }
       return NULL;
     }
     if (PrintCodeCacheExtension) {
@@ -262,6 +270,10 @@ bool CodeCache::contains(void *p) {
   return _heap->contains(p);
 }
 
+static bool is_in_asgct() {
+  Thread* current_thread = Thread::current_or_null();
+  return current_thread != NULL && current_thread->is_Java_thread() && ((JavaThread*)current_thread)->in_asgct();
+}
 
 // This method is safe to call without holding the CodeCache_lock, as long as a dead codeblob is not
 // looked up (i.e., one that has been marked for deletion). It only dependes on the _segmap to contain
@@ -270,8 +282,12 @@ CodeBlob* CodeCache::find_blob(void* start) {
   CodeBlob* result = find_blob_unsafe(start);
   if (result == NULL) return NULL;
   // We could potientially look up non_entrant methods
-  guarantee(!result->is_zombie() || result->is_locked_by_vm() || is_error_reported(), "unsafe access to zombie method");
-  return result;
+  bool is_zombie = result != NULL && result->is_zombie();
+  bool is_result_safe = !is_zombie || result->is_locked_by_vm() || is_error_reported();
+  guarantee(is_result_safe || is_in_asgct(), "unsafe access to zombie method");
+  // When in ASGCT the previous gurantee will pass for a zombie method but we still don't want that code blob returned in order
+  // to minimize the chance of accessing dead memory
+  return is_result_safe ? result : NULL;
 }
 
 nmethod* CodeCache::find_nmethod(void* start) {
@@ -335,16 +351,19 @@ void CodeCache::blobs_do(CodeBlobClosure* f) {
 }
 
 // Walk the list of methods which might contain non-perm oops.
-void CodeCache::scavenge_root_nmethods_do(CodeBlobClosure* f) {
+void CodeCache::scavenge_root_nmethods_do(CodeBlobToOopClosure* f) {
   assert_locked_or_safepoint(CodeCache_lock);
 
   if (UseG1GC) {
     return;
   }
 
+  const bool fix_relocations = f->fix_relocations();
   debug_only(mark_scavenge_root_nmethods());
 
-  for (nmethod* cur = scavenge_root_nmethods(); cur != NULL; cur = cur->scavenge_root_link()) {
+  nmethod* prev = NULL;
+  nmethod* cur = scavenge_root_nmethods();
+  while (cur != NULL) {
     debug_only(cur->clear_scavenge_root_marked());
     assert(cur->scavenge_root_not_marked(), "");
     assert(cur->on_scavenge_root_list(), "else shouldn't be on this list");
@@ -359,6 +378,18 @@ void CodeCache::scavenge_root_nmethods_do(CodeBlobClosure* f) {
       // Perform cur->oops_do(f), maybe just once per nmethod.
       f->do_code_blob(cur);
     }
+    nmethod* const next = cur->scavenge_root_link();
+    // The scavengable nmethod list must contain all methods with scavengable
+    // oops. It is safe to include more nmethod on the list, but we do not
+    // expect any live non-scavengable nmethods on the list.
+    if (fix_relocations) {
+      if (!is_live || !cur->detect_scavenge_root_oops()) {
+        unlink_scavenge_root_nmethod(cur, prev);
+      } else {
+        prev = cur;
+      }
+    }
+    cur = next;
   }
 
   // Check for stray marks.
@@ -378,6 +409,24 @@ void CodeCache::add_scavenge_root_nmethod(nmethod* nm) {
   print_trace("add_scavenge_root", nm);
 }
 
+void CodeCache::unlink_scavenge_root_nmethod(nmethod* nm, nmethod* prev) {
+  assert_locked_or_safepoint(CodeCache_lock);
+
+  assert((prev == NULL && scavenge_root_nmethods() == nm) ||
+         (prev != NULL && prev->scavenge_root_link() == nm), "precondition");
+
+  assert(!UseG1GC, "G1 does not use the scavenge_root_nmethods list");
+
+  print_trace("unlink_scavenge_root", nm);
+  if (prev == NULL) {
+    set_scavenge_root_nmethods(nm->scavenge_root_link());
+  } else {
+    prev->set_scavenge_root_link(nm->scavenge_root_link());
+  }
+  nm->set_scavenge_root_link(NULL);
+  nm->clear_on_scavenge_root_list();
+}
+
 void CodeCache::drop_scavenge_root_nmethod(nmethod* nm) {
   assert_locked_or_safepoint(CodeCache_lock);
 
@@ -386,20 +435,13 @@ void CodeCache::drop_scavenge_root_nmethod(nmethod* nm) {
   }
 
   print_trace("drop_scavenge_root", nm);
-  nmethod* last = NULL;
-  nmethod* cur = scavenge_root_nmethods();
-  while (cur != NULL) {
-    nmethod* next = cur->scavenge_root_link();
+  nmethod* prev = NULL;
+  for (nmethod* cur = scavenge_root_nmethods(); cur != NULL; cur = cur->scavenge_root_link()) {
     if (cur == nm) {
-      if (last != NULL)
-            last->set_scavenge_root_link(next);
-      else  set_scavenge_root_nmethods(next);
-      nm->set_scavenge_root_link(NULL);
-      nm->clear_on_scavenge_root_list();
+      unlink_scavenge_root_nmethod(cur, prev);
       return;
     }
-    last = cur;
-    cur = next;
+    prev = cur;
   }
   assert(false, "should have been on list");
 }
@@ -428,11 +470,7 @@ void CodeCache::prune_scavenge_root_nmethods() {
     } else {
       // Prune it from the list, so we don't have to look at it any more.
       print_trace("prune_scavenge_root", cur);
-      cur->set_scavenge_root_link(NULL);
-      cur->clear_on_scavenge_root_list();
-      if (last != NULL)
-            last->set_scavenge_root_link(next);
-      else  set_scavenge_root_nmethods(next);
+      unlink_scavenge_root_nmethod(cur, last);
     }
     cur = next;
   }
@@ -521,15 +559,17 @@ void CodeCache::gc_prologue() {
 
 void CodeCache::gc_epilogue() {
   assert_locked_or_safepoint(CodeCache_lock);
-  FOR_ALL_ALIVE_BLOBS(cb) {
-    if (cb->is_nmethod()) {
-      nmethod *nm = (nmethod*)cb;
-      assert(!nm->is_unloaded(), "Tautology");
-      if (needs_cache_clean()) {
-        nm->cleanup_inline_caches();
+  NOT_DEBUG(if (needs_cache_clean())) {
+    FOR_ALL_ALIVE_BLOBS(cb) {
+      if (cb->is_nmethod()) {
+        nmethod *nm = (nmethod*)cb;
+        assert(!nm->is_unloaded(), "Tautology");
+        DEBUG_ONLY(if (needs_cache_clean())) {
+          nm->cleanup_inline_caches();
+        }
+        DEBUG_ONLY(nm->verify());
+        DEBUG_ONLY(nm->verify_oop_relocations());
       }
-      DEBUG_ONLY(nm->verify());
-      DEBUG_ONLY(nm->verify_oop_relocations());
     }
   }
   set_needs_cache_clean(false);
@@ -734,27 +774,6 @@ int CodeCache::mark_for_deoptimization(Method* dependee) {
   return number_of_marked_CodeBlobs;
 }
 
-void CodeCache::make_marked_nmethods_zombies() {
-  assert(SafepointSynchronize::is_at_safepoint(), "must be at a safepoint");
-  FOR_ALL_ALIVE_NMETHODS(nm) {
-    if (nm->is_marked_for_deoptimization()) {
-
-      // If the nmethod has already been made non-entrant and it can be converted
-      // then zombie it now. Otherwise make it non-entrant and it will eventually
-      // be zombied when it is no longer seen on the stack. Note that the nmethod
-      // might be "entrant" and not on the stack and so could be zombied immediately
-      // but we can't tell because we don't track it on stack until it becomes
-      // non-entrant.
-
-      if (nm->is_not_entrant() && nm->can_not_entrant_be_converted()) {
-        nm->make_zombie();
-      } else {
-        nm->make_not_entrant();
-      }
-    }
-  }
-}
-
 void CodeCache::make_marked_nmethods_not_entrant() {
   assert_locked_or_safepoint(CodeCache_lock);
   FOR_ALL_ALIVE_NMETHODS(nm) {
@@ -775,6 +794,7 @@ void CodeCache::report_codemem_full() {
   _codemem_full_count++;
   EventCodeCacheFull event;
   if (event.should_commit()) {
+    event.set_codeBlobType((u1)CodeBlobType::All);
     event.set_startAddress((u8)low_bound());
     event.set_commitedTopAddress((u8)high());
     event.set_reservedTopAddress((u8)high_bound());

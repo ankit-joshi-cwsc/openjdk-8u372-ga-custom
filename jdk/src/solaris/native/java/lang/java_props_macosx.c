@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2021, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -23,10 +23,10 @@
  * questions.
  */
 
-#include <dlfcn.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <objc/objc-runtime.h>
 
 #include <Security/AuthSession.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -34,16 +34,6 @@
 #include <Foundation/Foundation.h>
 
 #include "java_props_macosx.h"
-
-
-// need dlopen/dlsym trick to avoid pulling in JavaRuntimeSupport before libjava.dylib is loaded
-static void *getJRSFramework() {
-    static void *jrsFwk = NULL;
-    if (jrsFwk == NULL) {
-       jrsFwk = dlopen("/System/Library/Frameworks/JavaVM.framework/Frameworks/JavaRuntimeSupport.framework/JavaRuntimeSupport", RTLD_LAZY | RTLD_LOCAL);
-    }
-    return jrsFwk;
-}
 
 char *getPosixLocale(int cat) {
     char *lc = setlocale(cat, NULL);
@@ -56,47 +46,104 @@ char *getPosixLocale(int cat) {
 
 #define LOCALEIDLENGTH  128
 char *getMacOSXLocale(int cat) {
+    const char* retVal = NULL;
+    char languageString[LOCALEIDLENGTH];
+    char localeString[LOCALEIDLENGTH];
+
     switch (cat) {
     case LC_MESSAGES:
         {
-            void *jrsFwk = getJRSFramework();
-            if (jrsFwk == NULL) return NULL;
+            // get preferred language code
+            CFArrayRef languages = CFLocaleCopyPreferredLanguages();
+            if (languages == NULL) {
+                return NULL;
+            }
+            if (CFArrayGetCount(languages) <= 0) {
+                CFRelease(languages);
+                return NULL;
+            }
 
-            char *(*JRSCopyPrimaryLanguage)() = dlsym(jrsFwk, "JRSCopyPrimaryLanguage");
-            char *primaryLanguage = JRSCopyPrimaryLanguage ? JRSCopyPrimaryLanguage() : NULL;
-            if (primaryLanguage == NULL) return NULL;
+            CFStringRef primaryLanguage = (CFStringRef)CFArrayGetValueAtIndex(languages, 0);
+            if (primaryLanguage == NULL) {
+                CFRelease(languages);
+                return NULL;
+            }
+            if (CFStringGetCString(primaryLanguage, languageString,
+                                   LOCALEIDLENGTH, CFStringGetSystemEncoding()) == false) {
+                CFRelease(languages);
+                return NULL;
+            }
+            CFRelease(languages);
 
-            char *(*JRSCopyCanonicalLanguageForPrimaryLanguage)(char *) = dlsym(jrsFwk, "JRSCopyCanonicalLanguageForPrimaryLanguage");
-            char *canonicalLanguage = JRSCopyCanonicalLanguageForPrimaryLanguage ?  JRSCopyCanonicalLanguageForPrimaryLanguage(primaryLanguage) : NULL;
-            free (primaryLanguage);
+            retVal = languageString;
 
-            return canonicalLanguage;
+            // Special case for Portuguese in Brazil:
+            // The language code needs the "_BR" region code (to distinguish it
+            // from Portuguese in Portugal), but this is missing when using the
+            // "Portuguese (Brazil)" language.
+            // If language is "pt" and the current locale is pt_BR, return pt_BR.
+            if (strcmp(retVal, "pt") == 0 &&
+                    CFStringGetCString(CFLocaleGetIdentifier(CFLocaleCopyCurrent()),
+                                       localeString, LOCALEIDLENGTH, CFStringGetSystemEncoding()) &&
+                    strcmp(localeString, "pt_BR") == 0) {
+                retVal = localeString;
+            }
         }
         break;
     default:
         {
-            char localeString[LOCALEIDLENGTH];
-            if (CFStringGetCString(CFLocaleGetIdentifier(CFLocaleCopyCurrent()),
-                                   localeString, LOCALEIDLENGTH, CFStringGetSystemEncoding())) {
-                return strdup(localeString);
+            if (!CFStringGetCString(CFLocaleGetIdentifier(CFLocaleCopyCurrent()),
+                                    localeString, LOCALEIDLENGTH, CFStringGetSystemEncoding())) {
+                return NULL;
             }
+            retVal = localeString;
         }
         break;
     }
 
+    if (retVal != NULL) {
+        // Language IDs use the language designators and (optional) region
+        // and script designators of BCP 47.  So possible formats are:
+        //
+        // "en"         (language designator only)
+        // "haw"        (3-letter lanuage designator)
+        // "en-GB"      (language with alpha-2 region designator)
+        // "es-419"     (language with 3-digit UN M.49 area code)
+        // "zh-Hans"    (language with ISO 15924 script designator)
+        // "zh-Hans-US"  (language with ISO 15924 script designator and region)
+        // "zh-Hans-419" (language with ISO 15924 script designator and UN M.49)
+        //
+        // In the case of region designators (alpha-2 and/or UN M.49), we convert
+        // to our locale string format by changing '-' to '_'.  That is, if
+        // the '-' is followed by fewer than 4 chars.
+        char* scriptOrRegion = strchr(retVal, '-');
+        if (scriptOrRegion != NULL) {
+            int length = strlen(scriptOrRegion);
+            if (length > 5) {
+                // Region and script both exist. Honor the script for now
+                scriptOrRegion[5] = '\0';
+            } else if (length < 5) {
+                *scriptOrRegion = '_';
+
+                assert((length == 3 &&
+                    // '-' followed by a 2 character region designator
+                      isalpha(scriptOrRegion[1]) &&
+                      isalpha(scriptOrRegion[2])) ||
+                       (length == 4 &&
+                    // '-' followed by a 3-digit UN M.49 area code
+                      isdigit(scriptOrRegion[1]) &&
+                      isdigit(scriptOrRegion[2]) &&
+                      isdigit(scriptOrRegion[3])));
+            }
+        }
+
+        return strdup(retVal);
+    }
     return NULL;
 }
 
 char *setupMacOSXLocale(int cat) {
     char * ret = getMacOSXLocale(cat);
-
-    if (cat == LC_MESSAGES && ret != NULL) {
-        void *jrsFwk = getJRSFramework();
-        if (jrsFwk != NULL) {
-            void (*JRSSetDefaultLocalization)(char *) = dlsym(jrsFwk, "JRSSetDefaultLocalization");
-            if (JRSSetDefaultLocalization) JRSSetDefaultLocalization(ret);
-        }
-    }
 
     if (ret == NULL) {
         return getPosixLocale(cat);
@@ -124,26 +171,76 @@ int isInAquaSession() {
     return 0;
 }
 
+// 10.9 SDK does not include the NSOperatingSystemVersion struct.
+// For now, create our own
+typedef struct {
+        NSInteger majorVersion;
+        NSInteger minorVersion;
+        NSInteger patchVersion;
+} OSVerStruct;
+
 void setOSNameAndVersion(java_props_t *sprops) {
-    /* Don't rely on JRSCopyOSName because there's no guarantee the value will
-     * remain the same, or even if the JRS functions will continue to be part of
-     * Mac OS X.  So hardcode os_name, and fill in os_version if we can.
-     */
+    // Hardcode os_name, and fill in os_version
     sprops->os_name = strdup("Mac OS X");
 
-    void *jrsFwk = getJRSFramework();
-    if (jrsFwk != NULL) {
-        char *(*copyOSVersion)() = dlsym(jrsFwk, "JRSCopyOSVersion");
-        if (copyOSVersion != NULL) {
-            sprops->os_version = copyOSVersion();
-            return;
+    NSString *nsVerStr = NULL;
+    char* osVersionCStr = NULL;
+    // Mac OS 10.9 includes the [NSProcessInfo operatingSystemVersion] function,
+    // but it's not in the 10.9 SDK.  So, call it via NSInvocation.
+    if ([[NSProcessInfo processInfo] respondsToSelector:@selector(operatingSystemVersion)]) {
+        OSVerStruct osVer;
+        NSMethodSignature *sig = [[NSProcessInfo processInfo] methodSignatureForSelector:
+                @selector(operatingSystemVersion)];
+        NSInvocation *invoke = [NSInvocation invocationWithMethodSignature:sig];
+        invoke.selector = @selector(operatingSystemVersion);
+        [invoke invokeWithTarget:[NSProcessInfo processInfo]];
+        [invoke getReturnValue:&osVer];
+
+        // Copy out the char* if running on version other than 10.16 Mac OS (10.16 == 11.x)
+        // or explicitly requesting version compatibility
+        if (!((long)osVer.majorVersion == 10 && (long)osVer.minorVersion >= 16) ||
+                (getenv("SYSTEM_VERSION_COMPAT") != NULL)) {
+            if (osVer.patchVersion == 0) { // Omit trailing ".0"
+                nsVerStr = [NSString stringWithFormat:@"%ld.%ld",
+                        (long)osVer.majorVersion, (long)osVer.minorVersion];
+            } else {
+                nsVerStr = [NSString stringWithFormat:@"%ld.%ld.%ld",
+                        (long)osVer.majorVersion, (long)osVer.minorVersion, (long)osVer.patchVersion];
+            }
+        } else {
+            // Version 10.16, without explicit env setting of SYSTEM_VERSION_COMPAT
+            // AKA 11+ Read the *real* ProductVersion from the hidden link to avoid SYSTEM_VERSION_COMPAT
+            // If not found, fallback below to the SystemVersion.plist
+            NSDictionary *version = [NSDictionary dictionaryWithContentsOfFile :
+                             @"/System/Library/CoreServices/.SystemVersionPlatform.plist"];
+            if (version != NULL) {
+                nsVerStr = [version objectForKey : @"ProductVersion"];
+            }
         }
     }
-    sprops->os_version = strdup("Unknown");
+    // Fallback if running on pre-10.9 Mac OS
+    if (nsVerStr == NULL) {
+        NSDictionary *version = [NSDictionary dictionaryWithContentsOfFile :
+                                 @"/System/Library/CoreServices/SystemVersion.plist"];
+        if (version != NULL) {
+            nsVerStr = [version objectForKey : @"ProductVersion"];
+        }
+    }
+
+    if (nsVerStr != NULL) {
+        // Copy out the char*
+        osVersionCStr = strdup([nsVerStr UTF8String]);
+    }
+    if (osVersionCStr == NULL) {
+        osVersionCStr = strdup("Unknown");
+    }
+    sprops->os_version = osVersionCStr;
 }
 
 
-static Boolean getProxyInfoForProtocol(CFDictionaryRef inDict, CFStringRef inEnabledKey, CFStringRef inHostKey, CFStringRef inPortKey, CFStringRef *outProxyHost, int *ioProxyPort) {
+static Boolean getProxyInfoForProtocol(CFDictionaryRef inDict, CFStringRef inEnabledKey,
+                                       CFStringRef inHostKey, CFStringRef inPortKey,
+                                       CFStringRef *outProxyHost, int *ioProxyPort) {
     /* See if the proxy is enabled. */
     CFNumberRef cf_enabled = CFDictionaryGetValue(inDict, inEnabledKey);
     if (cf_enabled == NULL) {

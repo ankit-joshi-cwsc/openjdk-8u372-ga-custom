@@ -964,7 +964,7 @@ void LIR_Assembler::reg2stack(LIR_Opr src, LIR_Opr dest, BasicType type, bool po
     if (type == T_OBJECT || type == T_ARRAY) {
       __ verify_oop(src->as_register());
       __ movptr (dst, src->as_register());
-    } else if (type == T_METADATA) {
+    } else if (type == T_METADATA || type == T_ADDRESS) {
       __ movptr (dst, src->as_register());
     } else {
       __ movl (dst, src->as_register());
@@ -1145,7 +1145,7 @@ void LIR_Assembler::stack2reg(LIR_Opr src, LIR_Opr dest, BasicType type) {
     if (type == T_ARRAY || type == T_OBJECT) {
       __ movptr(dest->as_register(), frame_map()->address_for_slot(src->single_stack_ix()));
       __ verify_oop(dest->as_register());
-    } else if (type == T_METADATA) {
+    } else if (type == T_METADATA || type == T_ADDRESS) {
       __ movptr(dest->as_register(), frame_map()->address_for_slot(src->single_stack_ix()));
     } else {
       __ movl(dest->as_register(), frame_map()->address_for_slot(src->single_stack_ix()));
@@ -1714,8 +1714,8 @@ void LIR_Assembler::emit_typecheck_helper(LIR_OpTypeCheck *op, Label* success, L
   Register Rtmp1 = noreg;
 
   // check if it needs to be profiled
-  ciMethodData* md;
-  ciProfileData* data;
+  ciMethodData* md = NULL;
+  ciProfileData* data = NULL;
 
   if (op->should_profile()) {
     ciMethod* method = op->profiled_method();
@@ -1874,8 +1874,8 @@ void LIR_Assembler::emit_opTypeCheck(LIR_OpTypeCheck* op) {
     CodeStub* stub = op->stub();
 
     // check if it needs to be profiled
-    ciMethodData* md;
-    ciProfileData* data;
+    ciMethodData* md = NULL;
+    ciProfileData* data = NULL;
 
     if (op->should_profile()) {
       ciMethod* method = op->profiled_method();
@@ -2052,7 +2052,8 @@ void LIR_Assembler::cmove(LIR_Condition condition, LIR_Opr opr1, LIR_Opr opr2, L
     case lir_cond_greater:      acond = Assembler::greater;      ncond = Assembler::lessEqual;    break;
     case lir_cond_belowEqual:   acond = Assembler::belowEqual;   ncond = Assembler::above;        break;
     case lir_cond_aboveEqual:   acond = Assembler::aboveEqual;   ncond = Assembler::below;        break;
-    default:                    ShouldNotReachHere();
+    default:                    acond = Assembler::equal;        ncond = Assembler::notEqual;
+                                ShouldNotReachHere();
   }
 
   if (opr1->is_cpu_register()) {
@@ -2649,7 +2650,7 @@ void LIR_Assembler::arithmetic_idiv(LIR_Code code, LIR_Opr left, LIR_Opr right, 
   Register dreg = result->as_register();
 
   if (right->is_constant()) {
-    int divisor = right->as_constant_ptr()->as_jint();
+    jint divisor = right->as_constant_ptr()->as_jint();
     assert(divisor > 0 && is_power_of_2(divisor), "must be");
     if (code == lir_idiv) {
       assert(lreg == rax, "must be rax,");
@@ -2661,7 +2662,7 @@ void LIR_Assembler::arithmetic_idiv(LIR_Code code, LIR_Opr left, LIR_Opr right, 
         __ andl(rdx, divisor - 1);
         __ addl(lreg, rdx);
       }
-      __ sarl(lreg, log2_intptr(divisor));
+      __ sarl(lreg, log2_jint(divisor));
       move_regs(lreg, dreg);
     } else if (code == lir_irem) {
       Label done;
@@ -2717,6 +2718,15 @@ void LIR_Assembler::comp_op(LIR_Condition condition, LIR_Opr opr1, LIR_Opr opr2,
       LIR_Const* c = opr2->as_constant_ptr();
       if (c->type() == T_INT) {
         __ cmpl(reg1, c->as_jint());
+      } else if (c->type() == T_METADATA) {
+        // All we need for now is a comparison with NULL for equality.
+        assert(condition == lir_cond_equal || condition == lir_cond_notEqual, "oops");
+        Metadata* m = c->as_metadata();
+        if (m == NULL) {
+          __ cmpptr(reg1, (int32_t)0);
+        } else {
+          ShouldNotReachHere();
+        }
       } else if (c->type() == T_OBJECT || c->type() == T_ARRAY) {
         // In 64bit oops are single register
         jobject o = c->as_jobject();
@@ -3237,27 +3247,23 @@ void LIR_Assembler::emit_arraycopy(LIR_OpArrayCopy* op) {
   assert(default_type != NULL && default_type->is_array_klass() && default_type->is_loaded(), "must be true at this point");
 
   int elem_size = type2aelembytes(basic_type);
-  int shift_amount;
   Address::ScaleFactor scale;
 
   switch (elem_size) {
     case 1 :
-      shift_amount = 0;
       scale = Address::times_1;
       break;
     case 2 :
-      shift_amount = 1;
       scale = Address::times_2;
       break;
     case 4 :
-      shift_amount = 2;
       scale = Address::times_4;
       break;
     case 8 :
-      shift_amount = 3;
       scale = Address::times_8;
       break;
     default:
+      scale = Address::no_scale;
       ShouldNotReachHere();
   }
 
@@ -3276,6 +3282,23 @@ void LIR_Assembler::emit_arraycopy(LIR_OpArrayCopy* op) {
   if (flags & LIR_OpArrayCopy::dst_null_check) {
     __ testptr(dst, dst);
     __ jcc(Assembler::zero, *stub->entry());
+  }
+
+  // If the compiler was not able to prove that exact type of the source or the destination
+  // of the arraycopy is an array type, check at runtime if the source or the destination is
+  // an instance type.
+  if (flags & LIR_OpArrayCopy::type_check) {
+    if (!(flags & LIR_OpArrayCopy::dst_objarray)) {
+      __ load_klass(tmp, dst);
+      __ cmpl(Address(tmp, in_bytes(Klass::layout_helper_offset())), Klass::_lh_neutral_value);
+      __ jcc(Assembler::greaterEqual, *stub->entry());
+    }
+
+    if (!(flags & LIR_OpArrayCopy::src_objarray)) {
+      __ load_klass(tmp, src);
+      __ cmpl(Address(tmp, in_bytes(Klass::layout_helper_offset())), Klass::_lh_neutral_value);
+      __ jcc(Assembler::greaterEqual, *stub->entry());
+    }
   }
 
   // check if negative

@@ -30,7 +30,7 @@
 //---------------------------------------------------------------------------------
 //
 //  Little Color Management System
-//  Copyright (c) 1998-2011 Marti Maria Saguer
+//  Copyright (c) 1998-2020 Marti Maria Saguer
 //
 // Permission is hereby granted, free of charge, to any person obtaining
 // a copy of this software and associated documentation files (the "Software"),
@@ -123,6 +123,12 @@ CMSAPI cmsBool            CMSEXPORT _cmsMAT3solve(cmsVEC3* x, cmsMAT3* a, cmsVEC
 CMSAPI void               CMSEXPORT _cmsMAT3eval(cmsVEC3* r, const cmsMAT3* a, const cmsVEC3* v);
 
 
+// MD5 low level  -------------------------------------------------------------------------------------
+
+CMSAPI cmsHANDLE          CMSEXPORT cmsMD5alloc(cmsContext ContextID);
+CMSAPI void               CMSEXPORT cmsMD5add(cmsHANDLE Handle, const cmsUInt8Number* buf, cmsUInt32Number len);
+CMSAPI void               CMSEXPORT cmsMD5finish(cmsProfileID* ProfileID, cmsHANDLE Handle);
+
 // Error logging  -------------------------------------------------------------------------------------
 
 CMSAPI void               CMSEXPORT  cmsSignalError(cmsContext ContextID, cmsUInt32Number ErrorCode, const char *ErrorText, ...);
@@ -157,7 +163,7 @@ struct _cms_io_handler {
                                                                    const void* Buffer);
 };
 
-// Endianess adjust functions
+// Endianness adjust functions
 CMSAPI cmsUInt16Number   CMSEXPORT  _cmsAdjustEndianess16(cmsUInt16Number Word);
 CMSAPI cmsUInt32Number   CMSEXPORT  _cmsAdjustEndianess32(cmsUInt32Number Value);
 CMSAPI void              CMSEXPORT  _cmsAdjustEndianess64(cmsUInt64Number* Result, cmsUInt64Number* QWord);
@@ -284,9 +290,9 @@ struct _cms_interp_struc;
 // 16 bits forward interpolation. This function performs precision-limited linear interpolation
 // and is supposed to be quite fast. Implementation may be tetrahedral or trilinear, and plug-ins may
 // choose to implement any other interpolation algorithm.
-typedef void (* _cmsInterpFn16)(register const cmsUInt16Number Input[],
-                                register cmsUInt16Number Output[],
-                                register const struct _cms_interp_struc* p);
+typedef void (* _cmsInterpFn16)(CMSREGISTER const cmsUInt16Number Input[],
+                                CMSREGISTER cmsUInt16Number Output[],
+                                CMSREGISTER const struct _cms_interp_struc* p);
 
 // Floating point forward interpolation. Full precision interpolation using floats. This is not a
 // time critical function. Implementation may be tetrahedral or trilinear, and plug-ins may
@@ -347,7 +353,7 @@ typedef struct {
 
 // Parametric curves. A negative type means same function but analytically inverted. Max. number of params is 10
 
-// Evaluator callback for user-suplied parametric curves. May implement more than one type
+// Evaluator callback for user-supplied parametric curves. May implement more than one type
 typedef  cmsFloat64Number (* cmsParametricCurveEvaluator)(cmsInt32Number Type, const cmsFloat64Number Params[10], cmsFloat64Number R);
 
 // Plug-in may implement an arbitrary number of parametric curves
@@ -369,10 +375,10 @@ typedef struct {
 
 struct _cmstransform_struct;
 
-typedef cmsUInt8Number* (* cmsFormatter16)(register struct _cmstransform_struct* CMMcargo,
-                                           register cmsUInt16Number Values[],
-                                           register cmsUInt8Number*  Buffer,
-                                           register cmsUInt32Number  Stride);
+typedef cmsUInt8Number* (* cmsFormatter16)(CMSREGISTER struct _cmstransform_struct* CMMcargo,
+                                           CMSREGISTER cmsUInt16Number Values[],
+                                           CMSREGISTER cmsUInt8Number* Buffer,
+                                           CMSREGISTER cmsUInt32Number Stride);
 
 typedef cmsUInt8Number* (* cmsFormatterFloat)(struct _cmstransform_struct* CMMcargo,
                                               cmsFloat32Number Values[],
@@ -457,7 +463,7 @@ typedef struct {
     cmsUInt32Number     nSupportedTypes;    // In how many types this tag can come (MAX_TYPES_IN_LCMS_PLUGIN maximum)
     cmsTagTypeSignature SupportedTypes[MAX_TYPES_IN_LCMS_PLUGIN];
 
-    // For writting
+    // For writing
     cmsTagTypeSignature (* DecideType)(cmsFloat64Number ICCVersion, const void *Data);
 
 } cmsTagDescriptor;
@@ -570,9 +576,9 @@ typedef struct {
 // the optimization  search. Or FALSE if it is unable to optimize and want to give a chance
 // to the rest of optimizers.
 
-typedef void     (* _cmsOPTeval16Fn)(register const cmsUInt16Number In[],
-                                     register cmsUInt16Number Out[],
-                                     register const void* Data);
+typedef void     (* _cmsOPTeval16Fn)(CMSREGISTER const cmsUInt16Number In[],
+                                     CMSREGISTER cmsUInt16Number Out[],
+                                     CMSREGISTER const void* Data);
 
 
 typedef cmsBool  (* _cmsOPToptimizeFn)(cmsPipeline** Lut,
@@ -600,13 +606,38 @@ typedef struct {
 
 //----------------------------------------------------------------------------------------------------------
 // Full xform
-typedef void     (* _cmsTransformFn)(struct _cmstransform_struct *CMMcargo,
+
+typedef struct {
+       cmsUInt32Number BytesPerLineIn;
+       cmsUInt32Number BytesPerLineOut;
+       cmsUInt32Number BytesPerPlaneIn;
+       cmsUInt32Number BytesPerPlaneOut;
+
+} cmsStride;
+
+typedef void     (* _cmsTransformFn)(struct _cmstransform_struct *CMMcargo,   // Legacy function, handles just ONE scanline.
                                      const void* InputBuffer,
                                      void* OutputBuffer,
                                      cmsUInt32Number Size,
-                                     cmsUInt32Number Stride);
+                                     cmsUInt32Number Stride);                 // Stride in bytes to the next plana in planar formats
+
+
+typedef void     (*_cmsTransform2Fn)(struct _cmstransform_struct *CMMcargo,
+                                     const void* InputBuffer,
+                                     void* OutputBuffer,
+                                     cmsUInt32Number PixelsPerLine,
+                                     cmsUInt32Number LineCount,
+                                     const cmsStride* Stride);
 
 typedef cmsBool  (* _cmsTransformFactory)(_cmsTransformFn* xform,
+                                         void** UserData,
+                                         _cmsFreeUserDataFn* FreePrivateDataFn,
+                                         cmsPipeline** Lut,
+                                         cmsUInt32Number* InputFormat,
+                                         cmsUInt32Number* OutputFormat,
+                                         cmsUInt32Number* dwFlags);
+
+typedef cmsBool  (* _cmsTransform2Factory)(_cmsTransform2Fn* xform,
                                          void** UserData,
                                          _cmsFreeUserDataFn* FreePrivateDataFn,
                                          cmsPipeline** Lut,
@@ -628,7 +659,10 @@ typedef struct {
       cmsPluginBase     base;
 
       // Transform entry point
-      _cmsTransformFactory  Factory;
+      union {
+             _cmsTransformFactory        legacy_xform;
+             _cmsTransform2Factory       xform;
+      } factories;
 
 }  cmsPluginTransform;
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2013, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2000, 2018, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -51,29 +51,6 @@
 #define HAS_GLIBC_GETHOSTBY_R   1
 #endif
 
-static jclass ni_iacls;
-static jclass ni_ia4cls;
-static jmethodID ni_ia4ctrID;
-
-static jboolean initializeInetClasses(JNIEnv *env)
-{
-    static int initialized = 0;
-    if (!initialized) {
-        ni_iacls = (*env)->FindClass(env, "java/net/InetAddress");
-        CHECK_NULL_RETURN(ni_iacls, JNI_FALSE);
-        ni_iacls = (*env)->NewGlobalRef(env, ni_iacls);
-        CHECK_NULL_RETURN(ni_iacls, JNI_FALSE);
-        ni_ia4cls = (*env)->FindClass(env, "java/net/Inet4Address");
-        CHECK_NULL_RETURN(ni_ia4cls, JNI_FALSE);
-        ni_ia4cls = (*env)->NewGlobalRef(env, ni_ia4cls);
-        CHECK_NULL_RETURN(ni_ia4cls, JNI_FALSE);
-        ni_ia4ctrID = (*env)->GetMethodID(env, ni_ia4cls, "<init>", "()V");
-        CHECK_NULL_RETURN(ni_ia4ctrID, JNI_FALSE);
-        initialized = 1;
-    }
-    return JNI_TRUE;
-}
-
 
 #if defined(_ALLBSD_SOURCE) && !defined(HAS_GLIBC_GETHOSTBY_R)
 extern jobjectArray lookupIfLocalhost(JNIEnv *env, const char *hostname, jboolean includeV6);
@@ -90,38 +67,36 @@ extern jobjectArray lookupIfLocalhost(JNIEnv *env, const char *hostname, jboolea
  */
 JNIEXPORT jstring JNICALL
 Java_java_net_Inet4AddressImpl_getLocalHostName(JNIEnv *env, jobject this) {
-    char hostname[NI_MAXHOST+1];
+    char hostname[NI_MAXHOST + 1];
 
     hostname[0] = '\0';
     if (JVM_GetHostName(hostname, NI_MAXHOST)) {
-        /* Something went wrong, maybe networking is not setup? */
         strcpy(hostname, "localhost");
+#if defined(__solaris__)
     } else {
-         struct addrinfo  hints, *res;
-         int error;
+        // try to resolve hostname via nameservice
+        // if it is known but getnameinfo fails, hostname will still be the
+        // value from gethostname
+        struct addrinfo hints, *res;
 
-         memset(&hints, 0, sizeof(hints));
-         hints.ai_flags = AI_CANONNAME;
-         hints.ai_family = AF_UNSPEC;
+        // make sure string is null-terminated
+        hostname[NI_MAXHOST] = '\0';
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_flags = AI_CANONNAME;
+        hints.ai_family = AF_INET;
 
-         error = getaddrinfo(hostname, NULL, &hints, &res);
-
-         if (error == 0) {
-             /* host is known to name service */
-             error = getnameinfo(res->ai_addr,
-                                 res->ai_addrlen,
-                                 hostname,
-                                 NI_MAXHOST,
-                                 NULL,
-                                 0,
-                                 NI_NAMEREQD);
-
-             /* if getnameinfo fails hostname is still the value
-                from gethostname */
-
-             freeaddrinfo(res);
+        if (getaddrinfo(hostname, NULL, &hints, &res) == 0) {
+            getnameinfo(res->ai_addr, res->ai_addrlen, hostname, NI_MAXHOST,
+                        NULL, 0, NI_NAMEREQD);
+            freeaddrinfo(res);
         }
     }
+#else
+    } else {
+        // make sure string is null-terminated
+        hostname[NI_MAXHOST] = '\0';
+    }
+#endif
     return (*env)->NewStringUTF(env, hostname);
 }
 
@@ -147,8 +122,8 @@ Java_java_net_Inet4AddressImpl_lookupAllHostAddr(JNIEnv *env, jobject this,
     int getaddrinfo_error=0;
     struct addrinfo hints, *res, *resNew = NULL;
 
-    if (!initializeInetClasses(env))
-        return NULL;
+    initInetAddressIDs(env);
+    JNU_CHECK_EXCEPTION_RETURN(env, NULL);
 
     if (IS_NULL(host)) {
         JNU_ThrowNullPointerException(env, "host is null");
@@ -242,7 +217,7 @@ Java_java_net_Inet4AddressImpl_lookupAllHostAddr(JNIEnv *env, jobject this,
           goto cleanupAndReturn;
         }
 
-        ret = (*env)->NewObjectArray(env, retLen, ni_iacls, NULL);
+        ret = (*env)->NewObjectArray(env, retLen, ia_class, NULL);
         if (IS_NULL(ret)) {
             /* we may have memory to free at the end of this */
             goto cleanupAndReturn;
@@ -252,14 +227,18 @@ Java_java_net_Inet4AddressImpl_lookupAllHostAddr(JNIEnv *env, jobject this,
             /* We need 4 bytes to store ipv4 address; */
             int len = 4;
 
-            jobject iaObj = (*env)->NewObject(env, ni_ia4cls, ni_ia4ctrID);
+            jobject iaObj = (*env)->NewObject(env, ia4_class, ia4_ctrID);
             if (IS_NULL(iaObj)) {
                 /* we may have memory to free at the end of this */
                 ret = NULL;
                 goto cleanupAndReturn;
             }
             setInetAddress_addr(env, iaObj, ntohl(((struct sockaddr_in*)(iterator->ai_addr))->sin_addr.s_addr));
+            if ((*env)->ExceptionCheck(env))
+                goto cleanupAndReturn;
             setInetAddress_hostName(env, iaObj, name);
+            if ((*env)->ExceptionCheck(env))
+                goto cleanupAndReturn;
             (*env)->SetObjectArrayElement(env, ret, retLen - i -1, iaObj);
             i++;
             iterator = iterator->ai_next;
@@ -408,8 +387,8 @@ Java_java_net_Inet4AddressImpl_lookupAllHostAddr(JNIEnv *env, jobject this,
     int error = 0;
     struct addrinfo hints, *res, *resNew = NULL;
 
-    if (!initializeInetClasses(env))
-        return NULL;
+    initInetAddressIDs(env);
+    JNU_CHECK_EXCEPTION_RETURN(env, NULL);
 
     if (IS_NULL(host)) {
         JNU_ThrowNullPointerException(env, "host is null");
@@ -487,7 +466,7 @@ Java_java_net_Inet4AddressImpl_lookupAllHostAddr(JNIEnv *env, jobject this,
         retLen = i;
         iterator = resNew;
 
-        ret = (*env)->NewObjectArray(env, retLen, ni_iacls, NULL);
+        ret = (*env)->NewObjectArray(env, retLen, ia_class, NULL);
 
         if (IS_NULL(ret)) {
             /* we may have memory to free at the end of this */
@@ -496,13 +475,17 @@ Java_java_net_Inet4AddressImpl_lookupAllHostAddr(JNIEnv *env, jobject this,
 
         i = 0;
         while (iterator != NULL) {
-            jobject iaObj = (*env)->NewObject(env, ni_ia4cls, ni_ia4ctrID);
+            jobject iaObj = (*env)->NewObject(env, ia4_class, ia4_ctrID);
             if (IS_NULL(iaObj)) {
                 ret = NULL;
                 goto cleanupAndReturn;
             }
             setInetAddress_addr(env, iaObj, ntohl(((struct sockaddr_in*)iterator->ai_addr)->sin_addr.s_addr));
+            if ((*env)->ExceptionCheck(env))
+                goto cleanupAndReturn;
             setInetAddress_hostName(env, iaObj, host);
+            if ((*env)->ExceptionCheck(env))
+                goto cleanupAndReturn;
             (*env)->SetObjectArrayElement(env, ret, i++, iaObj);
             iterator = iterator->ai_next;
         }
@@ -596,7 +579,7 @@ ping4(JNIEnv *env, jint fd, struct sockaddr_in* him, jint timeout,
     struct sockaddr_in sa_recv;
     jchar pid;
     jint tmout2, seq = 1;
-    struct timeval tv;
+    struct timeval tv = { 0, 0 };
     size_t plen;
 
     /* icmp_id is a 16 bit data type, therefore down cast the pid */
@@ -636,7 +619,7 @@ ping4(JNIEnv *env, jint fd, struct sockaddr_in* him, jint timeout,
       seq++;
       gettimeofday(&tv, NULL);
       memcpy(icmp->icmp_data, &tv, sizeof(tv));
-      plen = ICMP_ADVLENMIN + sizeof(tv);
+      plen = ICMP_MINLEN + sizeof(tv);
       icmp->icmp_cksum = 0;
       icmp->icmp_cksum = in_cksum((u_short *)icmp, plen);
       /*

@@ -53,7 +53,10 @@ extern jclass ia_class;
 extern jfieldID iac_addressID;
 extern jfieldID iac_familyID;
 extern jfieldID iac_hostNameID;
+extern jfieldID iac_origHostNameID;
 extern jfieldID ia_preferIPv6AddressID;
+
+JNIEXPORT void JNICALL initInetAddressIDs(JNIEnv *env);
 
 /** (Inet6Address accessors)
  * set_ methods return JNI_TRUE on success JNI_FALSE on error

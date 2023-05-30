@@ -26,7 +26,6 @@
 package jdk.nashorn.internal.runtime;
 
 import java.lang.invoke.MethodHandle;
-import java.util.Iterator;
 import java.util.concurrent.Callable;
 import jdk.nashorn.internal.objects.Global;
 import jdk.nashorn.internal.parser.JSONParser;
@@ -47,7 +46,7 @@ public final class JSONFunctions {
                     @Override
                     public MethodHandle call() {
                         return Bootstrap.createDynamicInvoker("dyn:call", Object.class,
-                            ScriptFunction.class, ScriptObject.class, String.class, Object.class);
+                             Object.class, Object.class, String.class, Object.class);
                     }
                 });
     }
@@ -91,36 +90,48 @@ public final class JSONFunctions {
 
     // apply 'reviver' function if available
     private static Object applyReviver(final Global global, final Object unfiltered, final Object reviver) {
-        if (reviver instanceof ScriptFunction) {
+        if (Bootstrap.isCallable(reviver)) {
             final ScriptObject root = global.newObject();
             root.addOwnProperty("", Property.WRITABLE_ENUMERABLE_CONFIGURABLE, unfiltered);
-            return walk(root, "", (ScriptFunction)reviver);
+            return walk(root, "", reviver);
         }
         return unfiltered;
     }
 
     // This is the abstract "Walk" operation from the spec.
-    private static Object walk(final ScriptObject holder, final Object name, final ScriptFunction reviver) {
+    private static Object walk(final ScriptObject holder, final Object name, final Object reviver) {
         final Object val = holder.get(name);
         if (val instanceof ScriptObject) {
             final ScriptObject     valueObj = (ScriptObject)val;
-            final Iterator<String> iter     = valueObj.propertyIterator();
+            if (valueObj.isArray()) {
+                final int length = JSType.toInteger(valueObj.getLength());
+                for (int i = 0; i < length; i++) {
+                    final String key = Integer.toString(i);
+                    final Object newElement = walk(valueObj, key, reviver);
 
-            while (iter.hasNext()) {
-                final String key        = iter.next();
-                final Object newElement = walk(valueObj, key, reviver);
+                    if (newElement == ScriptRuntime.UNDEFINED) {
+                        valueObj.delete(i, false);
+                    } else {
+                        setPropertyValue(valueObj, key, newElement);
+                    }
+                }
+            } else {
+                final String[] keys = valueObj.getOwnKeys(false);
+                for (final String key : keys) {
+                    final Object newElement = walk(valueObj, key, reviver);
 
-                if (newElement == ScriptRuntime.UNDEFINED) {
-                    valueObj.delete(key, false);
-                } else {
-                    setPropertyValue(valueObj, key, newElement);
+                    if (newElement == ScriptRuntime.UNDEFINED) {
+                        valueObj.delete(key, false);
+                    } else {
+                        setPropertyValue(valueObj, key, newElement);
+                    }
                 }
             }
         }
 
         try {
              // Object.class, ScriptFunction.class, ScriptObject.class, String.class, Object.class);
-             return getREVIVER_INVOKER().invokeExact(reviver, holder, JSType.toString(name), val);
+             return getREVIVER_INVOKER().invokeExact(reviver, (Object)holder, JSType.toString(name), val);
         } catch(Error|RuntimeException t) {
             throw t;
         } catch(final Throwable t) {

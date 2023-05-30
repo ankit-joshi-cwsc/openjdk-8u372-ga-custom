@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2002, 2012, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2002, 2018, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -53,14 +53,15 @@ $(ARCH)/LinuxDebuggerLocal.o: LinuxDebuggerLocal.c
         $(JAVAH) -jni -classpath ../../../build/classes -d $(ARCH) \
 		sun.jvm.hotspot.debugger.x86.X86ThreadContext \
 		sun.jvm.hotspot.debugger.sparc.SPARCThreadContext \
-		sun.jvm.hotspot.debugger.amd64.AMD64ThreadContext 
+		sun.jvm.hotspot.debugger.amd64.AMD64ThreadContext \
+		sun.jvm.hotspot.debugger.aarch64.AARCH64ThreadContext 
         $(GCC) $(CFLAGS) $< -o $@
 
 $(ARCH)/sadis.o:  ../../share/native/sadis.c
         $(JAVAH) -jni -classpath ../../../build/classes -d $(ARCH) \
                 sun.jvm.hotspot.asm.Disassembler
         $(GCC) $(CFLAGS) $< -o $@
- 
+
 $(ARCH)/%.o: %.c
         $(GCC) $(CFLAGS) $< -o $@
 
@@ -75,6 +76,9 @@ ifneq ($(_HAS_HASH_STYLE_GNU),)
   LDFLAGS_HASH_STYLE = -Wl,--hash-style=both
 endif
 LFLAGS_LIBSA += $(LDFLAGS_HASH_STYLE)
+
+LDFLAGS_NO_EXEC_STACK="-Wl,-z,noexecstack"
+LFLAGS_LIBSA += $(LDFLAGS_NO_EXEC_STACK)
 
 $(LIBSA): $(ARCH) $(OBJS) mapfile
         $(GCC) -shared $(LFLAGS_LIBSA) -o $(LIBSA) $(OBJS) $(LIBS)

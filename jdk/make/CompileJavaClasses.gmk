@@ -170,10 +170,6 @@ ifdef BUILD_HEADLESS_ONLY
   EXCLUDES += sun/applet
 endif
 
-ifdef OPENJDK
-  EXCLUDES += sun/java2d/cmm/kcms
-endif
-
 # Used on windows and macosx
 ifeq (, $(filter $(OPENJDK_TARGET_OS), windows macosx))
   EXFILES += sun/awt/AWTCharset.java
@@ -237,11 +233,6 @@ ifeq (, $(filter $(OPENJDK_TARGET_OS), solaris macosx aix))
   #
   EXFILES += sun/nio/fs/PollingWatchService.java
 endif
-
-# TODO: Fix when converting NIO
-# Exclude *-linux-arm.java and *-linux-ppc.java from closed.
-EXFILES += -linux-arm.java \
-    -linux-ppc.java
 
 ifeq ($(OPENJDK_TARGET_OS), windows)
   EXFILES += sun/nio/ch/AbstractPollSelectorImpl.java \
@@ -313,6 +304,15 @@ ifeq ($(OPENJDK_TARGET_OS),aix)
       $(JDK_TOPDIR)/src/solaris/classes/sun/nio/ch/sctp/SctpServerChannelImpl.java
 endif
 
+LINUX_SRC_DIRS :=
+ifeq ($(OPENJDK_TARGET_OS),linux)
+     LINUX_SRC_DIRS += $(JDK_TOPDIR)/src/linux/classes
+
+     # Linux is the only OS with an actual implementation of SystemMetrics.
+     # Exclude the generic null-returning stub from solaris/classes for that reason.
+     EXFILES += $(JDK_TOPDIR)/src/solaris/classes/jdk/internal/platform/SystemMetrics.java
+endif
+
 # The exception handling of swing beaninfo
 # These resources violates the convention of having code and resources together under
 # $(JDK_TOPDIR)/src/.../classes directories
@@ -338,6 +338,7 @@ $(eval $(call SetupJavaCompilation,BUILD_JDK,\
         $(JDK_TOPDIR)/src/$(OPENJDK_TARGET_OS_API_DIR)/classes \
         $(MACOSX_SRC_DIRS) \
         $(AIX_SRC_DIRS) \
+        $(LINUX_SRC_DIRS) \
         $(JDK_OUTPUTDIR)/gensrc \
         $(JDK_OUTPUTDIR)/gensrc_no_srczip \
         $(CLOSED_SRC_DIRS),\
@@ -393,7 +394,7 @@ $(JDK_OUTPUTDIR)/classes/META-INF/services/com.sun.tools.xjc.Plugin:
           JAVAC_FLAGS := -cp $(JDK_OUTPUTDIR)/classes, \
           SRC := $(JDK_OUTPUTDIR)/gensrc_ab/legacy, \
           BIN := $(JDK_OUTPUTDIR)/classes_ab/legacy, \
-          HEADERS := $(JDK_OUTPUTDIR)/gensrc_headers_ab/legacy))
+          HEADERS := $(JDK_OUTPUTDIR)/gensrc_headers_ab/LEGACY))
 
       $(BUILD_ACCESSBRIDGE_LEGACY): $(BUILD_JDK)
 

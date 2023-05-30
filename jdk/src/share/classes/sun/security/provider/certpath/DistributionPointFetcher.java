@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2002, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2002, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -33,7 +33,7 @@ import javax.security.auth.x500.X500Principal;
 import java.util.*;
 
 import sun.security.util.Debug;
-import sun.security.util.DerOutputStream;
+import sun.security.validator.Validator;
 import static sun.security.x509.PKIXExtensions.*;
 import sun.security.x509.*;
 
@@ -67,6 +67,20 @@ public class DistributionPointFetcher {
      * an X509CRLSelector with certificateChecking set.
      */
     public static Collection<X509CRL> getCRLs(X509CRLSelector selector,
+            boolean signFlag, PublicKey prevKey, String provider,
+            List<CertStore> certStores, boolean[] reasonsMask,
+            Set<TrustAnchor> trustAnchors, Date validity, String variant)
+            throws CertStoreException
+    {
+        return getCRLs(selector, signFlag, prevKey, null, provider, certStores,
+                reasonsMask, trustAnchors, validity, variant, null);
+    }
+    /**
+     * Return the X509CRLs matching this selector. The selector must be
+     * an X509CRLSelector with certificateChecking set.
+     */
+    // Called by com.sun.deploy.security.RevocationChecker
+    public static Collection<X509CRL> getCRLs(X509CRLSelector selector,
                                               boolean signFlag,
                                               PublicKey prevKey,
                                               String provider,
@@ -76,8 +90,14 @@ public class DistributionPointFetcher {
                                               Date validity)
         throws CertStoreException
     {
+        if (trustAnchors.isEmpty()) {
+            throw new CertStoreException(
+                "at least one TrustAnchor must be specified");
+        }
+        TrustAnchor anchor = trustAnchors.iterator().next();
         return getCRLs(selector, signFlag, prevKey, null, provider, certStores,
-                       reasonsMask, trustAnchors, validity);
+                reasonsMask, trustAnchors, validity,
+                Validator.VAR_PLUGIN_CODE_SIGNING, anchor);
     }
 
     /**
@@ -92,7 +112,9 @@ public class DistributionPointFetcher {
                                               List<CertStore> certStores,
                                               boolean[] reasonsMask,
                                               Set<TrustAnchor> trustAnchors,
-                                              Date validity)
+                                              Date validity,
+                                              String variant,
+                                              TrustAnchor anchor)
         throws CertStoreException
     {
         X509Certificate cert = selector.getCertificateChecking();
@@ -121,7 +143,7 @@ public class DistributionPointFetcher {
                 DistributionPoint point = t.next();
                 Collection<X509CRL> crls = getCRLs(selector, certImpl,
                     point, reasonsMask, signFlag, prevKey, prevCert, provider,
-                    certStores, trustAnchors, validity);
+                    certStores, trustAnchors, validity, variant, anchor);
                 results.addAll(crls);
             }
             if (debug != null) {
@@ -146,7 +168,8 @@ public class DistributionPointFetcher {
         X509CertImpl certImpl, DistributionPoint point, boolean[] reasonsMask,
         boolean signFlag, PublicKey prevKey, X509Certificate prevCert,
         String provider, List<CertStore> certStores,
-        Set<TrustAnchor> trustAnchors, Date validity)
+        Set<TrustAnchor> trustAnchors, Date validity, String variant,
+        TrustAnchor anchor)
             throws CertStoreException {
 
         // check for full name
@@ -209,7 +232,7 @@ public class DistributionPointFetcher {
                 selector.setIssuerNames(null);
                 if (selector.match(crl) && verifyCRL(certImpl, point, crl,
                         reasonsMask, signFlag, prevKey, prevCert, provider,
-                        trustAnchors, certStores, validity)) {
+                        trustAnchors, certStores, validity, variant, anchor)) {
                     crls.add(crl);
                 }
             } catch (IOException | CRLException e) {
@@ -318,7 +341,8 @@ public class DistributionPointFetcher {
         X509CRL crl, boolean[] reasonsMask, boolean signFlag,
         PublicKey prevKey, X509Certificate prevCert, String provider,
         Set<TrustAnchor> trustAnchors, List<CertStore> certStores,
-        Date validity) throws CRLException, IOException {
+        Date validity, String variant, TrustAnchor anchor)
+        throws CRLException, IOException {
 
         if (debug != null) {
             debug.println("DistributionPointFetcher.verifyCRL: " +
@@ -444,7 +468,7 @@ public class DistributionPointFetcher {
                         }
                         if (indirectCRL) {
                             if (pointCrlIssuers.size() != 1) {
-                                // RFC 3280: there must be only 1 CRL issuer
+                                // RFC 5280: there must be only 1 CRL issuer
                                 // name when relativeName is present
                                 if (debug != null) {
                                     debug.println("must only be one CRL " +
@@ -608,12 +632,9 @@ public class DistributionPointFetcher {
             AuthorityKeyIdentifierExtension akidext =
                                             crlImpl.getAuthKeyIdExtension();
             if (akidext != null) {
-                KeyIdentifier akid = (KeyIdentifier)akidext.get(
-                        AuthorityKeyIdentifierExtension.KEY_ID);
-                if (akid != null) {
-                    DerOutputStream derout = new DerOutputStream();
-                    derout.putOctetString(akid.getIdentifier());
-                    certSel.setSubjectKeyIdentifier(derout.toByteArray());
+                byte[] kid = akidext.getEncodedKeyIdentifier();
+                if (kid != null) {
+                    certSel.setSubjectKeyIdentifier(kid);
                 }
 
                 SerialNumber asn = (SerialNumber)akidext.get(
@@ -668,7 +689,8 @@ public class DistributionPointFetcher {
 
         // check the crl signature algorithm
         try {
-            AlgorithmChecker.check(prevKey, crl);
+            AlgorithmChecker.check(prevKey, crlImpl.getSigAlgId(),
+                                   variant, anchor);
         } catch (CertPathValidatorException cpve) {
             if (debug != null) {
                 debug.println("CRL signature algorithm check failed: " + cpve);

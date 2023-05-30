@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2017, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -515,6 +515,13 @@ class JdepsTask {
         // add all classpath archives to the source locations for reporting
         sourceLocations.addAll(classpaths);
 
+        // warn about Multi-Release jars
+        for (Archive a : sourceLocations) {
+            if (a.reader().isMultiReleaseJar()) {
+                warning("warn.mrjar.usejdk9", a.getPathName());
+            }
+        }
+
         // Work queue of names of classfiles to be searched.
         // Entries will be unique, and for classes that do not yet have
         // dependencies in the results map.
@@ -553,7 +560,7 @@ class JdepsTask {
                     }
                 }
                 for (String name : a.reader().skippedEntries()) {
-                    warning("warn.skipped.entry", name, a.getPathName());
+                    warning("warn.skipped.entry", name);
                 }
             }
         }

@@ -24,19 +24,17 @@
  * THIS FILE WAS MODIFIED BY ORACLE, INC.
  */
 
-/* libpng STANDARD API DEFINITION */
-
-/* pnglibconf.h - library build configuration */
-
-/* This file is available under and governed by the GNU General Public
+/* pnglibconf.h - library build configuration
+ *
+ * This file is available under and governed by the GNU General Public
  * License version 2 only, as published by the Free Software Foundation.
  * However, the following notice accompanied the original version of this
  * file and, per its terms, should not be removed:
  */
+/* libpng version 1.6.37 */
 
-/* libpng version 1.6.16,December 22, 2014 */
-
-/* Copyright (c) 1998-2014 Glenn Randers-Pehrson */
+/* Copyright (c) 2018-2019 Cosmin Truta */
+/* Copyright (c) 1998-2002,2004,2006-2018 Glenn Randers-Pehrson */
 
 /* This code is released under the libpng license. */
 /* For conditions of distribution and use, see the disclaimer */
@@ -76,6 +74,8 @@
 #define PNG_IO_STATE_SUPPORTED
 #define PNG_MNG_FEATURES_SUPPORTED
 #define PNG_POINTER_INDEXING_SUPPORTED
+/*#undef PNG_POWERPC_VSX_API_SUPPORTED*/
+/*#undef PNG_POWERPC_VSX_CHECK_SUPPORTED*/
 #define PNG_PROGRESSIVE_READ_SUPPORTED
 #define PNG_READ_16BIT_SUPPORTED
 #define PNG_READ_ALPHA_MODE_SUPPORTED
@@ -84,7 +84,7 @@
 #define PNG_READ_BGR_SUPPORTED
 #define PNG_READ_CHECK_FOR_INVALID_INDEX_SUPPORTED
 #define PNG_READ_COMPOSITE_NODIV_SUPPORTED
-#define PNG_READ_COMPRESSED_TEXT_SUPPORTED
+/*#undef PNG_READ_COMPRESSED_TEXT_SUPPORTED*/
 #define PNG_READ_EXPAND_16_SUPPORTED
 #define PNG_READ_EXPAND_SUPPORTED
 #define PNG_READ_FILLER_SUPPORTED
@@ -114,10 +114,11 @@
 #define PNG_READ_USER_TRANSFORM_SUPPORTED
 #define PNG_READ_bKGD_SUPPORTED
 #define PNG_READ_cHRM_SUPPORTED
+/*#undef PNG_READ_eXIf_SUPPORTED*/
 #define PNG_READ_gAMA_SUPPORTED
 #define PNG_READ_hIST_SUPPORTED
-#define PNG_READ_iCCP_SUPPORTED
-#define PNG_READ_iTXt_SUPPORTED
+/*#undef PNG_READ_iCCP_SUPPORTED*/
+/*#undef PNG_READ_iTXt_SUPPORTED*/
 #define PNG_READ_oFFs_SUPPORTED
 #define PNG_READ_pCAL_SUPPORTED
 #define PNG_READ_pHYs_SUPPORTED
@@ -128,14 +129,11 @@
 #define PNG_READ_tEXt_SUPPORTED
 #define PNG_READ_tIME_SUPPORTED
 #define PNG_READ_tRNS_SUPPORTED
-#define PNG_READ_zTXt_SUPPORTED
-/*#undef PNG_SAFE_LIMITS_SUPPORTED*/
+/*#undef PNG_READ_zTXt_SUPPORTED*/
 /*#undef PNG_SAVE_INT_32_SUPPORTED*/
 #define PNG_SAVE_UNKNOWN_CHUNKS_SUPPORTED
 #define PNG_SEQUENTIAL_READ_SUPPORTED
 #define PNG_SETJMP_SUPPORTED
-#define PNG_SET_CHUNK_CACHE_LIMIT_SUPPORTED
-#define PNG_SET_CHUNK_MALLOC_LIMIT_SUPPORTED
 #define PNG_SET_OPTION_SUPPORTED
 #define PNG_SET_UNKNOWN_CHUNKS_SUPPORTED
 #define PNG_SET_USER_LIMITS_SUPPORTED
@@ -144,6 +142,7 @@
 #define PNG_SIMPLIFIED_READ_SUPPORTED
 /*#undef PNG_SIMPLIFIED_WRITE_AFIRST_SUPPORTED*/
 /*#undef PNG_SIMPLIFIED_WRITE_BGR_SUPPORTED*/
+/*#undef PNG_SIMPLIFIED_WRITE_STDIO_SUPPORTED*/
 /*#undef PNG_SIMPLIFIED_WRITE_SUPPORTED*/
 #define PNG_STDIO_SUPPORTED
 #define PNG_STORE_UNKNOWN_CHUNKS_SUPPORTED
@@ -161,6 +160,7 @@
 /*#undef PNG_WRITE_BGR_SUPPORTED*/
 /*#undef PNG_WRITE_CHECK_FOR_INVALID_INDEX_SUPPORTED*/
 /*#undef PNG_WRITE_COMPRESSED_TEXT_SUPPORTED*/
+/*#undef PNG_WRITE_CUSTOMIZE_COMPRESSION_SUPPORTED*/
 /*#undef PNG_WRITE_CUSTOMIZE_ZTXT_COMPRESSION_SUPPORTED*/
 /*#undef PNG_WRITE_FILLER_SUPPORTED*/
 /*#undef PNG_WRITE_FILTER_SUPPORTED*/
@@ -184,6 +184,7 @@
 /*#undef PNG_WRITE_WEIGHTED_FILTER_SUPPORTED*/
 /*#undef PNG_WRITE_bKGD_SUPPORTED*/
 /*#undef PNG_WRITE_cHRM_SUPPORTED*/
+/*#undef PNG_WRITE_eXIf_SUPPORTED*/
 /*#undef PNG_WRITE_gAMA_SUPPORTED*/
 /*#undef PNG_WRITE_hIST_SUPPORTED*/
 /*#undef PNG_WRITE_iCCP_SUPPORTED*/
@@ -201,6 +202,7 @@
 /*#undef PNG_WRITE_zTXt_SUPPORTED*/
 #define PNG_bKGD_SUPPORTED
 #define PNG_cHRM_SUPPORTED
+/*#undef PNG_eXIf_SUPPORTED*/
 #define PNG_gAMA_SUPPORTED
 #define PNG_hIST_SUPPORTED
 #define PNG_iCCP_SUPPORTED
@@ -219,24 +221,26 @@
 /* end of options */
 /* settings */
 #define PNG_API_RULE 0
-#define PNG_COST_SHIFT 3
 #define PNG_DEFAULT_READ_MACROS 1
 #define PNG_GAMMA_THRESHOLD_FIXED 5000
 #define PNG_IDAT_READ_SIZE PNG_ZBUF_SIZE
 #define PNG_INFLATE_BUF_SIZE 1024
+#define PNG_LINKAGE_API extern
+#define PNG_LINKAGE_CALLBACK extern
+#define PNG_LINKAGE_DATA extern
+#define PNG_LINKAGE_FUNCTION extern
 #define PNG_MAX_GAMMA_8 11
 #define PNG_QUANTIZE_BLUE_BITS 5
 #define PNG_QUANTIZE_GREEN_BITS 5
 #define PNG_QUANTIZE_RED_BITS 5
 #define PNG_TEXT_Z_DEFAULT_COMPRESSION (-1)
 #define PNG_TEXT_Z_DEFAULT_STRATEGY 0
-#define PNG_USER_CHUNK_CACHE_MAX 0
-#define PNG_USER_CHUNK_MALLOC_MAX 0
-#define PNG_USER_HEIGHT_MAX 1000000
-#define PNG_USER_WIDTH_MAX 1000000
-#define PNG_WEIGHT_SHIFT 8
+#define PNG_USER_CHUNK_CACHE_MAX 1000
+#define PNG_USER_CHUNK_MALLOC_MAX 8000000
+#define PNG_USER_HEIGHT_MAX 8000
+#define PNG_USER_WIDTH_MAX 8000
 #define PNG_ZBUF_SIZE 8192
-#define PNG_ZLIB_VERNUM 0
+#define PNG_ZLIB_VERNUM 0 /* unknown */
 #define PNG_Z_DEFAULT_COMPRESSION (-1)
 #define PNG_Z_DEFAULT_NOFILTER_STRATEGY 0
 #define PNG_Z_DEFAULT_STRATEGY 1

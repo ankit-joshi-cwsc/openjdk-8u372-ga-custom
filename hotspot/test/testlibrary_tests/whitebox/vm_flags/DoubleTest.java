@@ -23,7 +23,7 @@
 
 /*
  * @test DoubleTest
- * @bug 8028756
+ * @bug 8038756
  * @library /testlibrary /testlibrary/whitebox
  * @build DoubleTest
  * @run main ClassFileInstaller sun.hotspot.WhiteBox
@@ -33,7 +33,7 @@
  */
 
 public class DoubleTest {
-    private static final String FLAG_NAME = null;
+    private static final String FLAG_NAME = "InitialRAMPercentage";
     private static final Double[] TESTS = {0d, -0d, -1d, 1d,
             Double.MAX_VALUE, Double.MIN_VALUE, Double.NaN,
             Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY};

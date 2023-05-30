@@ -28,6 +28,7 @@
 #include "code/icBuffer.hpp"
 #include "code/nmethod.hpp"
 #include "compiler/compileBroker.hpp"
+#include "jfr/jfrEvents.hpp"
 #include "memory/resourceArea.hpp"
 #include "oops/method.hpp"
 #include "runtime/atomic.hpp"
@@ -38,9 +39,8 @@
 #include "runtime/sweeper.hpp"
 #include "runtime/thread.inline.hpp"
 #include "runtime/vm_operations.hpp"
-#include "trace/tracing.hpp"
 #include "utilities/events.hpp"
-#include "utilities/ticks.inline.hpp"
+#include "utilities/ticks.hpp"
 #include "utilities/xmlstream.hpp"
 
 PRAGMA_FORMAT_MUTE_WARNINGS_FOR_GCC
@@ -318,7 +318,26 @@ void NMethodSweeper::possibly_sweep() {
   }
 }
 
+static void post_sweep_event(EventSweepCodeCache* event,
+                             const Ticks& start,
+                             const Ticks& end,
+                             s4 traversals,
+                             int swept,
+                             int flushed,
+                             int zombified) {
+  assert(event != NULL, "invariant");
+  assert(event->should_commit(), "invariant");
+  event->set_starttime(start);
+  event->set_endtime(end);
+  event->set_sweepId(traversals);
+  event->set_sweptCount(swept);
+  event->set_flushedCount(flushed);
+  event->set_zombifiedCount(zombified);
+  event->commit();
+}
+
 void NMethodSweeper::sweep_code_cache() {
+  ResourceMark rm;
   Ticks sweep_start_counter = Ticks::now();
 
   _flushed_count                = 0;
@@ -393,15 +412,7 @@ void NMethodSweeper::sweep_code_cache() {
 
   EventSweepCodeCache event(UNTIMED);
   if (event.should_commit()) {
-    event.set_starttime(sweep_start_counter);
-    event.set_endtime(sweep_end_counter);
-    event.set_sweepIndex(_traversals);
-    event.set_sweepFractionIndex(NmethodSweepFraction - _sweep_fractions_left + 1);
-    event.set_sweptCount(swept_count);
-    event.set_flushedCount(_flushed_count);
-    event.set_markedCount(_marked_for_reclamation_count);
-    event.set_zombifiedCount(_zombified_count);
-    event.commit();
+    post_sweep_event(&event, sweep_start_counter, sweep_end_counter, (s4)_traversals, swept_count, _flushed_count, _zombified_count);
   }
 
 #ifdef ASSERT
@@ -538,10 +549,14 @@ int NMethodSweeper::process_nmethod(nmethod *nm) {
   } else if (nm->is_not_entrant()) {
     // If there are no current activations of this method on the
     // stack we can safely convert it to a zombie method
-    if (nm->can_not_entrant_be_converted()) {
+    if (nm->can_convert_to_zombie()) {
       if (PrintMethodFlushing && Verbose) {
         tty->print_cr("### Nmethod %3d/" PTR_FORMAT " (not entrant) being made zombie", nm->compile_id(), nm);
       }
+      // Clear ICStubs to prevent back patching stubs of zombie or unloaded
+      // nmethods during the next safepoint (see ICStub::finalize).
+      MutexLocker cl(CompiledIC_lock);
+      nm->clear_ic_stubs();
       // Code cache state change is tracked in make_zombie()
       nm->make_zombie();
       _zombified_count++;
@@ -567,6 +582,12 @@ int NMethodSweeper::process_nmethod(nmethod *nm) {
       release_nmethod(nm);
       _flushed_count++;
     } else {
+      {
+        // Clean ICs of unloaded nmethods as well because they may reference other
+        // unloaded nmethods that may be flushed earlier in the sweeper cycle.
+        MutexLocker cl(CompiledIC_lock);
+        nm->cleanup_inline_caches();
+      }
       // Code cache state change is tracked in make_zombie()
       nm->make_zombie();
       _zombified_count++;
@@ -616,6 +637,7 @@ int NMethodSweeper::process_nmethod(nmethod *nm) {
 // state of the code cache if it's requested.
 void NMethodSweeper::log_sweep(const char* msg, const char* format, ...) {
   if (PrintMethodFlushing) {
+    ResourceMark rm;
     stringStream s;
     // Dump code cache state into a buffer before locking the tty,
     // because log_state() will use locks causing lock conflicts.
@@ -633,6 +655,7 @@ void NMethodSweeper::log_sweep(const char* msg, const char* format, ...) {
   }
 
   if (LogCompilation && (xtty != NULL)) {
+    ResourceMark rm;
     stringStream s;
     // Dump code cache state into a buffer before locking the tty,
     // because log_state() will use locks causing lock conflicts.

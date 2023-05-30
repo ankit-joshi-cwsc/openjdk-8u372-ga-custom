@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2019, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -160,6 +160,7 @@ address os::Solaris::handler_end;    // end pc of thr_sighndlrinfo
 
 address os::Solaris::_main_stack_base = NULL;  // 4352906 workaround
 
+os::Solaris::pthread_setname_np_func_t os::Solaris::_pthread_setname_np = NULL;
 
 // "default" initializers for missing libc APIs
 extern "C" {
@@ -177,75 +178,6 @@ extern "C" {
 }
 
 static void unpackTime(timespec* absTime, bool isAbsolute, jlong time);
-
-// Thread Local Storage
-// This is common to all Solaris platforms so it is defined here,
-// in this common file.
-// The declarations are in the os_cpu threadLS*.hpp files.
-//
-// Static member initialization for TLS
-Thread* ThreadLocalStorage::_get_thread_cache[ThreadLocalStorage::_pd_cache_size] = {NULL};
-
-#ifndef PRODUCT
-#define _PCT(n,d)       ((100.0*(double)(n))/(double)(d))
-
-int ThreadLocalStorage::_tcacheHit = 0;
-int ThreadLocalStorage::_tcacheMiss = 0;
-
-void ThreadLocalStorage::print_statistics() {
-  int total = _tcacheMiss+_tcacheHit;
-  tty->print_cr("Thread cache hits %d misses %d total %d percent %f\n",
-                _tcacheHit, _tcacheMiss, total, _PCT(_tcacheHit, total));
-}
-#undef _PCT
-#endif // PRODUCT
-
-Thread* ThreadLocalStorage::get_thread_via_cache_slowly(uintptr_t raw_id,
-                                                        int index) {
-  Thread *thread = get_thread_slow();
-  if (thread != NULL) {
-    address sp = os::current_stack_pointer();
-    guarantee(thread->_stack_base == NULL ||
-              (sp <= thread->_stack_base &&
-                 sp >= thread->_stack_base - thread->_stack_size) ||
-               is_error_reported(),
-              "sp must be inside of selected thread stack");
-
-    thread->set_self_raw_id(raw_id);  // mark for quick retrieval
-    _get_thread_cache[ index ] = thread;
-  }
-  return thread;
-}
-
-
-static const double all_zero[ sizeof(Thread) / sizeof(double) + 1 ] = {0};
-#define NO_CACHED_THREAD ((Thread*)all_zero)
-
-void ThreadLocalStorage::pd_set_thread(Thread* thread) {
-
-  // Store the new value before updating the cache to prevent a race
-  // between get_thread_via_cache_slowly() and this store operation.
-  os::thread_local_storage_at_put(ThreadLocalStorage::thread_index(), thread);
-
-  // Update thread cache with new thread if setting on thread create,
-  // or NO_CACHED_THREAD (zeroed) thread if resetting thread on exit.
-  uintptr_t raw = pd_raw_thread_id();
-  int ix = pd_cache_index(raw);
-  _get_thread_cache[ix] = thread == NULL ? NO_CACHED_THREAD : thread;
-}
-
-void ThreadLocalStorage::pd_init() {
-  for (int i = 0; i < _pd_cache_size; i++) {
-    _get_thread_cache[i] = NO_CACHED_THREAD;
-  }
-}
-
-// Invalidate all the caches (happens to be the same as pd_init).
-void ThreadLocalStorage::pd_invalidate_all() { pd_init(); }
-
-#undef NO_CACHED_THREAD
-
-// END Thread Local Storage
 
 static inline size_t adjust_stack_size(address base, size_t size) {
   if ((ssize_t)size < 0) {
@@ -269,17 +201,21 @@ static inline stack_t get_stack_info() {
   return st;
 }
 
-address os::current_stack_base() {
+bool os::is_primordial_thread(void) {
   int r = thr_main() ;
   guarantee (r == 0 || r == 1, "CR6501650 or CR6493689") ;
-  bool is_primordial_thread = r;
+  return r == 1;
+}
+
+address os::current_stack_base() {
+  bool _is_primordial_thread = is_primordial_thread();
 
   // Workaround 4352906, avoid calls to thr_stksegment by
   // thr_main after the first one (it looks like we trash
   // some data, causing the value for ss_sp to be incorrect).
-  if (!is_primordial_thread || os::Solaris::_main_stack_base == NULL) {
+  if (!_is_primordial_thread || os::Solaris::_main_stack_base == NULL) {
     stack_t st = get_stack_info();
-    if (is_primordial_thread) {
+    if (_is_primordial_thread) {
       // cache initial value of stack base
       os::Solaris::_main_stack_base = (address)st.ss_sp;
     }
@@ -293,9 +229,7 @@ address os::current_stack_base() {
 size_t os::current_stack_size() {
   size_t size;
 
-  int r = thr_main() ;
-  guarantee (r == 0 || r == 1, "CR6501650 or CR6493689") ;
-  if(!r) {
+  if (!is_primordial_thread()) {
     size = get_stack_info().ss_size;
   } else {
     struct rlimit limits;
@@ -426,6 +360,16 @@ void os::Solaris::initialize_system_info() {
 }
 
 int os::active_processor_count() {
+  // User has overridden the number of active processors
+  if (ActiveProcessorCount > 0) {
+    if (Verbose) {
+      tty->print_cr("active_processor_count: "
+                    "active processor count set by user : %d",
+                     ActiveProcessorCount);
+    }
+    return ActiveProcessorCount;
+  }
+
   int online_cpus = sysconf(_SC_NPROCESSORS_ONLN);
   pid_t pid = getpid();
   psetid_t pset = PS_NONE;
@@ -576,8 +520,15 @@ static bool assign_distribution(processorid_t* id_array,
 }
 
 void os::set_native_thread_name(const char *name) {
-  // Not yet implemented.
-  return;
+  if (Solaris::_pthread_setname_np != NULL) {
+    // Only the first 31 bytes of 'name' are processed by pthread_setname_np
+    // but we explicitly copy into a size-limited buffer to avoid any
+    // possible overflow.
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%s", name);
+    buf[sizeof(buf) - 1] = '\0';
+    Solaris::_pthread_setname_np(pthread_self(), buf);
+  }
 }
 
 bool os::distribute_processes(uint length, uint* distribution) {
@@ -1346,9 +1297,7 @@ void _handle_uncaught_cxx_exception() {
 
 // First crack at OS-specific initialization, from inside the new thread.
 void os::initialize_thread(Thread* thr) {
-  int r = thr_main() ;
-  guarantee (r == 0 || r == 1, "CR6501650 or CR6493689") ;
-  if (r) {
+  if (is_primordial_thread()) {
     JavaThread* jt = (JavaThread *)thr;
     assert(jt != NULL,"Sanity check");
     size_t stack_size;
@@ -1472,64 +1421,6 @@ static pid_t _initial_pid = 0;
 int os::current_process_id() {
   return (int)(_initial_pid ? _initial_pid : getpid());
 }
-
-int os::allocate_thread_local_storage() {
-  // %%%       in Win32 this allocates a memory segment pointed to by a
-  //           register.  Dan Stein can implement a similar feature in
-  //           Solaris.  Alternatively, the VM can do the same thing
-  //           explicitly: malloc some storage and keep the pointer in a
-  //           register (which is part of the thread's context) (or keep it
-  //           in TLS).
-  // %%%       In current versions of Solaris, thr_self and TSD can
-  //           be accessed via short sequences of displaced indirections.
-  //           The value of thr_self is available as %g7(36).
-  //           The value of thr_getspecific(k) is stored in %g7(12)(4)(k*4-4),
-  //           assuming that the current thread already has a value bound to k.
-  //           It may be worth experimenting with such access patterns,
-  //           and later having the parameters formally exported from a Solaris
-  //           interface.  I think, however, that it will be faster to
-  //           maintain the invariant that %g2 always contains the
-  //           JavaThread in Java code, and have stubs simply
-  //           treat %g2 as a caller-save register, preserving it in a %lN.
-  thread_key_t tk;
-  if (thr_keycreate( &tk, NULL ) )
-    fatal(err_msg("os::allocate_thread_local_storage: thr_keycreate failed "
-                  "(%s)", strerror(errno)));
-  return int(tk);
-}
-
-void os::free_thread_local_storage(int index) {
-  // %%% don't think we need anything here
-  // if ( pthread_key_delete((pthread_key_t) tk) )
-  //   fatal("os::free_thread_local_storage: pthread_key_delete failed");
-}
-
-#define SMALLINT 32   // libthread allocate for tsd_common is a version specific
-                      // small number - point is NO swap space available
-void os::thread_local_storage_at_put(int index, void* value) {
-  // %%% this is used only in threadLocalStorage.cpp
-  if (thr_setspecific((thread_key_t)index, value)) {
-    if (errno == ENOMEM) {
-       vm_exit_out_of_memory(SMALLINT, OOM_MALLOC_ERROR,
-                             "thr_setspecific: out of swap space");
-    } else {
-      fatal(err_msg("os::thread_local_storage_at_put: thr_setspecific failed "
-                    "(%s)", strerror(errno)));
-    }
-  } else {
-      ThreadLocalStorage::set_thread_in_slot ((Thread *) value) ;
-  }
-}
-
-// This function could be called before TLS is initialized, for example, when
-// VM receives an async signal or when VM causes a fatal error during
-// initialization. Return NULL if thr_getspecific() fails.
-void* os::thread_local_storage_at(int index) {
-  // %%% this is used only in threadLocalStorage.cpp
-  void* r = NULL;
-  return thr_getspecific((thread_key_t)index, &r) != 0 ? NULL : r;
-}
-
 
 // gethrtime() should be monotonic according to the documentation,
 // but some virtualized platforms are known to break this guarantee.
@@ -1926,6 +1817,43 @@ void os::print_dll_info(outputStream * st) {
   dlclose(handle);
 }
 
+int os::get_loaded_modules_info(os::LoadedModulesCallbackFunc callback, void *param) {
+  Dl_info dli;
+  // Sanity check?
+  if (dladdr(CAST_FROM_FN_PTR(void *, os::get_loaded_modules_info), &dli) == 0 ||
+      dli.dli_fname == NULL) {
+    return 1;
+  }
+
+  void * handle = dlopen(dli.dli_fname, RTLD_LAZY);
+  if (handle == NULL) {
+    return 1;
+  }
+
+  Link_map *map;
+  dlinfo(handle, RTLD_DI_LINKMAP, &map);
+  if (map == NULL) {
+    dlclose(handle);
+    return 1;
+  }
+
+  while (map->l_prev != NULL) {
+    map = map->l_prev;
+  }
+
+  while (map != NULL) {
+    // Iterate through all map entries and call callback with fields of interest
+    if(callback(map->l_name, (address)map->l_addr, (address)0, param)) {
+      dlclose(handle);
+      return 1;
+    }
+    map = map->l_next;
+  }
+
+  dlclose(handle);
+  return 0;
+}
+
   // Loads .dll/.so and
   // in case of error it checks if .dll/.so was built for the
   // same architecture as Hotspot is running on
@@ -2168,7 +2096,9 @@ void os::print_memory_info(outputStream* st) {
   st->print(", physical " UINT64_FORMAT "k", os::physical_memory()>>10);
   st->print("(" UINT64_FORMAT "k free)", os::available_memory() >> 10);
   st->cr();
-  (void) check_addr0(st);
+  if (VMError::fatal_error_in_progress()) {
+     (void) check_addr0(st);
+  }
 }
 
 void os::print_siginfo(outputStream* st, void* siginfo) {
@@ -3364,6 +3294,15 @@ static int os_sleep(jlong millis, bool interruptible) {
 // Read calls from inside the vm need to perform state transitions
 size_t os::read(int fd, void *buf, unsigned int nBytes) {
   INTERRUPTIBLE_RETURN_INT_VM(::read(fd, buf, nBytes), os::Solaris::clear_interrupted);
+}
+
+size_t os::read_at(int fd, void *buf, unsigned int nBytes, jlong offset) {
+  size_t res;
+  JavaThread* thread = (JavaThread*)Thread::current();
+  assert(thread->thread_state() == _thread_in_vm, "Assumed _thread_in_vm");
+  ThreadBlockInVM tbiv(thread);
+  RESTARTABLE(::pread(fd, buf, (size_t) nBytes, offset), res);
+  return res;
 }
 
 size_t os::restartable_read(int fd, void *buf, unsigned int nBytes) {
@@ -5029,12 +4968,20 @@ void os::init(void) {
   // (Solaris only) this switches to calls that actually do locking.
   ThreadCritical::initialize();
 
+  // main_thread points to the thread that created/loaded the JVM.
   main_thread = thr_self();
 
   // Constant minimum stack size allowed. It must be at least
   // the minimum of what the OS supports (thr_min_stack()), and
   // enough to allow the thread to get to user bytecode execution.
   Solaris::min_stack_allowed = MAX2(thr_min_stack(), Solaris::min_stack_allowed);
+
+  // retrieve entry point for pthread_setname_np
+  void * handle = dlopen("libc.so.1", RTLD_LAZY);
+  if (handle != NULL) {
+    Solaris::_pthread_setname_np =
+        (Solaris::pthread_setname_np_func_t)dlsym(handle, "pthread_setname_np");
+  }
   // If the pagesize of the VM is greater than 8K determine the appropriate
   // number of initial guard pages.  The user can change this with the
   // command line arguments, if needed.
@@ -5262,9 +5209,7 @@ bool os::dir_is_empty(const char* path) {
 
   /* Scan the directory */
   bool result = true;
-  char buf[sizeof(struct dirent) + MAX_PATH];
-  struct dirent *dbuf = (struct dirent *) buf;
-  while (result && (ptr = readdir(dir, dbuf)) != NULL) {
+  while (result && (ptr = readdir(dir)) != NULL) {
     if (strcmp(ptr->d_name, ".") != 0 && strcmp(ptr->d_name, "..") != 0) {
       result = false;
     }
@@ -6267,7 +6212,7 @@ extern char** environ;
 // or -1 on failure (e.g. can't fork a new process).
 // Unlike system(), this function can be called from signal handler. It
 // doesn't block SIGINT et al.
-int os::fork_and_exec(char* cmd) {
+int os::fork_and_exec(char* cmd, bool use_vfork_if_available) {
   char * argv[4];
   argv[0] = (char *)"sh";
   argv[1] = (char *)"-c";

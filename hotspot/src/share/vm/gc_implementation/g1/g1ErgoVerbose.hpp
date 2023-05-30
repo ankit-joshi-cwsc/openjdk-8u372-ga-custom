@@ -121,15 +121,15 @@ public:
 // Single parameter format strings
 #define ergo_format_str(_name_)      ", " _name_ ": %s"
 #define ergo_format_region(_name_)   ", " _name_ ": %u regions"
-#define ergo_format_byte(_name_)     ", " _name_ ": "SIZE_FORMAT" bytes"
+#define ergo_format_byte(_name_)     ", " _name_ ": " SIZE_FORMAT " bytes"
 #define ergo_format_double(_name_)   ", " _name_ ": %1.2f"
 #define ergo_format_perc(_name_)     ", " _name_ ": %1.2f %%"
 #define ergo_format_ms(_name_)       ", " _name_ ": %1.2f ms"
-#define ergo_format_size(_name_)     ", " _name_ ": "SIZE_FORMAT
+#define ergo_format_size(_name_)     ", " _name_ ": " SIZE_FORMAT
 
 // Double parameter format strings
 #define ergo_format_byte_perc(_name_)                                   \
-                             ", " _name_ ": "SIZE_FORMAT" bytes (%1.2f %%)"
+                             ", " _name_ ": " SIZE_FORMAT " bytes (%1.2f %%)"
 
 // Generates the format string
 #define ergo_format(_extra_format_)                           \
@@ -160,40 +160,43 @@ public:
   } while (0)
 
 
-#define ergo_verbose(_tag_, _action_)                                   \
-  ergo_verbose_common(_tag_, _action_, "", 0, 0, 0, 0, 0, 0)
-
-#define ergo_verbose0(_tag_, _action_, _extra_format_)                  \
-  ergo_verbose_common(_tag_, _action_, _extra_format_, 0, 0, 0, 0, 0, 0)
-
-#define ergo_verbose1(_tag_, _action_, _extra_format_,                  \
-                      _arg0_)                                           \
-  ergo_verbose_common(_tag_, _action_, _extra_format_,                  \
-                      _arg0_, 0, 0, 0, 0, 0)
-
-#define ergo_verbose2(_tag_, _action_, _extra_format_,                  \
-                      _arg0_, _arg1_)                                   \
-  ergo_verbose_common(_tag_, _action_, _extra_format_,                  \
-                      _arg0_, _arg1_, 0, 0, 0, 0)
-
-#define ergo_verbose3(_tag_, _action_, _extra_format_,                  \
-                      _arg0_, _arg1_, _arg2_)                           \
-  ergo_verbose_common(_tag_, _action_, _extra_format_,                  \
-                      _arg0_, _arg1_, _arg2_, 0, 0, 0)
-
-#define ergo_verbose4(_tag_, _action_, _extra_format_,                  \
-                      _arg0_, _arg1_, _arg2_, _arg3_)                   \
-  ergo_verbose_common(_tag_, _action_, _extra_format_,                  \
-                      _arg0_, _arg1_, _arg2_, _arg3_, 0, 0)
-
-#define ergo_verbose5(_tag_, _action_, _extra_format_,                  \
-                      _arg0_, _arg1_, _arg2_, _arg3_, _arg4_)           \
-  ergo_verbose_common(_tag_, _action_, _extra_format_,                  \
-                      _arg0_, _arg1_, _arg2_, _arg3_, _arg4_, 0)
-
 #define ergo_verbose6(_tag_, _action_, _extra_format_,                  \
                       _arg0_, _arg1_, _arg2_, _arg3_, _arg4_, _arg5_)   \
   ergo_verbose_common(_tag_, _action_, _extra_format_,                  \
                       _arg0_, _arg1_, _arg2_, _arg3_, _arg4_, _arg5_)
+
+#define ergo_verbose5(_tag_, _action_, _extra_format_,                  \
+                      _arg0_, _arg1_, _arg2_, _arg3_, _arg4_)           \
+  ergo_verbose6(_tag_, _action_, _extra_format_ "%s",                   \
+                _arg0_, _arg1_, _arg2_, _arg3_, _arg4_, "")
+
+#define ergo_verbose4(_tag_, _action_, _extra_format_,                  \
+                      _arg0_, _arg1_, _arg2_, _arg3_)                   \
+  ergo_verbose5(_tag_, _action_, _extra_format_ "%s",                   \
+                _arg0_, _arg1_, _arg2_, _arg3_, "")
+
+#define ergo_verbose3(_tag_, _action_, _extra_format_,                  \
+                      _arg0_, _arg1_, _arg2_)                           \
+  ergo_verbose4(_tag_, _action_, _extra_format_ "%s",                   \
+                _arg0_, _arg1_, _arg2_, "")
+
+#define ergo_verbose2(_tag_, _action_, _extra_format_,                  \
+                      _arg0_, _arg1_)                                   \
+  ergo_verbose3(_tag_, _action_, _extra_format_ "%s",                   \
+                _arg0_, _arg1_, "")
+
+#define ergo_verbose1(_tag_, _action_, _extra_format_,                  \
+                      _arg0_)                                           \
+  ergo_verbose2(_tag_, _action_, _extra_format_ "%s",                   \
+                _arg0_, "")
+
+
+#define ergo_verbose0(_tag_, _action_, _extra_format_)                  \
+  ergo_verbose1(_tag_, _action_, _extra_format_ "%s",                   \
+                "")
+
+#define ergo_verbose(_tag_, _action_)                                   \
+  ergo_verbose0(_tag_, _action_, "")
+
 
 #endif // SHARE_VM_GC_IMPLEMENTATION_G1_G1ERGOVERBOSE_HPP

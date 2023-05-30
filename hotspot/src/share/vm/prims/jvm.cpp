@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2014, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,6 +24,7 @@
 
 #include "precompiled.hpp"
 #include "classfile/classLoader.hpp"
+#include "classfile/classLoaderData.inline.hpp"
 #include "classfile/classLoaderExt.hpp"
 #include "classfile/javaAssertions.hpp"
 #include "classfile/javaClasses.hpp"
@@ -36,7 +37,9 @@
 #include "classfile/vmSymbols.hpp"
 #include "gc_interface/collectedHeap.inline.hpp"
 #include "interpreter/bytecode.hpp"
+#include "jfr/jfrEvents.hpp"
 #include "memory/oopFactory.hpp"
+#include "memory/referenceType.hpp"
 #include "memory/universe.inline.hpp"
 #include "oops/fieldStreams.hpp"
 #include "oops/instanceKlass.hpp"
@@ -65,7 +68,6 @@
 #include "services/attachListener.hpp"
 #include "services/management.hpp"
 #include "services/threadService.hpp"
-#include "trace/tracing.hpp"
 #include "utilities/copy.hpp"
 #include "utilities/defaultStream.hpp"
 #include "utilities/dtrace.hpp"
@@ -89,7 +91,12 @@
 # include "jvm_bsd.h"
 #endif
 
+#if INCLUDE_ALL_GCS
+#include "gc_implementation/g1/g1SATBCardTableModRefBS.hpp"
+#endif // INCLUDE_ALL_GCS
+
 #include <errno.h>
+#include <jfr/recorder/jfrRecorder.hpp>
 
 #ifndef USDT2
 HS_DTRACE_PROBE_DECL1(hotspot, thread__sleep__begin, long long);
@@ -427,13 +434,13 @@ JVM_END
 
 extern volatile jint vm_created;
 
-JVM_ENTRY_NO_ENV(void, JVM_Exit(jint code))
-  if (vm_created != 0 && (code == 0)) {
-    // The VM is about to exit. We call back into Java to check whether finalizers should be run
-    Universe::run_finalizers_on_exit();
+JVM_ENTRY_NO_ENV(void, JVM_BeforeHalt())
+  JVMWrapper("JVM_BeforeHalt");
+  EventShutdown event;
+  if (event.should_commit()) {
+    event.set_reason("Shutdown requested from Java");
+    event.commit();
   }
-  before_exit(thread);
-  vm_exit(code);
 JVM_END
 
 
@@ -509,6 +516,17 @@ JVM_ENTRY_NO_ENV(jint, JVM_ActiveProcessorCount(void))
 JVM_END
 
 
+JVM_ENTRY_NO_ENV(jboolean, JVM_IsUseContainerSupport(void))
+  JVMWrapper("JVM_IsUseContainerSupport");
+#ifdef TARGET_OS_FAMILY_linux
+  if (UseContainerSupport) {
+      return JNI_TRUE;
+  }
+#endif
+  return JNI_FALSE;
+JVM_END
+
+
 
 // java.lang.Throwable //////////////////////////////////////////////////////
 
@@ -577,6 +595,28 @@ JVM_ENTRY(void, JVM_MonitorNotifyAll(JNIEnv* env, jobject handle))
 JVM_END
 
 
+static void fixup_cloned_reference(ReferenceType ref_type, oop src, oop clone) {
+  // If G1 is enabled then we need to register a non-null referent
+  // with the SATB barrier.
+#if INCLUDE_ALL_GCS
+  if (UseG1GC) {
+    oop referent = java_lang_ref_Reference::referent(clone);
+    if (referent != NULL) {
+      G1SATBCardTableModRefBS::enqueue(referent);
+    }
+  }
+#endif // INCLUDE_ALL_GCS
+  if ((java_lang_ref_Reference::next(clone) != NULL) ||
+      (java_lang_ref_Reference::queue(clone) == java_lang_ref_ReferenceQueue::ENQUEUED_queue())) {
+    // If the source has been enqueued or is being enqueued, don't
+    // register the clone with a queue.
+    java_lang_ref_Reference::set_queue(clone, java_lang_ref_ReferenceQueue::NULL_queue());
+  }
+  // discovered and next are list links; the clone is not in those lists.
+  java_lang_ref_Reference::set_discovered(clone, NULL);
+  java_lang_ref_Reference::set_next(clone, NULL);
+}
+
 JVM_ENTRY(jobject, JVM_Clone(JNIEnv* env, jobject handle))
   JVMWrapper("JVM_Clone");
   Handle obj(THREAD, JNIHandles::resolve_non_null(handle));
@@ -602,12 +642,17 @@ JVM_ENTRY(jobject, JVM_Clone(JNIEnv* env, jobject handle))
   }
 
   // Make shallow object copy
+  ReferenceType ref_type = REF_NONE;
   const int size = obj->size();
   oop new_obj_oop = NULL;
   if (obj->is_array()) {
     const int length = ((arrayOop)obj())->length();
     new_obj_oop = CollectedHeap::array_allocate(klass, size, length, CHECK_NULL);
   } else {
+    ref_type = InstanceKlass::cast(klass())->reference_type();
+    assert((ref_type == REF_NONE) ==
+           !klass->is_subclass_of(SystemDictionary::Reference_klass()),
+           "invariant");
     new_obj_oop = CollectedHeap::obj_allocate(klass, size, CHECK_NULL);
   }
 
@@ -631,6 +676,12 @@ JVM_ENTRY(jobject, JVM_Clone(JNIEnv* env, jobject handle))
   assert(bs->has_write_region_opt(), "Barrier set does not have write_region");
   bs->write_region(MemRegion((HeapWord*)new_obj_oop, size));
 
+  // If cloning a Reference, set Reference fields to a safe state.
+  // Fixup must be completed before any safepoint.
+  if (ref_type != REF_NONE) {
+    fixup_cloned_reference(ref_type, obj(), new_obj_oop);
+  }
+
   Handle new_obj(THREAD, new_obj_oop);
   // Special handling for MemberNames.  Since they contain Method* metadata, they
   // must be registered so that RedefineClasses can fix metadata contained in them.
@@ -643,7 +694,7 @@ JVM_ENTRY(jobject, JVM_Clone(JNIEnv* env, jobject handle))
       // This can safepoint and redefine method, so need both new_obj and method
       // in a handle, for two different reasons.  new_obj can move, method can be
       // deleted if nothing is using it on the stack.
-      m->method_holder()->add_member_name(new_obj());
+      m->method_holder()->add_member_name(new_obj(), false);
     }
   }
 
@@ -718,6 +769,79 @@ JVM_LEAF(char*, JVM_NativePath(char* path))
   JVMWrapper2("JVM_NativePath (%s)", path);
   return os::native_path(path);
 JVM_END
+
+
+// java.nio.Bits ///////////////////////////////////////////////////////////////
+
+#define MAX_OBJECT_SIZE \
+  ( arrayOopDesc::header_size(T_DOUBLE) * HeapWordSize \
+    + ((julong)max_jint * sizeof(double)) )
+
+static inline jlong field_offset_to_byte_offset(jlong field_offset) {
+  return field_offset;
+}
+
+static inline void assert_field_offset_sane(oop p, jlong field_offset) {
+#ifdef ASSERT
+  jlong byte_offset = field_offset_to_byte_offset(field_offset);
+
+  if (p != NULL) {
+    assert(byte_offset >= 0 && byte_offset <= (jlong)MAX_OBJECT_SIZE, "sane offset");
+    if (byte_offset == (jint)byte_offset) {
+      void* ptr_plus_disp = (address)p + byte_offset;
+      assert((void*)p->obj_field_addr<oop>((jint)byte_offset) == ptr_plus_disp,
+             "raw [ptr+disp] must be consistent with oop::field_base");
+    }
+    jlong p_size = HeapWordSize * (jlong)(p->size());
+    assert(byte_offset < p_size, err_msg("Unsafe access: offset " INT64_FORMAT
+                                         " > object's size " INT64_FORMAT,
+                                         (int64_t)byte_offset, (int64_t)p_size));
+  }
+#endif
+}
+
+static inline void* index_oop_from_field_offset_long(oop p, jlong field_offset) {
+  assert_field_offset_sane(p, field_offset);
+  jlong byte_offset = field_offset_to_byte_offset(field_offset);
+
+  if (sizeof(char*) == sizeof(jint)) {   // (this constant folds!)
+    return (address)p + (jint) byte_offset;
+  } else {
+    return (address)p +        byte_offset;
+  }
+}
+
+// This function is a leaf since if the source and destination are both in native memory
+// the copy may potentially be very large, and we don't want to disable GC if we can avoid it.
+// If either source or destination (or both) are on the heap, the function will enter VM using
+// JVM_ENTRY_FROM_LEAF
+JVM_LEAF(void, JVM_CopySwapMemory(JNIEnv *env, jobject srcObj, jlong srcOffset,
+                                  jobject dstObj, jlong dstOffset, jlong size,
+                                  jlong elemSize)) {
+
+  size_t sz = (size_t)size;
+  size_t esz = (size_t)elemSize;
+
+  if (srcObj == NULL && dstObj == NULL) {
+    // Both src & dst are in native memory
+    address src = (address)srcOffset;
+    address dst = (address)dstOffset;
+
+    Copy::conjoint_swap(src, dst, sz, esz);
+  } else {
+    // At least one of src/dst are on heap, transition to VM to access raw pointers
+
+    JVM_ENTRY_FROM_LEAF(env, void, JVM_CopySwapMemory) {
+      oop srcp = JNIHandles::resolve(srcObj);
+      oop dstp = JNIHandles::resolve(dstObj);
+
+      address src = (address)index_oop_from_field_offset_long(srcp, srcOffset);
+      address dst = (address)index_oop_from_field_offset_long(dstp, dstOffset);
+
+      Copy::conjoint_swap(src, dst, sz, esz);
+    } JVM_END
+  }
+} JVM_END
 
 
 // Misc. class handling ///////////////////////////////////////////////////////////
@@ -796,7 +920,7 @@ JVM_END
 JVM_ENTRY(jboolean, JVM_KnownToNotExist(JNIEnv *env, jobject loader, const char *classname))
   JVMWrapper("JVM_KnownToNotExist");
 #if INCLUDE_CDS
-  return ClassLoaderExt::known_to_not_exist(env, loader, classname, CHECK_(false));
+  return ClassLoaderExt::known_to_not_exist(env, loader, classname, THREAD);
 #else
   return false;
 #endif
@@ -806,7 +930,7 @@ JVM_END
 JVM_ENTRY(jobjectArray, JVM_GetResourceLookupCacheURLs(JNIEnv *env, jobject loader))
   JVMWrapper("JVM_GetResourceLookupCacheURLs");
 #if INCLUDE_CDS
-  return ClassLoaderExt::get_lookup_cache_urls(env, loader, CHECK_NULL);
+  return ClassLoaderExt::get_lookup_cache_urls(env, loader, THREAD);
 #else
   return NULL;
 #endif
@@ -816,7 +940,7 @@ JVM_END
 JVM_ENTRY(jintArray, JVM_GetResourceLookupCache(JNIEnv *env, jobject loader, const char *resource_name))
   JVMWrapper("JVM_GetResourceLookupCache");
 #if INCLUDE_CDS
-  return ClassLoaderExt::get_lookup_cache(env, loader, resource_name, CHECK_NULL);
+  return ClassLoaderExt::get_lookup_cache(env, loader, resource_name, THREAD);
 #else
   return NULL;
 #endif
@@ -1290,18 +1414,22 @@ static bool is_authorized(Handle context, instanceKlassHandle klass, TRAPS) {
 // and null permissions - which gives no permissions.
 oop create_dummy_access_control_context(TRAPS) {
   InstanceKlass* pd_klass = InstanceKlass::cast(SystemDictionary::ProtectionDomain_klass());
-  // new ProtectionDomain(null,null);
-  oop null_protection_domain = pd_klass->allocate_instance(CHECK_NULL);
-  Handle null_pd(THREAD, null_protection_domain);
+  Handle obj = pd_klass->allocate_instance_handle(CHECK_NULL);
+  // Call constructor ProtectionDomain(null, null);
+  JavaValue result(T_VOID);
+  JavaCalls::call_special(&result, obj, KlassHandle(THREAD, pd_klass),
+                          vmSymbols::object_initializer_name(),
+                          vmSymbols::codesource_permissioncollection_signature(),
+                          Handle(), Handle(), CHECK_NULL);
 
   // new ProtectionDomain[] {pd};
   objArrayOop context = oopFactory::new_objArray(pd_klass, 1, CHECK_NULL);
-  context->obj_at_put(0, null_pd());
+  context->obj_at_put(0, obj());
 
   // new AccessControlContext(new ProtectionDomain[] {pd})
   objArrayHandle h_context(THREAD, context);
-  oop result = java_security_AccessControlContext::create(h_context, false, Handle(), CHECK_NULL);
-  return result;
+  oop acc = java_security_AccessControlContext::create(h_context, false, Handle(), CHECK_NULL);
+  return acc;
 }
 
 JVM_ENTRY(jobject, JVM_DoPrivileged(JNIEnv *env, jclass cls, jobject action, jobject context, jboolean wrapException))
@@ -1342,7 +1470,7 @@ JVM_ENTRY(jobject, JVM_DoPrivileged(JNIEnv *env, jclass cls, jobject action, job
   Method* m_oop = object->klass()->uncached_lookup_method(
                                            vmSymbols::run_method_name(),
                                            vmSymbols::void_object_signature(),
-                                           Klass::normal);
+                                           Klass::find_overpass);
   methodHandle m (THREAD, m_oop);
   if (m.is_null() || !m->is_method() || !m()->is_public() || m()->is_static()) {
     THROW_MSG_0(vmSymbols::java_lang_InternalError(), "No run method");
@@ -1635,6 +1763,18 @@ Klass* InstanceKlass::compute_enclosing_class_impl(instanceKlassHandle k,
         found = (k() == inner_klass);
         if (found && ooff != 0) {
           ok = i_cp->klass_at(ooff, CHECK_NULL);
+          if (!ok->oop_is_instance()) {
+            // If the outer class is not an instance klass then it cannot have
+            // declared any inner classes.
+            ResourceMark rm(THREAD);
+            Exceptions::fthrow(
+              THREAD_AND_LOCATION,
+              vmSymbols::java_lang_IncompatibleClassChangeError(),
+              "%s and %s disagree on InnerClasses attribute",
+              ok->external_name(),
+              k->external_name());
+            return NULL;
+          }
           outer_klass = instanceKlassHandle(thread, ok);
           *inner_is_member = true;
         }
@@ -2626,7 +2766,6 @@ JVM_ENTRY(const char*, JVM_GetCPMethodNameUTF(JNIEnv *env, jclass cls, jint cp_i
   switch (cp->tag_at(cp_index).value()) {
     case JVM_CONSTANT_InterfaceMethodref:
     case JVM_CONSTANT_Methodref:
-    case JVM_CONSTANT_NameAndType:  // for invokedynamic
       return cp->uncached_name_ref_at(cp_index)->as_utf8();
     default:
       fatal("JVM_GetCPMethodNameUTF: illegal constant");
@@ -2644,7 +2783,6 @@ JVM_ENTRY(const char*, JVM_GetCPMethodSignatureUTF(JNIEnv *env, jclass cls, jint
   switch (cp->tag_at(cp_index).value()) {
     case JVM_CONSTANT_InterfaceMethodref:
     case JVM_CONSTANT_Methodref:
-    case JVM_CONSTANT_NameAndType:  // for invokedynamic
       return cp->uncached_signature_ref_at(cp_index)->as_utf8();
     default:
       fatal("JVM_GetCPMethodSignatureUTF: illegal constant");
@@ -2868,9 +3006,16 @@ extern "C" {
 
 ATTRIBUTE_PRINTF(3, 0)
 int jio_vsnprintf(char *str, size_t count, const char *fmt, va_list args) {
-  // see bug 4399518, 4417214
+  // Reject count values that are negative signed values converted to
+  // unsigned; see bug 4399518, 4417214
   if ((intptr_t)count <= 0) return -1;
-  return vsnprintf(str, count, fmt, args);
+
+  int result = os::vsnprintf(str, count, fmt, args);
+  if (result > 0 && (size_t)result >= count) {
+    result = -1;
+  }
+
+  return result;
 }
 
 ATTRIBUTE_PRINTF(3, 0)
@@ -3020,6 +3165,15 @@ JVM_ENTRY(void, JVM_StartThread(JNIEnv* env, jobject jthread))
               "unable to create new native thread");
   }
 
+#if INCLUDE_JFR
+  if (JfrRecorder::is_recording() && EventThreadStart::is_enabled() &&
+      EventThreadStart::is_stacktrace_enabled()) {
+    JfrThreadLocal* tl = native_thread->jfr_thread_local();
+    // skip Thread.start() and Thread.start0()
+    tl->set_cached_stack_trace_id(JfrStackTraceRepository::record(thread, 2));
+  }
+#endif
+
   Thread::start(native_thread);
 
 JVM_END
@@ -3155,6 +3309,12 @@ JVM_ENTRY(void, JVM_Yield(JNIEnv *env, jclass threadClass))
   }
 JVM_END
 
+static void post_thread_sleep_event(EventThreadSleep* event, jlong millis) {
+  assert(event != NULL, "invariant");
+  assert(event->should_commit(), "invariant");
+  event->set_time(millis);
+  event->commit();
+}
 
 JVM_ENTRY(void, JVM_Sleep(JNIEnv* env, jclass threadClass, jlong millis))
   JVMWrapper("JVM_Sleep");
@@ -3201,8 +3361,7 @@ JVM_ENTRY(void, JVM_Sleep(JNIEnv* env, jclass threadClass, jlong millis))
       // us while we were sleeping. We do not overwrite those.
       if (!HAS_PENDING_EXCEPTION) {
         if (event.should_commit()) {
-          event.set_time(millis);
-          event.commit();
+          post_thread_sleep_event(&event, millis);
         }
 #ifndef USDT2
         HS_DTRACE_PROBE1(hotspot, thread__sleep__end,1);
@@ -3218,8 +3377,7 @@ JVM_ENTRY(void, JVM_Sleep(JNIEnv* env, jclass threadClass, jlong millis))
     thread->osthread()->set_state(old_state);
   }
   if (event.should_commit()) {
-    event.set_time(millis);
-    event.commit();
+    post_thread_sleep_event(&event, millis);
   }
 #ifndef USDT2
   HS_DTRACE_PROBE1(hotspot, thread__sleep__end,0);
@@ -3641,15 +3799,16 @@ JVM_ENTRY(jobject, JVM_AllocateNewArray(JNIEnv *env, jobject obj, jclass currCla
 JVM_END
 
 
-// Return the first non-null class loader up the execution stack, or null
-// if only code from the null class loader is on the stack.
+// Returns first non-privileged class loader on the stack (excluding reflection
+// generated frames) or null if only classes loaded by the boot class loader
+// and extension class loader are found on the stack.
 
 JVM_ENTRY(jobject, JVM_LatestUserDefinedLoader(JNIEnv *env))
   for (vframeStream vfst(thread); !vfst.at_end(); vfst.next()) {
     // UseNewReflection
     vfst.skip_reflection_related_frames(); // Only needed for 1.4 reflection
     oop loader = vfst.method()->method_holder()->class_loader();
-    if (loader != NULL) {
+    if (loader != NULL && !SystemDictionary::is_ext_class_loader(loader)) {
       return JNIHandles::make_local(env, loader);
     }
   }
@@ -4221,7 +4380,7 @@ JVM_ENTRY(jlong,JVM_DTraceActivate(
     JVM_DTraceProvider* providers))
   JVMWrapper("JVM_DTraceActivate");
   return DTraceJSDT::activate(
-    version, module_name, providers_count, providers, CHECK_0);
+    version, module_name, providers_count, providers, THREAD);
 JVM_END
 
 JVM_ENTRY(jboolean,JVM_DTraceIsProbeEnabled(JNIEnv* env, jmethodID method))
