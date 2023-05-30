@@ -825,7 +825,7 @@ public class CPlatformWindow extends CFRetainedResource implements PlatformWindo
     @Override
     public void setOpacity(float opacity) {
         execute(ptr -> CWrapper.NSWindow.setAlphaValue(ptr, opacity));
-        nativeSetNSWindowIgnoresMouseEvents(getNSWindowPtr(), opacity < 0.7f);
+        execute(ptr -> nativeSetNSWindowIgnoresMouseEvents(ptr, opacity < 0.7f));
     }
 
     @Override
