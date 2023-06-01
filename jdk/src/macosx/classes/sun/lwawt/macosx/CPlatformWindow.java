@@ -933,6 +933,13 @@ public class CPlatformWindow extends CFRetainedResource implements PlatformWindo
         execute(ptr -> nativeRevalidateNSWindowShadow(ptr));
     }
 
+    // For use only within the ScreenConnect native code for macOS.
+    // For obtaining the window pointer within the JDK itself, use the
+    // execute() or the executeGet() method.
+    public long getNSWindowPtr() {
+        return executeGet(ptr -> ptr);
+    }
+
     // ----------------------------------------------------------------------
     //                          UTILITY METHODS
     // ----------------------------------------------------------------------
